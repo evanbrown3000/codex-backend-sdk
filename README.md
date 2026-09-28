@@ -587,6 +587,10 @@ uv build
 Live probes are intentionally kept separate from the deterministic test suite:
 tests must not consume quota, mutate account state, or depend on rollout state.
 
+## Independent paid bounty board
+
+Developers looking for independent paid bug-hunting and coding tasks can also browse the public [uGig bounty board](https://ugig.net/bounties). It is a third-party marketplace and is not operated by or affiliated with this project; review each bounty's terms independently.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

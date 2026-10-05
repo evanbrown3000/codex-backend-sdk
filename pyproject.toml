@@ -27,7 +27,10 @@ dependencies = [
     "websocket-client>=1.8",
 ]
 
-[project.scripts]\ncognilode-chatgpt-http = "codex_backend_sdk.cognilode_remote:main"\n\n[project.optional-dependencies]
+[project.scripts]
+cognilode-chatgpt-http = "codex_backend_sdk.cognilode_remote:main"
+
+[project.optional-dependencies]
 openai    = [
     "openai>=3.16.1; python_version >= '3.10'",
     "openai>=1.0,<3.0; python_version < '3.10'",

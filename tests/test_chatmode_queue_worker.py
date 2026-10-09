@@ -204,6 +204,61 @@ def test_decisionx_batch_waits_for_500_drive_verified_multi_year_sources(tmp_pat
     assert json.loads((tmp_path / 'scan.json').read_text())['spool'] == []
 
 
+def test_decisionx_ready_stock_enqueues_one_xhigh_chatmode_job_with_full_source_zip(tmp_path):
+    module = worker()
+    module.DX_HOME = tmp_path
+    source = {'provider': 'openai-codex', 'conversation_id': 'verified-1',
+              'events': [turn for n in range(8) for turn in (
+                  {'id': f'u{n}', 'role': 'user', 'content': f'Investigate source lineage number {n}.'},
+                  {'id': f'a{n}', 'role': 'assistant', 'content': f'I compared source lineage number {n}.'})]}
+    refs = [{'provider':'openai-codex','conversation_id': f'verified-{n}',
+             'prompt_sha256':'1'*64,'response_sha256':'2'*64,'source_at_utc':'2024-01-01T00:00:00+00:00'}
+            for n in range(1,501)]
+    class Bridge:
+        @staticmethod
+        def shared_stock_census(_post, minimum):
+            assert minimum == 500
+            return {'multi_year_ready':True,'distinct_complete':500,'span_days':800,
+                    'verified_source_refs':refs}
+        @staticmethod
+        def _complete_source(_index,_read):
+            return datetime.now(timezone.utc)
+    class Builder:
+        @staticmethod
+        def build_source_batches(_post, selected, *, output_root, bridge):
+            assert selected == refs[:1]
+            output_root.mkdir(parents=True)
+            path = output_root / 'batch-000.zip'
+            path.write_bytes(b'full source packet')
+            return [{'path':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}]
+        @staticmethod
+        def publish_private(packet):
+            return 's3://private-bucket/taskflow-artifacts/sha256/' + packet['sha256'] + '.zip'
+    queued=[]
+    class Sender:
+        @staticmethod
+        def operator_memory_post(body):
+            if body['operation']=='conversations':
+                return {'ok':True,'records':[{'provider':'openai-codex','conversation_id':'verified-1'}],
+                        'next_cursor':None}
+            if body['operation']=='read':
+                return {'ok':True,'conversation':source}
+            if body['operation']=='enqueue_decisionx_prompt':
+                queued.append(body)
+                return {'ok':True,'job':{'id':body['job_id'],'state':'queued'}}
+            raise AssertionError(body['operation'])
+    module._dx_bridge=lambda:Bridge()
+    module._dx_source_batch_builder=lambda:Builder()
+    module.sender=Sender()
+    module.decisionx_batch_pump()
+    assert len(queued)==1
+    assert queued[0]['provider']=='chatgpt.com'
+    assert queued[0]['reasoning_effort']=='xhigh'
+    assert queued[0]['model']=='gpt-5-6-thinking'
+    assert len(queued[0]['attachment_refs'])==2
+    assert all(row['mirrors'][0].startswith('s3://') for row in queued[0]['attachment_refs'])
+
+
 def test_decisionx_native_batch_verifies_source_and_binds_returned_compute(tmp_path):
     module = worker()
     module.DX_HOME = tmp_path

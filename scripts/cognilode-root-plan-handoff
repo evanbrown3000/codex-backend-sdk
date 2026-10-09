@@ -32,6 +32,7 @@ BEGIN = "COGNILODE_ROOT_TASKFLOW_PLAN_JSON_BEGIN"
 END = "COGNILODE_ROOT_TASKFLOW_PLAN_JSON_END"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 IDENT = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,79}$")
+ROSTER = HERE.parent / "config/employee-slack-roles.json"
 
 
 def _sha(value: str) -> str:
@@ -47,6 +48,42 @@ def _load(path: Path, name: str) -> Any:
     sys.modules[name] = module
     loader.exec_module(module)
     return module
+
+
+def installed_employee_roster() -> dict[str, dict[str, str]]:
+    """Current executable employee identities, read as facts rather than authority."""
+    directory = json.loads(ROSTER.read_text(encoding="utf-8"))
+    employees = directory.get("employees") or {}
+    if not isinstance(employees, dict) or not employees:
+        raise ValueError("installed Slack employee roster is empty")
+    result: dict[str, dict[str, str]] = {}
+    for name, row in employees.items():
+        if (not isinstance(name, str) or not isinstance(row, Mapping)
+            or not str(row.get("role") or "").strip()
+            or not str(row.get("slack_message") or "").startswith("https://")):
+            raise ValueError("installed Slack employee roster has invalid identity")
+        result[name] = {"role": str(row["role"]), "org": str(row.get("org") or ""),
+                        "slack_message": str(row["slack_message"])}
+    return result
+
+
+def executable_roster_snapshot(path: Path) -> dict[str, dict[str, str]]:
+    """Pin factual employee capacity to a queued root turn across retries."""
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        raw = (json.dumps(installed_employee_roster(), sort_keys=True) + "\n").encode()
+        temporary = path.with_name(path.name + f".{os.getpid()}.next")
+        temporary.write_bytes(raw)
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            pass
+        finally:
+            temporary.unlink(missing_ok=True)
+    roster = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(roster, dict) or not roster:
+        raise ValueError("root planning roster snapshot is invalid")
+    return roster
 
 
 def _complete_source(index: Mapping[str, Any], read: Mapping[str, Any]) -> datetime | None:
@@ -331,6 +368,10 @@ def validate_portfolio(plan: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
         raise ValueError("root portfolio needs 3-32 company/team/employee scopes")
     if not isinstance(steps, list) or not steps or len(steps) > 64:
         raise ValueError("root portfolio needs 1-64 steps")
+    roster = installed_employee_roster()
+    if (plan.get("research_employee") not in roster
+        or plan.get("external_employee") not in roster):
+        raise ValueError("root portfolio execution employees must be installed named workers")
     by_scope: dict[str, Mapping[str, Any]] = {}
     kinds = {"company": 0, "team": 0, "employee": 0}
     for scope in scopes:
@@ -345,6 +386,8 @@ def validate_portfolio(plan: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
         if kind == "employee" and (not str(scope.get("employee") or "").strip()
                                    or "\n" in str(scope["employee"])):
             raise ValueError("employee scope requires a named employee")
+        if kind == "employee" and scope["employee"] not in roster:
+            raise ValueError("employee scope is not an installed named worker")
         by_scope[sid] = scope
         kinds[kind] += 1
     if kinds["company"] != 1 or kinds["team"] < 1 or kinds["employee"] < 1:
@@ -367,6 +410,8 @@ def validate_portfolio(plan: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
         scope_id = str(step.get("scope_id") or "")
         if not IDENT.fullmatch(sid) or sid in steps_by_id or scope_id not in by_scope:
             raise ValueError("portfolio step has invalid id or scope")
+        if step.get("owner") not in roster:
+            raise ValueError("portfolio step owner is not an installed named worker")
         scope = by_scope[scope_id]
         if scope["kind"] == "employee" and step.get("owner") != scope["employee"]:
             raise ValueError("employee step owner must be the named employee")
@@ -438,11 +483,16 @@ def render_taskflow(plan: Mapping[str, Any], *, conversation_id: str, assistant_
         expected = str(probe.get("expected") or "") if isinstance(probe, Mapping) else ""
         argv = shlex.split(command)
         if (not isinstance(probe, Mapping) or "\n" in command or "\n" in expected
-            or len(argv) < 4
+            or len(argv) < 3
             or argv[:2] != ["/usr/bin/python3", "-I"]
             or not Path(argv[2]).is_absolute()
             or not expected.strip()):
             raise ValueError("independent effect probe command required")
+        if scopes:
+            expected_path = (Path.home() / ".local/share/cognilode/taskflow-probes"
+                             / project_id / (sid + ".py"))
+            if argv[2] != str(expected_path):
+                raise ValueError("root portfolio probe must use its dedicated step path")
         lines.extend(["    effect_probe_command: " + str(probe["command"]),
                       "    effect_probe_expected: " + expected.strip(), ""])
     if any(str(d) not in ids for item in steps for d in item.get("depends_on") or []):
@@ -641,6 +691,7 @@ def enqueue_outcome_gated_successor(
         sorted(plan.completed_effects.values())))
     directory = output_root / "root-outcomes"
     directory.mkdir(parents=True, exist_ok=True)
+    roster = executable_roster_snapshot(directory / (outcome_key + ".roster.json"))
     outcome_path = directory / (outcome_key + ".zip")
     if not outcome_path.exists():
         temporary = outcome_path.with_suffix(".zip.next")
@@ -677,6 +728,8 @@ def enqueue_outcome_gated_successor(
         "root outcome ZIP. The second ZIP contains the prior committed plan, verified external "
         "effects, and centrally read prior conversations. Revise company, named team, and named "
         "individual employee plans in light of these actual outcomes and changed circumstances. "
+        "Assign immediate work only to names in this currently installed factual employee roster: "
+        + json.dumps(roster, sort_keys=True) + ". "
         "Write plans, not prompts for other agents. End with exactly one "
         "COGNILODE_ROOT_TASKFLOW_PLAN_JSON_BEGIN / COGNILODE_ROOT_TASKFLOW_PLAN_JSON_END "
         "block using schema cognilode.root_taskflow_portfolio.v1 and a full report. Return one "

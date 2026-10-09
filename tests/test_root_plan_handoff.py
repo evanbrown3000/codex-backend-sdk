@@ -205,30 +205,33 @@ class RootPlanHandoffTests(unittest.TestCase):
             bridge.extract_plan(broken, central)
 
     def test_root_portfolio_preserves_company_team_employee_instruction_edges(self):
-        probe = {"command": "/usr/bin/python3 -I /tmp/probe.py evidence", "expected": "live"}
+        def probe(step_id):
+            return {"command": "/usr/bin/python3 -I " + str(
+                Path.home() / ".local/share/cognilode/taskflow-probes/living-company"
+                / (step_id + ".py")), "expected": "live"}
         plan = {"schema": "cognilode.root_taskflow_portfolio.v1",
                 "project_id": "living-company", "project_name": "Living Company",
                 "research_employee": "Nadia Brooks", "external_employee": "Rina Hale",
                 "scopes": [
                     {"id": "company", "kind": "company", "name": "Company", "parent": None},
                     {"id": "memory-team", "kind": "team", "name": "Memory Team", "parent": "company"},
-                    {"id": "eli", "kind": "employee", "name": "Eli's assignment",
-                     "parent": "memory-team", "employee": "Eli Rowan"}],
+                    {"id": "rina", "kind": "employee", "name": "Rina's assignment",
+                     "parent": "memory-team", "employee": "Rina Hale"}],
                 "steps": [
                     {"id": "C1", "scope_id": "company", "title": "Choose multi-year direction",
-                     "owner": "Root Manager", "role": "Company Manager", "depends_on": [],
-                     "instructions": ["Set a company direction from multi-year evidence."], "effect_probe": probe},
+                     "owner": "Elliot Mercer", "role": "Company Manager", "depends_on": [],
+                     "instructions": ["Set a company direction from multi-year evidence."], "effect_probe": probe("C1")},
                     {"id": "T1", "scope_id": "memory-team", "title": "Plan the memory team",
                      "owner": "Nadia Brooks", "role": "Team Manager", "depends_on": ["C1"],
-                     "instructions": ["Translate the company direction into a team plan."], "effect_probe": probe},
-                    {"id": "E1", "scope_id": "eli", "title": "Execute the memory task",
-                     "owner": "Eli Rowan", "role": "Memory Engineer", "depends_on": ["T1"],
-                     "instructions": ["Use the team's source analysis as instruction."], "effect_probe": probe}]}
+                     "instructions": ["Translate the company direction into a team plan."], "effect_probe": probe("T1")},
+                    {"id": "E1", "scope_id": "rina", "title": "Execute the memory task",
+                     "owner": "Rina Hale", "role": "Memory Engineer", "depends_on": ["T1"],
+                     "instructions": ["Use the team's source analysis as instruction."], "effect_probe": probe("E1")} ]}
         text = bridge.render_taskflow(plan, conversation_id="root-chat", assistant_sha256="e" * 64)
         parsed = bridge._load(bridge.CONTROLLER, "test_root_hierarchy_controller").parse_plan_text(text)
         self.assertEqual(parsed.by_id()["T1"].dependencies, ("C1",))
         self.assertEqual(parsed.by_id()["E1"].dependencies, ("T1",))
-        self.assertEqual(parsed.by_id()["E1"].fields["hierarchy_scope"], "eli")
+        self.assertEqual(parsed.by_id()["E1"].fields["hierarchy_scope"], "rina")
         self.assertIn("Set a company direction from multi-year evidence.", text)
         self.assertIn("Translate the company direction into a team plan.", text)
         self.assertIn("Use the team's source analysis as instruction.", text)
@@ -238,9 +241,13 @@ class RootPlanHandoffTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "parent-scope step"):
             bridge.render_taskflow(missing_manager_edge, conversation_id="root-chat", assistant_sha256="e" * 64)
         wrong_employee = json.loads(json.dumps(plan))
-        wrong_employee["steps"][2]["owner"] = "Other Employee"
+        wrong_employee["steps"][2]["owner"] = "Nadia Brooks"
         with self.assertRaisesRegex(ValueError, "named employee"):
             bridge.render_taskflow(wrong_employee, conversation_id="root-chat", assistant_sha256="e" * 64)
+        not_installed = json.loads(json.dumps(plan))
+        not_installed["steps"][0]["owner"] = "Invented Employee"
+        with self.assertRaisesRegex(ValueError, "not an installed named worker"):
+            bridge.render_taskflow(not_installed, conversation_id="root-chat", assistant_sha256="e" * 64)
         circular = json.loads(json.dumps(plan))
         circular["steps"][0]["depends_on"] = ["E1"]
         with self.assertRaisesRegex(ValueError, "dependency cycle"):

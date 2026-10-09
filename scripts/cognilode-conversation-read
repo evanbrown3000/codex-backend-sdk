@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""Read ChatGPT and Codex conversations through one CLI, with delta cursors.
+
+ChatGPT is read from the hosted conversation service. Codex is read from the
+verified Google Drive delta store. This is a logical reader, not another copy
+of either corpus. A cursor is bound to the exact visible prefix; a changed
+prefix asks the caller to refresh rather than silently omitting history.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+
+HERE = Path(__file__).resolve().parent
+DEFAULT_DRIVE_READER = Path(os.environ.get(
+    "COGNILODE_DRIVE_READBACK_SCRIPT",
+    "/home/evan/.local/share/cognilode/memory-stock-runtime/deploy/conversation-vacuum/canonical_full_readback.py",
+))
+
+
+def _load_script(path: Path, name: str) -> Any:
+    if not path.is_file():
+        raise FileNotFoundError(f"conversation reader unavailable: {path}")
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    loader.exec_module(module)
+    return module
+
+
+def read_conversation(provider: str, conversation_id: str, *, drive_reader: Path = DEFAULT_DRIVE_READER) -> dict:
+    if provider in {"chatgpt", "chatgpt.com"}:
+        sender = _load_script(HERE / "cognilode-b4pt0r-chatmode", "cognilode_conversation_sender_read")
+        result = sender.operator_memory_post({
+            "operation": "read", "provider": "chatgpt.com", "conversation_id": conversation_id,
+        })
+        conversation = result.get("conversation") or {}
+        if conversation.get("conversation_id") != conversation_id:
+            raise ValueError("hosted conversation identity mismatch")
+        raw = conversation.get("events")
+        if not isinstance(raw, list):
+            raise ValueError("hosted conversation has no event list")
+        events = []
+        for index, row in enumerate(raw):
+            if not isinstance(row, dict) or not isinstance(row.get("content"), str):
+                raise ValueError("incomplete hosted conversation event")
+            events.append({
+                "id": str(row.get("id") or index), "role": str(row.get("role") or "unknown"),
+                "text": row["content"], "occurred_at_utc": row.get("created_at") or "",
+            })
+        return {"provider": "chatgpt.com", "conversation_id": conversation_id,
+                "source": "hosted_conversation_service", "events": events,
+                # This store certifies the admitted prompt/response hashes, but
+                # does not claim that every provider-side branch was ingested.
+                "coverage": "admitted_events_only",
+                "all_provider_events_known": all(row.get("source_content_complete") is True
+                                                 for row in raw)}
+
+    if provider in {"codex", "openai-codex", "modified_codex", "modified-codex"}:
+        # The Drive reader shares the installed Memory Stock reconciliation
+        # package, which may not already be on this CLI's PYTHONPATH.
+        package_root = drive_reader.resolve().parents[2] / "src"
+        if package_root.is_dir() and str(package_root) not in sys.path:
+            sys.path.insert(0, str(package_root))
+        reader = _load_script(drive_reader, "cognilode_drive_conversation_read")
+        result = reader.read_full_conversation(provider, conversation_id)
+        if not result.get("complete_text") or result.get("conversation_id") != conversation_id:
+            raise ValueError("Drive conversation readback incomplete or identity mismatch")
+        events = [{
+            "id": str(row["event_id"]), "role": str(row["role"]),
+            "text": str(row["text"]), "occurred_at_utc": row.get("occurred_at_utc") or "",
+        } for row in result["reconciled_events"]]
+        return {"provider": provider, "conversation_id": conversation_id,
+                "source": "google_drive_normalized_deltas", "events": events,
+                "coverage": "all_admitted_drive_deltas",
+                "all_provider_events_known": False,
+                "remote_delta_objects": result["remote_delta_objects"]}
+
+    raise ValueError("unsupported conversation provider")
+
+
+def _prefix_digest(events: list[dict], count: int) -> str:
+    rows = [[e["id"], e["role"], hashlib.sha256(e["text"].encode("utf-8")).hexdigest()]
+            for e in events[:count]]
+    return hashlib.sha256(json.dumps(rows, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _cursor(provider: str, conversation_id: str, events: list[dict], count: int) -> str:
+    value = {"v": 1, "provider": provider, "conversation_id": conversation_id,
+             "count": count, "prefix_sha256": _prefix_digest(events, count)}
+    return base64.urlsafe_b64encode(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).decode().rstrip("=")
+
+
+def delta_view(result: dict, since: str = "") -> dict:
+    events = result["events"]
+    start = 0
+    if since:
+        try:
+            cursor = json.loads(base64.urlsafe_b64decode(since + "=" * (-len(since) % 4)))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ValueError("invalid conversation cursor") from exc
+        if (cursor.get("v") != 1 or cursor.get("provider") != result["provider"]
+                or cursor.get("conversation_id") != result["conversation_id"]):
+            raise ValueError("conversation cursor belongs to another conversation")
+        start = cursor.get("count")
+        if not isinstance(start, int) or start < 0 or start > len(events):
+            raise ValueError("conversation prefix changed; refresh full conversation")
+        if cursor.get("prefix_sha256") != _prefix_digest(events, start):
+            raise ValueError("conversation prefix changed; refresh full conversation")
+    return {**{k: v for k, v in result.items() if k != "events"},
+            "total_events": len(events), "new_events": len(events) - start,
+            "events": events[start:],
+            "next_cursor": _cursor(result["provider"], result["conversation_id"], events, len(events))}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--provider", required=True)
+    parser.add_argument("--conversation-id", required=True)
+    parser.add_argument("--since", default="", help="opaque next_cursor from a prior read")
+    parser.add_argument("--drive-reader", type=Path, default=DEFAULT_DRIVE_READER)
+    parser.add_argument("--format", choices=("json", "markdown"), default="json")
+    args = parser.parse_args()
+    result = delta_view(read_conversation(args.provider, args.conversation_id,
+                                          drive_reader=args.drive_reader), args.since)
+    if args.format == "json":
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(f"# {result['provider']}/{result['conversation_id']}\n")
+        print(f"Source: {result['source']} · new: {result['new_events']} / {result['total_events']}\n")
+        for event in result["events"]:
+            print(f"## {event['role']} {event['occurred_at_utc']}\n\n{event['text']}\n")
+        print(f"<!-- next_cursor: {result['next_cursor']} -->")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

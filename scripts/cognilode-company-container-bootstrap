@@ -7,6 +7,7 @@ container engine; company workers run under its restart policy.
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -80,6 +81,7 @@ def retired_units() -> list[str]:
 
 
 def main() -> int:
+    startup_time = time.time()
     repos = Path(os.environ.get("COMPANY_REPOS_ROOT", str(Path.home() / "Projects"))).resolve()
     runtime = Path(os.environ.get("COMPANY_RUNTIME_ROOT", str(Path.home() / ".local/share/cognilode/company-runtime"))).resolve()
     aws = Path(os.environ.get("AWS_AUTH_ROOT", str(Path.home() / ".aws"))).resolve()
@@ -106,11 +108,15 @@ def main() -> int:
     env = {**os.environ, "COMPANY_REPOS_ROOT": str(repos), "COMPANY_RUNTIME_ROOT": str(runtime),
            "AWS_AUTH_ROOT": str(aws), "COMPANY_UID": str(os.getuid()), "COMPANY_GID": str(os.getgid()),
            "COGNILODE_ENVIRONMENT_ID": os.environ.get("COGNILODE_ENVIRONMENT_ID", "evanpc-company-container")}
+    legacy_relay = Path(os.environ.get("COGNILODE_LEGACY_RELAY_ENV",
+                                   str(Path.home() / ".config/cognilode/evanpc-host-node.env")))
+    subprocess.run([sys.executable, str(ROOT / "scripts/cognilode-migrate-company-relay-custody")],
+                   env=env, check=True, timeout=120)
     project = "cognilode-company-runtime"
     image = env.get("COGNILODE_WORKSPACE_IMAGE", "cognilode-standard-workspace:2026-09-28")
     migrate_container_browser(project, image)
     for name in ("company_auth", "company_operator", "company_deploy_custody",
-                 "memory_data", "memory_drive_auth"):
+                 "memory_data", "memory_drive_auth", "company_relay_custody"):
         subprocess.run(["docker", "volume", "create", f"{project}_{name}"],
                        stdout=subprocess.DEVNULL, check=True, timeout=30)
     subprocess.run(["docker", "run", "--rm", "--user", "0",
@@ -118,9 +124,10 @@ def main() -> int:
                     "--volume", f"{project}_company_operator:/operator",
                     "--volume", f"{project}_company_deploy_custody:/deploy",
                     "--volume", f"{project}_memory_drive_auth:/memory-auth",
+                    "--volume", f"{project}_company_relay_custody:/relay",
                     image,
                     "chown", "-R", f"{os.getuid()}:{os.getgid()}",
-                    "/auth", "/operator", "/deploy", "/memory-auth"],
+                    "/auth", "/operator", "/deploy", "/memory-auth", "/relay"],
                    stdout=subprocess.DEVNULL, check=True, timeout=60)
     command = ["docker", "compose", "--project-name", project, "-f", str(COMPOSE), "up", "-d"]
     subprocess.run(command, env=env, check=True, timeout=180)
@@ -153,6 +160,20 @@ def main() -> int:
         time.sleep(3)
     else:
         raise RuntimeError("container credentials or HTTP gate were not ready; host workers retained")
+    if legacy_relay.is_file():
+        relay_deadline = time.monotonic() + 150
+        heartbeat = runtime / "shared/relay/heartbeat.json"
+        while time.monotonic() < relay_deadline:
+            try:
+                relay_state = json.loads(heartbeat.read_text(encoding="utf-8"))
+                ready = relay_state.get("ok") is True and heartbeat.stat().st_mtime >= startup_time
+            except (OSError, ValueError):
+                ready = False
+            if ready:
+                break
+            time.sleep(3)
+        else:
+            raise RuntimeError("container relay heartbeat was not ready; legacy company relay custody retained")
     for name in retired_units():
         run("systemctl", "--user", "disable", "--now", name, check=False)
     run("docker", "stop", "cognilode-http-gate-http-gate-1", check=False)
@@ -162,6 +183,8 @@ def main() -> int:
         old = runtime / name
         if old.is_dir() and not old.is_symlink():
             shutil.rmtree(old)
+    if legacy_relay.is_file():
+        legacy_relay.unlink()
     return 0
 
 

@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Seed AWS custody once from the former company host-node env file.
+
+The source is company-only relay state, never the personal Codex or browser
+profile. Existing AWS secrets always win; no credential is printed.
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+
+
+REGION = os.environ.get("AWS_REGION", "us-west-2")
+LEGACY = Path(os.environ.get("COGNILODE_LEGACY_RELAY_ENV",
+                             str(Path.home() / ".config/cognilode/evanpc-host-node.env")))
+NODE_SECRET = os.environ.get("COGNILODE_RELAY_NODE_SECRET_ID", "cognilode/remote-shell/node")
+TUNNEL_SECRET = os.environ.get("COGNILODE_RELAY_TUNNEL_SECRET_ID", "cognilode/remote-shell/tunnel-token")
+
+
+def secret_exists(secret_id: str) -> bool:
+    return subprocess.run(["aws", "secretsmanager", "describe-secret", "--region", REGION,
+                           "--secret-id", secret_id], capture_output=True, timeout=30).returncode == 0
+
+
+def source_fields() -> dict[str, str]:
+    result: dict[str, str] = {}
+    for line in LEGACY.read_text(encoding="utf-8").splitlines():
+        if not line or line.lstrip().startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key in {"COGNILODE_MCP_BEARER", "COGNILODE_NODE_ID", "COGNILODE_NODE_TOKEN",
+                   "COGNILODE_CENTRAL_URL", "TUNNEL_TOKEN"}:
+            result[key] = value.strip().strip('"').strip("'")
+    required = {"COGNILODE_MCP_BEARER", "COGNILODE_NODE_ID", "COGNILODE_NODE_TOKEN", "TUNNEL_TOKEN"}
+    if not required.issubset(result) or any(not result[key] for key in required):
+        raise RuntimeError("legacy company relay custody is incomplete")
+    return result
+
+
+def create(secret_id: str, value: str) -> None:
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        stream.write(value)
+        path = Path(stream.name)
+    try:
+        command = ["aws", "secretsmanager", "create-secret", "--region", REGION,
+                   "--name", secret_id, "--secret-string", "file://" + str(path)]
+        created = subprocess.run(command, capture_output=True, timeout=45)
+        if created.returncode and not secret_exists(secret_id):
+            raise RuntimeError(f"AWS custody creation failed for {secret_id}")
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def main() -> None:
+    missing = [name for name in (NODE_SECRET, TUNNEL_SECRET) if not secret_exists(name)]
+    if not missing:
+        return
+    if not LEGACY.is_file():
+        print("company relay custody pending in AWS Secrets Manager", flush=True)
+        return
+    values = source_fields()
+    node = {"schema": "cognilode.company-relay-node.v1",
+            "mcp_bearer": values["COGNILODE_MCP_BEARER"],
+            "node_id": values["COGNILODE_NODE_ID"],
+            "node_token": values["COGNILODE_NODE_TOKEN"],
+            "central_url": values.get("COGNILODE_CENTRAL_URL") or "https://cognilode.com"}
+    if NODE_SECRET in missing:
+        create(NODE_SECRET, json.dumps(node, separators=(",", ":")))
+    if TUNNEL_SECRET in missing:
+        create(TUNNEL_SECRET, values["TUNNEL_TOKEN"])
+    print("company relay custody present in AWS Secrets Manager", flush=True)
+
+
+if __name__ == "__main__":
+    main()

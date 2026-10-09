@@ -486,7 +486,8 @@ def render_taskflow(plan: Mapping[str, Any], *, conversation_id: str, assistant_
             or len(argv) < 3
             or argv[:2] != ["/usr/bin/python3", "-I"]
             or not Path(argv[2]).is_absolute()
-            or not expected.strip()):
+            or (not scopes and not expected.strip())
+            or (bool(scopes) and bool(expected.strip()))):
             raise ValueError("independent effect probe command required")
         if scopes:
             expected_path = (Path.home() / ".local/share/cognilode/taskflow-probes"

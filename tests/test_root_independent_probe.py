@@ -44,14 +44,19 @@ def packet_zip(path: Path, plan, step, script: bytes) -> None:
 def test_named_codex_probe_is_frozen_before_chatgpt_and_checked_after_install(tmp_path):
     with mock.patch.object(Path, "home", return_value=tmp_path):
         target = tmp_path / ".local/share/cognilode/taskflow-probes/root-work/A.py"
+        beneficiary = tmp_path / "beneficiary.txt"
+        beneficiary.write_bytes(b"actual deployed beneficiary state")
+        observed = json.dumps({"schema": "cognilode.effect_probe.v1", "verified": True,
+                               "evidence": [{"kind": "file", "ref": "file:" + str(beneficiary),
+                                             "sha256": sha256(beneficiary.read_bytes()).hexdigest()}]})
         plan = taskflow.parse_plan_text(
             "project Root Work\nid root-work\nroot_conversation_id chat-1\n"
             "[ ] A Beneficiary effect\n"
             "    owner: Eli Rowan\n    hierarchy_scope: employee-eli\n"
             f"    effect_probe_command: /usr/bin/python3 -I {target}\n"
-            "    effect_probe_expected: live\n")
+            "    effect_probe_expected: \n")
         step = plan.steps[0]
-        script = b"import json\nprint(json.dumps({'schema':'cognilode.effect_probe.v1','status':'live'}))\n"
+        script = ("import json\nprint(" + repr(observed) + ")\n").encode()
         research = tmp_path / "research.zip"
         work = tmp_path / "work.zip"
         packet_zip(research, plan, step, script)
@@ -79,6 +84,14 @@ def test_named_codex_probe_is_frozen_before_chatgpt_and_checked_after_install(tm
         target.parent.mkdir(parents=True)
         target.write_bytes(script)
         assert taskflow.verify_installed_independent_probe(work, plan, step) == frozen
+        assert taskflow.validate_probe_observation(step, observed) == "cognilode.effect_probe.v1 verified"
+        with mock.patch.object(taskflow.subprocess, "run",
+                               return_value=taskflow.subprocess.CompletedProcess([], 0, observed)) as run:
+            taskflow.verify_effect_probe(step)
+            assert run.call_args.args[0][:3] == ["/usr/bin/bwrap", "--die-with-parent", "--ro-bind"]
+        beneficiary.write_bytes(b"changed beneficiary state")
+        with pytest.raises(ValueError, match="changed since independent probe"):
+            taskflow.validate_probe_observation(step, observed)
         target.write_bytes(b"print('fake success')\n")
         with pytest.raises(ValueError, match="not installed"):
             taskflow.verify_installed_independent_probe(work, plan, step)
@@ -88,3 +101,22 @@ def test_named_codex_probe_is_frozen_before_chatgpt_and_checked_after_install(tm
         job["effect_evidence"][0]["ref"] = sha256(work.read_bytes()).hexdigest()
         with pytest.raises(ValueError, match="changed independent research probe"):
             taskflow.verified_chat_completion(job, plan)
+
+
+def test_root_https_beneficiary_is_refetched_and_private_hosts_are_rejected():
+    raw = b"actual public beneficiary payload"
+    row = {"kind": "https", "ref": "https://beneficiary.example/status",
+           "sha256": sha256(raw).hexdigest()}
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def geturl(self): return row["ref"]
+        def read(self, _limit): return raw
+    with mock.patch.object(taskflow.socket, "getaddrinfo",
+                           return_value=[(None, None, None, None, ("93.184.216.34", 443))]), \
+         mock.patch.object(taskflow.urllib.request, "urlopen", return_value=Response()) as opened:
+        taskflow.verify_root_beneficiary_ref(row)
+        assert opened.call_args.args[0].get_method() == "GET"
+    bad = dict(row, ref="https://localhost/private")
+    with pytest.raises(ValueError, match="invalid"):
+        taskflow.verify_root_beneficiary_ref(bad)

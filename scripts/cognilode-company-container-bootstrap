@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -84,6 +85,21 @@ def main() -> int:
     aws = Path(os.environ.get("AWS_AUTH_ROOT", str(Path.home() / ".aws"))).resolve()
     for name in ("worker", "shared"):
         (runtime / name).mkdir(parents=True, exist_ok=True)
+    # The installed host unit is only a stable launch point. After source-sync
+    # has produced a newer pinned Git checkout, run its bootstrap on later
+    # starts instead of accumulating host-specific deployment edits.
+    if os.environ.get("COGNILODE_BOOTSTRAP_FROM_SYNC") != "1":
+        synced = runtime / "shared/source/current/codex-backend-sdk"
+        candidate = synced / "scripts/cognilode-company-container-bootstrap"
+        if candidate.is_file() and (synced / ".git").exists():
+            current = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+                                     capture_output=True, text=True, check=False).stdout.strip()
+            newer = subprocess.run(["git", "-C", str(synced), "merge-base", "--is-ancestor",
+                                    current, "HEAD"], stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, check=False).returncode == 0
+            if current and newer and candidate.resolve() != Path(__file__).resolve():
+                os.execve(sys.executable, [sys.executable, str(candidate)],
+                          {**os.environ, "COGNILODE_BOOTSTRAP_FROM_SYNC": "1"})
     migrate_previous_state(Path(os.environ.get("COMPANY_LEGACY_DATA_ROOT", str(Path.home() / ".local/share/cognilode"))), runtime)
     env = {**os.environ, "COMPANY_REPOS_ROOT": str(repos), "COMPANY_RUNTIME_ROOT": str(runtime),
            "AWS_AUTH_ROOT": str(aws), "COMPANY_UID": str(os.getuid()), "COMPANY_GID": str(os.getgid()),

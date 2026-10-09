@@ -568,6 +568,17 @@ def stable_user_message_id(job_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, "cognilode-chatmode-queue:" + job_id))
 
 
+def sender_command(job: dict, prompt_path: Path, attachments: list[Path]) -> list[str]:
+    command = [sys.executable, str(SENDER_PATH), "send", "--prompt-file", str(prompt_path),
+               "--queue-job-id", str(job["id"]),
+               "--model", str(job.get("model") or "gpt-5-6-thinking"),
+               "--effort", str(job.get("reasoning_effort") or "xhigh"),
+               "--timeout", "1800"]
+    for path in attachments:
+        command.extend(["--attach", str(path)])
+    return command
+
+
 def send_custody(job: dict) -> dict:
     return sender.operator_memory_post({"operation": "get_chatmode_send_custody", "job_id": job["id"]})
 
@@ -614,11 +625,7 @@ def execute(job: dict, device_id: str = DEVICE_ID) -> None:
         if not intent.get("ok"):
             event("send_intent_rejected", job_id=job_id, error=intent.get("error"))
             return
-        command = [sys.executable, str(SENDER_PATH), "send", "--prompt-file", str(prompt_path),
-                   "--queue-job-id", job_id, "--effort", str(job.get("reasoning_effort") or "xhigh"),
-                   "--timeout", "1800"]
-        for path in attachments:
-            command.extend(["--attach", str(path)])
+        command = sender_command(job, prompt_path, attachments)
         response = subprocess.run(command, text=True, capture_output=True, timeout=2100, check=False)
         value = json.loads(response.stdout) if response.stdout.strip().startswith("{") else {}
         if value:

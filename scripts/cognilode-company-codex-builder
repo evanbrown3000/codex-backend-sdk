@@ -16,7 +16,8 @@ RELEASE = Path(os.environ.get("COGNILODE_CODEX_INSTALL_ROOT", "/codex"))
 def run_once() -> None:
     if not (SOURCE / ".git").is_dir():
         return
-    actual = subprocess.run(["git", "-c", f"safe.directory={SOURCE}", "-C", str(SOURCE),
+    real_source = SOURCE.resolve()
+    actual = subprocess.run(["git", "-c", f"safe.directory={real_source}", "-C", str(SOURCE),
                              "rev-parse", "HEAD"], capture_output=True, text=True, timeout=30)
     if actual.returncode or actual.stdout.strip() != PIN:
         return
@@ -28,6 +29,12 @@ def run_once() -> None:
     env = os.environ.copy()
     env["COGNILODE_CODEX_SOURCE"] = str(SOURCE)
     env["COGNILODE_CODEX_INSTALL_ROOT"] = str(RELEASE)
+    # The source-sync checkout belongs to the non-root company UID while this
+    # isolated builder runs as root. Git canonicalizes the symlink before its
+    # ownership check; grant only the resolved pinned checkout as safe.
+    env["GIT_CONFIG_COUNT"] = "1"
+    env["GIT_CONFIG_KEY_0"] = "safe.directory"
+    env["GIT_CONFIG_VALUE_0"] = str(real_source)
     subprocess.run([str(SOURCE / "cognilode/host-client/build-install-container-codex")],
                    env=env, check=True, timeout=7200)
     print(f"Codex release ready {PIN}", flush=True)

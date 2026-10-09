@@ -16,8 +16,9 @@ PLAN_ROOT = Path(os.environ.get("COGNILODE_TASKFLOW_PLAN_ROOT", "/runtime/worker
 def run_once() -> None:
     runtime = SOURCE / "modified-codex-runtime" / "src"
     taskflow = SOURCE / "taskflow-orchestration-history" / "src"
-    if not runtime.is_dir() or not taskflow.is_dir():
-        print("TaskFlow runtime waiting for company source sync", flush=True)
+    codex = Path(os.environ.get("COGNILODE_CODEX_BIN", "/codex/bin/codex"))
+    if not runtime.is_dir() or not taskflow.is_dir() or not codex.is_file():
+        print("TaskFlow runtime waiting for company source and Codex release", flush=True)
         return
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join((str(runtime), str(taskflow), env.get("PYTHONPATH", "")))

@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""Keep the company container's selected source checkouts current from GitHub.
+"""Keep real Git checkouts current inside the company source volume.
 
-The source root is a Docker-mounted volume. A revision is made visible only
-after its archive is fully extracted, so workers never run a partial update.
+Workers need `.git` for external effects, so a tarball is insufficient. A
+revision is made visible only after its complete checkout is ready.
 """
 from __future__ import annotations
 
-import io
 import json
 import os
-from pathlib import Path, PurePosixPath
-import tarfile
+from pathlib import Path
 import tempfile
 import time
 from urllib.request import Request, urlopen
@@ -19,8 +17,10 @@ import subprocess
 
 ROOT = Path(os.environ.get("COGNILODE_COMPANY_SOURCE_ROOT", "/runtime/source"))
 REPOS = ("modified-codex-runtime", "taskflow-orchestration-history",
-         "research-plan-execute", "memory-stock-canonical", "cognilode-cloudflare-pages-site")
+         "research-plan-execute", "memory-stock-canonical", "cognilode-cloudflare-pages-site",
+         "codex-backend-sdk", "cognilode-codex")
 SECRET = "/cognilode/agent-credentials/github/owner"
+CODEX_PIN = os.environ.get("COGNILODE_CODEX_SOURCE_COMMIT", "")
 
 
 def credential() -> str:
@@ -42,33 +42,29 @@ def request(path: str, token: str) -> bytes:
         return response.read(150_000_001)
 
 
-def install(repo: str, sha: str, archive: bytes) -> None:
-    if len(archive) > 150_000_000:
-        raise RuntimeError(f"source archive too large: {repo}")
-    release = ROOT / "releases" / repo / sha
-    if not release.is_dir():
+def install(repo: str, sha: str, token: str) -> None:
+    release = ROOT / "checkouts" / repo / sha
+    if not (release / ".git").is_dir():
         release.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix=f"{repo}-", dir=release.parent) as temporary:
-            stage = Path(temporary)
-            with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as bundle:
-                for item in bundle:
-                    parts = PurePosixPath(item.name).parts
-                    if len(parts) < 2 or item.issym() or item.islnk() or not (item.isfile() or item.isdir()):
-                        continue
-                    relative = PurePosixPath(*parts[1:])
-                    if ".." in relative.parts or relative.is_absolute():
-                        raise RuntimeError("unsafe GitHub archive path")
-                    target = stage.joinpath(*relative.parts)
-                    if item.isdir():
-                        target.mkdir(parents=True, exist_ok=True)
-                        continue
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    source = bundle.extractfile(item)
-                    if source is None:
-                        continue
-                    with target.open("wb") as output:
-                        while chunk := source.read(1024 * 1024):
-                            output.write(chunk)
+            stage = Path(temporary) / "checkout"
+            askpass = Path(temporary) / "askpass"
+            askpass.write_text("#!/bin/sh\ncase \"$1\" in *Username*) printf 'x-access-token' ;; *Password*) printf '%s' \"$COGNILODE_GITHUB_TOKEN\" ;; esac\n")
+            askpass.chmod(0o700)
+            env = os.environ.copy()
+            env.update({"GIT_ASKPASS": str(askpass), "GIT_TERMINAL_PROMPT": "0",
+                        "COGNILODE_GITHUB_TOKEN": token})
+            url = f"https://github.com/evanbrown3000/{repo}.git"
+            for command in (["git", "clone", "--filter=blob:none", "--no-checkout", url, str(stage)],
+                            ["git", "-C", str(stage), "fetch", "--depth", "1", "origin", sha],
+                            ["git", "-C", str(stage), "checkout", "--detach", sha]):
+                result = subprocess.run(command, env=env, capture_output=True, timeout=600)
+                if result.returncode:
+                    raise RuntimeError(f"Git checkout unavailable for {repo}")
+            actual = subprocess.run(["git", "-C", str(stage), "rev-parse", "HEAD"],
+                                    capture_output=True, text=True, check=True, timeout=30).stdout.strip()
+            if actual != sha:
+                raise RuntimeError(f"Git checkout identity mismatch for {repo}")
             stage.rename(release)
     current = ROOT / "current"
     current.mkdir(parents=True, exist_ok=True)
@@ -84,14 +80,16 @@ def sync_once() -> None:
     token = credential()
     for repo in REPOS:
         try:
-            metadata = json.loads(request(f"/repos/evanbrown3000/{repo}/commits/main", token))
+            ref = CODEX_PIN if repo == "cognilode-codex" and CODEX_PIN else "main"
+            metadata = json.loads(request(f"/repos/evanbrown3000/{repo}/commits/{ref}", token))
             sha = str(metadata.get("sha") or "")
             if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
                 raise RuntimeError("GitHub returned invalid revision")
             current = ROOT / "current" / repo
-            if current.is_symlink() and current.resolve().name == sha:
+            if (current.is_symlink() and current.resolve().name == sha and
+                    (current.resolve() / ".git").is_dir()):
                 continue
-            install(repo, sha, request(f"/repos/evanbrown3000/{repo}/tarball/{sha}", token))
+            install(repo, sha, token)
             print(f"source ready {repo} {sha[:12]}", flush=True)
         except Exception as error:
             print(f"source pending {repo}: {type(error).__name__}: {error}", flush=True)

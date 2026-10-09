@@ -130,10 +130,35 @@ services:
       HOME: /home/worker
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
       COGNILODE_SOURCE_SYNC_INTERVAL: "300"
+      COGNILODE_CODEX_SOURCE_COMMIT: 852bc2da4479b353913c894a9ecfc65a9d8764c8
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+
+  codex-builder:
+    image: rust:1.95-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1
+    restart: unless-stopped
+    network_mode: bridge
+    user: "0:0"
+    working_dir: /company/codex-backend-sdk
+    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-company-codex-builder]
+    environment:
+      HOME: /root
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+      COGNILODE_CODEX_SOURCE_COMMIT: 852bc2da4479b353913c894a9ecfc65a9d8764c8
+      COGNILODE_CODEX_INSTALL_ROOT: /codex
+      CARGO_TARGET_DIR: /cargo-target
+      CARGO_BUILD_JOBS: "4"
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - company_codex_release:/codex
+      - company_codex_target:/cargo-target
+      - company_cargo_registry:/usr/local/cargo/registry
+      - company_cargo_git:/usr/local/cargo/git
+    depends_on:
+      - source-sync
 
   site-publisher:
     image: node:22-bookworm
@@ -172,18 +197,46 @@ services:
       COGNILODE_LLM_GOVERNANCE_ROOT: /runtime/worker/llm-governance
       COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
       COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
-      COGNILODE_CODEX_BIN: /runtime/worker/bin/codex
+      COGNILODE_CODEX_BIN: /codex/bin/codex
+      COGNILODE_CENTRAL_ROLLOUT_HELPER: /codex/bin/central-rollouts
+      CODEX_HOME: /home/worker/.codex
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
+      - company_auth:/home/worker/.codex
       - company_operator:/home/worker/.config/cognilode:ro
+      - company_codex_release:/codex:ro
       - ${COMPANY_RUNTIME_ROOT}/worker:/runtime/worker
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
     depends_on:
       - source-sync
+      - codex-builder
+      - credential-sync
+
+  codex-rollout-sync:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    entrypoint: [python3, /codex/bin/central-rollouts, daemon]
+    environment:
+      HOME: /home/worker
+      CODEX_HOME: /home/worker/.codex
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
+    volumes:
+      - company_codex_release:/codex:ro
+      - company_auth:/home/worker/.codex
+      - company_operator:/home/worker/.config/cognilode:ro
+    depends_on:
+      - codex-builder
+      - credential-sync
 
 volumes:
   company_auth:
   company_browser:
   company_operator:
   company_deploy_custody:
+  company_codex_release:
+  company_codex_target:
+  company_cargo_registry:
+  company_cargo_git:

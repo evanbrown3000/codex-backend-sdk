@@ -64,6 +64,52 @@ def test_unattended_tick_does_not_enqueue_or_scan_stock_below_descriptor_gate(tm
     assert [body["operation"] for body in calls] == ["decisionx_candidates"]
 
 
+@pytest.mark.parametrize("root", [
+    {"phase": "complete", "root_job_id": "new-root"},
+    {"phase": "await_root", "root_job_id": "new-root"},
+])
+def test_new_root_does_not_orphan_older_uninstalled_successor(tmp_path, root):
+    root_state = tmp_path / "root.json"
+    root_state.write_text(json.dumps(root))
+    output = tmp_path / "successor"
+    output.mkdir()
+    (output / "state.json").write_text(json.dumps({
+        "target_job_id": "old-root", "job_id": "decisionx-successor-old"}))
+    calls = []
+
+    def post(body):
+        calls.append(body)
+        assert body == {"operation": "get_job", "job_id": "decisionx-successor-old"}
+        return {"ok": True, "job": {"id": "decisionx-successor-old", "state": "queued"}}
+
+    result = upstream.tick(post, output_root=output, root_state_path=root_state,
+                           installed=lambda _job_id: False)
+    assert result["phase"] == "already_queued"
+    assert result["target_job_id"] == "old-root"
+    assert result["job_id"] == "decisionx-successor-old"
+    assert len(calls) == 1
+
+
+def test_new_root_waits_only_until_previous_handoff_is_active(tmp_path):
+    root_state = tmp_path / "root.json"
+    root_state.write_text(json.dumps({"phase": "complete", "root_job_id": "new-root"}))
+    output = tmp_path / "successor"
+    output.mkdir()
+    (output / "state.json").write_text(json.dumps({
+        "target_job_id": "old-root", "job_id": "decisionx-successor-old"}))
+    calls = []
+
+    def post(body):
+        calls.append(body)
+        assert body["operation"] == "decisionx_candidates"
+        return {"ok": True, "ready": False, "distinct_sources": 499}
+
+    result = upstream.tick(post, output_root=output, root_state_path=root_state,
+                           installed=lambda job_id: job_id == "decisionx-successor-old")
+    assert result["reason"] == "shared_descriptor_index_below_500"
+    assert len(calls) == 1
+
+
 def test_native_reconstructs_exact_full_sources_and_rejects_tampering(tmp_path):
     target_id = "root-job-1"
     target = {"provider": "chatgpt.com", "conversation_id": "target-c",

@@ -136,7 +136,13 @@ def _source_fidelity(capture: Mapping[str, Any]) -> str:
     if kind == "historical_s3_rendered" or "unverified_origin" in provenance:
         return "unverified_origin_rendered_text"
     if kind == "chatgpt_privacy_export_zip_http_range":
-        return "authenticated_export_text_projection"
+        if (capture.get("source_text_projection_scope") ==
+                "standard_message_text_excluding_thoughts"
+            and isinstance(capture.get("source_omitted_thought_count"), int)
+            and capture["source_omitted_thought_count"] >= 0
+            and HEX64.fullmatch(str(capture.get("source_omitted_thought_sha256") or ""))):
+            return "authenticated_export_standard_message_text_projection_thoughts_and_media_omitted"
+        return "authenticated_export_legacy_text_projection_scope_unknown"
     if kind == "codex_rollout":
         return "codex_visible_rollout_text"
     return "drive_verified_text_projection"

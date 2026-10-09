@@ -74,6 +74,40 @@ class FakeQueue:
         raise AssertionError(body)
 
 class Tests(unittest.TestCase):
+    def test_required_nested_dx2_packet_preflight(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / 'source.zip'
+            content = b'# User\nhello\n# Assistant\nworld\n'
+            entry = 'conversations/00000000-0000-4000-8000-000000000001.md'
+            row = {'conversation_id':'00000000-0000-4000-8000-000000000001',
+                   'entry':entry, 'entry_sha256':hashlib.sha256(content).hexdigest()}
+            with zipfile.ZipFile(source,'w',zipfile.ZIP_DEFLATED) as z:
+                z.writestr(entry,content)
+                z.writestr('MANIFEST.json',json.dumps({'schema':'memory_stock.dx2_s3_source_packet.v1',
+                    'selected_count':1,'entries':[row]}))
+            source_sha=hashlib.sha256(source.read_bytes()).hexdigest()
+            step=c.Step('DX-2','test',False,0,fields={
+                'required_nested_source_packet':str(source),
+                'required_nested_source_sha256':source_sha,
+                'required_nested_source_minimum':'1'})
+            outer=root/'research.zip'
+            manifest_zip(outer,'a'*64,{'source/source.zip':source.read_bytes(),'REPORT.md':b'ok'})
+            c.verify_manifest_zip(outer,expected_plan_sha256='a'*64)
+            c.verify_required_nested_source(outer,step)
+            missing=root/'missing.zip'
+            manifest_zip(missing,'a'*64,{'REPORT.md':b'ok'})
+            with self.assertRaisesRegex(ValueError,'exactly one'):
+                c.verify_required_nested_source(missing,step)
+            corrupted=root/'corrupt.zip'
+            manifest_zip(corrupted,'a'*64,{'source/source.zip':b'changed'})
+            with self.assertRaisesRegex(ValueError,'SHA-256 mismatch'):
+                c.verify_required_nested_source(corrupted,step)
+            too_few=c.Step('DX-2','test',False,0,fields={**step.fields,
+                'required_nested_source_minimum':'500'})
+            with self.assertRaisesRegex(ValueError,'too few'):
+                c.verify_required_nested_source(outer,too_few)
+
     def test_verified_checkoff_preserves_parallel_sibling_dependency_and_restart(self):
         with tempfile.TemporaryDirectory() as td:
             repo=Path(td)

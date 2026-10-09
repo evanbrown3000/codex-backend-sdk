@@ -19,6 +19,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import argparse
 import fcntl
 import hashlib
+import io
 import importlib.machinery
 import importlib.util
 import json
@@ -350,6 +351,53 @@ def verify_manifest_zip(path: Path, *, expected_plan_sha256: str | None = None, 
         "manifest_name": manifest_name, "manifest_sha256": sha256_bytes(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()),
         "member_count": len(names), "instructions_sha256": instructions_sha,
     }
+
+
+def verify_required_nested_source(research_zip: Path, step: Step) -> None:
+    """Fail closed before Chat-mode enqueue when a step requires a source ZIP."""
+    source_name = step.fields.get("required_nested_source_packet")
+    if not source_name:
+        return
+    source = Path(source_name)
+    expected = step.fields.get("required_nested_source_sha256", "").lower()
+    minimum_text = step.fields.get("required_nested_source_minimum", "")
+    if not HEX64.fullmatch(expected) or not minimum_text.isdigit():
+        raise ValueError("required nested source fields are incomplete")
+    minimum = int(minimum_text)
+    if minimum < 1 or minimum > 10000 or not source.is_file() or sha256_file(source) != expected:
+        raise ValueError("required nested source is unavailable or changed")
+    with zipfile.ZipFile(research_zip) as outer:
+        matches = [name for name in outer.namelist()
+                   if name == source.name or name.endswith("/" + source.name)]
+        if len(matches) != 1:
+            raise ValueError("research ZIP must contain exactly one intact nested source packet")
+        nested_bytes = outer.read(matches[0])
+    if hashlib.sha256(nested_bytes).hexdigest() != expected:
+        raise ValueError("nested source packet SHA-256 mismatch")
+    with zipfile.ZipFile(io.BytesIO(nested_bytes)) as nested:
+        names = nested.namelist()
+        if len(names) != len(set(names)) or "MANIFEST.json" not in names:
+            raise ValueError("nested source ZIP has duplicate members or no manifest")
+        manifest = json.loads(nested.read("MANIFEST.json"))
+        if manifest.get("schema") != "memory_stock.dx2_s3_source_packet.v1":
+            raise ValueError("nested source manifest schema mismatch")
+        entries = manifest.get("entries")
+        if not isinstance(entries, list) or len(entries) < minimum or manifest.get("selected_count") != len(entries):
+            raise ValueError("nested source has too few verified conversation entries")
+        ids: set[str] = set()
+        covered = {"MANIFEST.json"}
+        for row in entries:
+            cid = str(row.get("conversation_id") or "")
+            member = str(row.get("entry") or "")
+            expected_entry = str(row.get("entry_sha256") or "").lower()
+            if (cid in ids or member != f"conversations/{cid}.md" or member not in names
+                or not HEX64.fullmatch(expected_entry)
+                or hashlib.sha256(nested.read(member)).hexdigest() != expected_entry):
+                raise ValueError("nested source conversation member mismatch")
+            ids.add(cid)
+            covered.add(member)
+        if set(names) != covered:
+            raise ValueError("nested source has unmanifested members")
 
 
 class QueueClient:
@@ -981,6 +1029,7 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
             if not secretary_succeeded(json.loads(receipt_path.read_text(encoding="utf-8"))):
                 raise ValueError("Codex invocation was not verified")
             meta=verify_manifest_zip(out_zip,expected_plan_sha256=plan.sha256)
+            verify_required_nested_source(out_zip, step)
         except Exception:
             action["actions"].append({"step":step.step_id,"phase":"research_reconcile","ok":False,"state":"awaiting_readback"}); continue
         evidence=[{"kind":"research_zip","ref":meta["sha256"],"path":meta["path"]}]
@@ -1014,6 +1063,7 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
                 try:
                     if not secretary_succeeded(receipt): raise ValueError("installed Codex invocation did not complete")
                     meta=verify_manifest_zip(out_zip,expected_plan_sha256=plan.sha256)
+                    verify_required_nested_source(out_zip, step)
                     done=queue.complete(rjob,[{"kind":"research_zip","ref":meta["sha256"],"path":meta["path"]},{"kind":"research_invocation","ref":sha256_file(run_dir/"secretary_receipt.json")}])
                     committed=queue.get(str(rjob["id"])) if done.get("ok") else None
                     readback_ok=bool(committed and committed.get("state")=="complete" and any(e.get("kind")=="research_zip" and e.get("ref")==meta["sha256"] for e in committed.get("effect_evidence") or [] if isinstance(e,dict)))

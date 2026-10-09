@@ -1,7 +1,5 @@
 project Critical Path Autonomy
 id critical-path-autonomy
-completed_effect CP-4-6 ae98f88157f6fad6955395c7b0226271991c667d19936fd132c9078acc2a403c tf-6471fcb45b2139d0c5d9df04a0ae15edb8509743
-inflight_revision CP-7 ae98f88157f6fad6955395c7b0226271991c667d19936fd132c9078acc2a403c
 channel #proj-agent-orchestration
 canonical_repo evanbrown3000/codex-backend-sdk
 source_plan /home/evan/Documents/COLLECTED-BY-EVAN/2026/10/8/critical_path_plan.md
@@ -16,7 +14,7 @@ principles
   - Keep prompt cost and Codex quota bounded; do not spam ChatGPT.
   - Preserve the source plan and this plan as instruction; do not ask an agent to write a prompt for another agent.
 
-[x] CP-4-6 deploy and verify an unattended TaskFlow phase controller
+[ ] CP-4-6 deploy and verify an unattended TaskFlow phase controller
     owner: Elliot Mercer
     source: critical_path_plan.md steps 4, 5, and 6
     do:

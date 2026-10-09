@@ -26,7 +26,10 @@ def full(provider: str, cid: str, day: int) -> dict:
     at = (datetime(2024, 1, 1, tzinfo=timezone.utc) + timedelta(days=day)).isoformat()
     return {"provider": provider, "conversation_id": cid,
             "prompt_sha256": "a" * 64, "response_sha256": "b" * 64,
-            "capture": {"drive_verified": True, "source_response_complete": True},
+            "capture": {"drive_verified": True, "source_response_complete": True,
+                        "source_sha256": "c" * 64, "drive_source_sha256": "c" * 64,
+                        "drive_object_sha256": "d" * 64, "drive_verified_at": at,
+                        "drive_conversation_id": cid},
             "events": [{"role": "user", "content": "plan this", "created_at": at,
                         "source_content_complete": True},
                        {"role": "assistant", "content": "implemented it", "created_at": at,

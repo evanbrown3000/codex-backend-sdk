@@ -26,6 +26,10 @@ PROVIDER_SOCKET=os.environ.get('COGNILODE_PROVIDER_SOCKET','/runtime/provider.so
 PROVIDER_LIVE=set(); PROVIDER_LOCK=threading.RLock()
 PROVIDER_ID=re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,40}$')
 ROLLOUT_SOCKET=os.environ.get('COGNILODE_ROLLOUT_SOCKET','/runtime/drive-rollouts/rollouts.sock')
+STOCK_CLI=os.environ.get('COGNILODE_STOCK_CLI',
+    '/runtime/source/current/memory-stock-canonical/deploy/conversation-vacuum/conversation_stock_api.py')
+STOCK_DB=os.environ.get('COGNILODE_STOCK_DB',
+    '/memory-stock/runtime/conversation-vacuum/intake.sqlite3')
 
 def drive_rollout(payload):
     """Forward only the restricted rollout operation to local credential custody."""
@@ -51,6 +55,23 @@ def drive_rollout(payload):
     if not isinstance(response,dict) or not response.get('ok'):
         raise RuntimeError('Drive custody operation unavailable')
     return response
+
+def stock_conversation(payload):
+    """Read indexed normalized stock locally; never poll a provider."""
+    if not isinstance(payload,dict) or payload.get('action') not in ('search','list','read','status'):
+        raise ValueError('invalid conversation stock operation')
+    if len(str(payload.get('selector') or ''))>200 or len(str(payload.get('query') or ''))>1000:
+        raise ValueError('conversation stock selector or query too long')
+    request=json.dumps(payload,separators=(',',':')).encode()
+    if len(request)>16_384: raise ValueError('conversation stock request too large')
+    result=subprocess.run(['python3',STOCK_CLI],input=request,capture_output=True,
+        env={**os.environ,'COGNILODE_STOCK_DB':STOCK_DB},timeout=40,check=False)
+    if result.returncode or len(result.stdout)>28_000_000:
+        raise RuntimeError('conversation stock read unavailable')
+    response=json.loads(result.stdout)
+    if response.get('schema')!='cognilode.conversation-stock.v1' or response.get('error'):
+        raise RuntimeError('conversation stock response unavailable')
+    return {'ok':True,**response}
 
 def provider_file(operation_id):
     if not PROVIDER_ID.fullmatch(str(operation_id)): raise ValueError('invalid provider operation id')
@@ -209,7 +230,7 @@ class H(BaseHTTPRequestHandler):
         if self.path=='/healthz': return self.sendj({'ok':True,'node_id':NODE_ID,'workspace':WORKSPACE,'container':True})
         self.sendj({'error':'not found'},404)
     def do_POST(self):
-        if self.path not in ('/mcp','/provider','/rollouts'): return self.sendj({'error':'not found'},404)
+        if self.path not in ('/mcp','/provider','/rollouts','/conversations'): return self.sendj({'error':'not found'},404)
         if not hmac.compare_digest(self.headers.get('Authorization',''),'Bearer '+BEARER): return self.sendj({'error':'unauthorized'},401)
         payload={}
         try:
@@ -218,6 +239,7 @@ class H(BaseHTTPRequestHandler):
             if n<1 or n>maximum: raise ValueError('invalid request length')
             if self.path=='/provider': return self.sendj(provider_operation(json.loads(self.rfile.read(n))))
             if self.path=='/rollouts': return self.sendj(drive_rollout(json.loads(self.rfile.read(n))))
+            if self.path=='/conversations': return self.sendj(stock_conversation(json.loads(self.rfile.read(n))))
             payload=json.loads(self.rfile.read(n)); method=payload.get('method'); rid=payload.get('id')
             if method=='initialize': result={'protocolVersion':'2025-06-18','capabilities':{'tools':{}},'serverInfo':{'name':'cognilode-company-remote-shell','version':'3.0.0'}}
             elif method=='tools/list': result={'tools':[{'name':x,'description':x,'inputSchema':{'type':'object'}} for x in ('shell_execute','shell_start','shell_poll','shell_write','shell_terminate')]}

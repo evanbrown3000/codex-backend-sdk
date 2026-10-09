@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Keep the registered container relay on the synchronized SDK generation."""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+ROOT = Path(os.environ.get('COGNILODE_COMPANY_SOURCE_ROOT', '/runtime/source'))
+CURRENT = ROOT / 'current/codex-backend-sdk/scripts'
+BOOT_WRAPPER = Path(__file__).resolve()
+STOP = False
+
+
+def stop(_signum, _frame):
+    global STOP
+    STOP = True
+
+
+def main() -> None:
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    while not STOP:
+        selected = (CURRENT / 'cognilode-company-remote-shell').resolve()
+        if not selected.is_file():
+            print('company relay waiting for synchronized SDK source', flush=True)
+            time.sleep(5)
+            continue
+        print(f'company relay source generation {selected}', flush=True)
+        child = subprocess.Popen([sys.executable, str(selected)], env=os.environ.copy())
+        while not STOP and child.poll() is None and selected == (CURRENT / 'cognilode-company-remote-shell').resolve():
+            time.sleep(5)
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=10)
+        if STOP:
+            return
+        new_wrapper = (CURRENT / 'cognilode-company-remote-shell-runtime').resolve()
+        if new_wrapper.is_file() and new_wrapper != BOOT_WRAPPER:
+            os.execv(sys.executable, [sys.executable, str(new_wrapper)])
+        time.sleep(2)
+
+
+if __name__ == '__main__':
+    main()

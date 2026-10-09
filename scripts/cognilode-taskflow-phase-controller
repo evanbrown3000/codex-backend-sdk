@@ -53,6 +53,9 @@ MAX_ZIP_MEMBERS = 5000
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 STEP_RE = re.compile(r"^(?P<indent>\s*)\[(?P<check>[ xX])\]\s+(?P<id>[A-Za-z0-9_.-]+)\s+(?P<title>.+?)\s*$")
 FIELD_RE = re.compile(r"^(?P<indent>\s+)(?P<key>[A-Za-z0-9_-]+):\s*(?P<value>.*)$")
+CHILD_PLAN_FIELDS = ("child_plans", "subplans", "plan_files")
+MAX_LINKED_PLAN_FILES = 32
+MAX_LINKED_PLAN_BYTES = 1024 * 1024
 
 
 def utc() -> str:
@@ -282,6 +285,72 @@ def verify_plan_revision(plan: Plan) -> None:
                                    capture_output=True, timeout=10, check=False)
         if committed.returncode != 0 or sha256_bytes(committed.stdout) != plan.sha256:
             raise ValueError("plan revision is not the committed project instruction")
+
+
+def linked_plan_context(plan: Plan) -> dict[str, Any]:
+    """Freeze explicitly linked .plan text for every employee in a phase chain.
+
+    The D1 job identity remains the entry plan revision. A changed linked file
+    therefore *cannot* silently reuse that job: run_once checks the context
+    digest against all existing phase jobs before it advances any phase.
+    """
+    if not any(step.fields.get(key, "").strip() for step in plan.steps for key in CHILD_PLAN_FIELDS):
+        return {"sha256": "", "sources": []}
+    source = plan_root_source_path(plan).resolve()
+    root_run = subprocess.run(["git", "-C", str(source.parent), "rev-parse", "--show-toplevel"],
+                              capture_output=True, text=True, timeout=10, check=False)
+    if root_run.returncode:
+        raise ValueError("linked plan context requires a committed project repository")
+    repo = Path(root_run.stdout.strip()).resolve()
+    if not source.is_relative_to(repo):
+        raise ValueError("entry plan escapes its project repository")
+    pending: list[tuple[Path, Plan]] = [(source, plan)]
+    seen: set[Path] = set()
+    sources: list[dict[str, str]] = []
+    total_bytes = 0
+    while pending:
+        current, document = pending.pop(0)
+        if current in seen:
+            continue
+        seen.add(current)
+        if len(seen) > MAX_LINKED_PLAN_FILES:
+            raise ValueError("linked plan hierarchy exceeds file limit")
+        data = document.text.encode("utf-8") if current == source else current.read_bytes()
+        total_bytes += len(data)
+        if total_bytes > MAX_LINKED_PLAN_BYTES:
+            raise ValueError("linked plan hierarchy exceeds byte limit")
+        if current != source:
+            document = parse_plan_text(data.decode("utf-8"))
+            relative = current.relative_to(repo).as_posix()
+            committed = subprocess.run(["git", "-C", str(repo), "show", f"HEAD:{relative}"],
+                                       capture_output=True, timeout=10, check=False)
+            if committed.returncode or committed.stdout != data:
+                raise ValueError(f"linked plan is not committed: {relative}")
+            sources.append({"path": relative, "sha256": sha256_bytes(data), "exact_content": data.decode("utf-8")})
+        for step in document.steps:
+            for field_name in CHILD_PLAN_FIELDS:
+                for name in step.fields.get(field_name, "").split(","):
+                    name = name.strip()
+                    if not name:
+                        continue
+                    child = (current.parent / name).resolve()
+                    if not child.is_relative_to(repo) or child.suffix != ".plan" or not child.is_file():
+                        raise ValueError(f"unsafe or missing linked .plan: {name}")
+                    if child not in seen and child not in (path for path, _ in pending):
+                        pending.append((child, document))
+    sources.sort(key=lambda row: row["path"])
+    digest = sha256_bytes(json.dumps(sources, sort_keys=True, ensure_ascii=False,
+                                    separators=(",", ":")).encode("utf-8"))
+    return {"sha256": digest, "sources": sources}
+
+
+def full_plan_context(plan: Plan) -> str:
+    context = linked_plan_context(plan)
+    if not context["sources"]:
+        return plan.text
+    return plan.text + "\n\n--- EXPLICITLY LINKED PLAN FILES ---\n" + "\n".join(
+        f"\n--- {item['path']} SHA-256 {item['sha256']} ---\n{item['exact_content']}"
+        for item in context["sources"])
 
 
 def phase_job_id(plan: Plan, step_id: str, phase: str, attempt: int = 0) -> str:
@@ -652,6 +721,7 @@ def load_sender() -> Any:
 
 def job_base(plan: Plan, step: Step, phase: str, *, provider: str, priority: int, dependencies: Sequence[str]) -> dict[str, Any]:
     verify_plan_revision(plan)
+    linked = linked_plan_context(plan)
     now = utc()
     payload = {
         "schema":"cognilode.taskflow.phase_job.v1", "taskflow_multi_phase":True,
@@ -659,6 +729,7 @@ def job_base(plan: Plan, step: Step, phase: str, *, provider: str, priority: int
         "plan_source_ref":plan.source_ref, "plan_text_sha256":plan.sha256,
         "taskflow_step":step.step_id, "taskflow_title":step.title, "taskflow_phase":phase,
         "taskflow_dependencies":list(dependencies), "priority":priority, "phase_attempt":0,
+        "linked_plan_sha256": linked["sha256"],
     }
     return {
         "id":phase_job_id(plan, step.step_id, phase), "provider":provider, "state":"queued",
@@ -666,6 +737,7 @@ def job_base(plan: Plan, step: Step, phase: str, *, provider: str, priority: int
         "prompt_sha256":sha256_bytes(b"phase placeholder"), "created_at":now, "due_at":now,
         "priority":priority, "project":plan.project_id, "plan_revision":plan.sha256,
         "plan_source_ref":plan.source_ref, "plan_text":plan.text,
+        "linked_plan_sources": linked["sources"], "linked_plan_sha256": linked["sha256"],
         "taskflow_step":step.step_id, "phase":phase, "taskflow_multi_phase":True, "phase_attempt":0,
         "taskflow_dependencies":list(dependencies), "payload":payload,
     }
@@ -682,7 +754,7 @@ def research_prompt(plan: Plan, step: Step, role: str, out_zip: Path) -> str:
              f"The probe must read actual beneficiary state; do not make it a receipt/test-only assertion. "
              f"The ChatGPT worker must carry these exact bytes forward unchanged.\n"
              if root_portfolio_plan(plan) else "")
-    return f"""You are the named Codex research employee for this TaskFlow step.\n{slack_role_context(role)}\nProject: {plan.project_id}\nPlan SHA-256: {plan.sha256}\nStep: {step.step_id} {step.title}\n\nRead and use the FULL plan below, not an isolated leaf. Research only; do not claim TaskFlow completion. Build a focused physically readable ZIP at exactly:\n{out_zip}\nThe ZIP must contain top-level MANIFEST.json with plan_sha256={plan.sha256!r} and a files list that SHA-256 covers every other non-directory member. Include relevant code/docs/data and a research report. Do not include secrets or credentials.\n{probe}\n--- FULL PLAN ---\n{plan.text}\n"""
+    return f"""You are the named Codex research employee for this TaskFlow step.\n{slack_role_context(role)}\nProject: {plan.project_id}\nPlan SHA-256: {plan.sha256}\nStep: {step.step_id} {step.title}\n\nRead and use the FULL plan below, not an isolated leaf. Research only; do not claim TaskFlow completion. Build a focused physically readable ZIP at exactly:\n{out_zip}\nThe ZIP must contain top-level MANIFEST.json with plan_sha256={plan.sha256!r} and a files list that SHA-256 covers every other non-directory member. Include relevant code/docs/data and a research report. Do not include secrets or credentials.\n{probe}\n--- FULL PLAN ---\n{full_plan_context(plan)}\n"""
 
 
 def chatgpt_prompt(plan: Plan, step: Step, research_meta: Mapping[str, Any]) -> str:
@@ -690,7 +762,7 @@ def chatgpt_prompt(plan: Plan, step: Step, research_meta: Mapping[str, Any]) -> 
              "work ZIP byte-for-byte. Do not edit or replace this independent probe; external Codex "
              "will install it and TaskFlow will compare its SHA to the research ZIP before judging "
              "your work.\n" if root_portfolio_plan(plan) else "")
-    return f"""You are the ChatGPT.com chat-mode native sandbox phase for TaskFlow. Work from the physically attached research ZIP.\nProject: {plan.project_id}\nPlan SHA-256: {plan.sha256}\nStep: {step.step_id} {step.title}\nResearch ZIP SHA-256: {research_meta['sha256']}\n\nRead the full attached packet and the full plan. Perform substantive code/data work and tests in your native sandbox. Return a substantial terminal in-chat report plus exactly one downloadable ZIP. That ZIP MUST contain top-level EXTERNAL_EFFECT_INSTRUCTIONS.md and top-level MANIFEST.json whose plan_sha256 equals {plan.sha256}. The manifest must SHA-256 cover every other file. {probe}Do not claim external deployment/effects you did not perform. Provider conversation completion is only this sandbox phase; it is NOT TaskFlow step completion.\n\n--- FULL PLAN ---\n{plan.text}\n"""
+    return f"""You are the ChatGPT.com chat-mode native sandbox phase for TaskFlow. Work from the physically attached research ZIP.\nProject: {plan.project_id}\nPlan SHA-256: {plan.sha256}\nStep: {step.step_id} {step.title}\nResearch ZIP SHA-256: {research_meta['sha256']}\n\nRead the full attached packet and the full plan. Perform substantive code/data work and tests in your native sandbox. Return a substantial terminal in-chat report plus exactly one downloadable ZIP. That ZIP MUST contain top-level EXTERNAL_EFFECT_INSTRUCTIONS.md and top-level MANIFEST.json whose plan_sha256 equals {plan.sha256}. The manifest must SHA-256 cover every other file. {probe}Do not claim external deployment/effects you did not perform. Provider conversation completion is only this sandbox phase; it is NOT TaskFlow step completion.\n\n--- FULL PLAN ---\n{full_plan_context(plan)}\n"""
 
 
 def external_prompt(plan: Plan, step: Step, work_zip: Path, effect_receipt: Path, employee: str) -> str:
@@ -707,7 +779,7 @@ def external_prompt(plan: Plan, step: Step, work_zip: Path, effect_receipt: Path
                   "Apply the returned implementation to the package and installed venv; "
                   "TaskFlow checks those frozen probe bytes "
                   "before and after independently running them.\n")
-    return f"""You are the Codex external-effect employee assigned to apply this TaskFlow sandbox output.\n{slack_role_context(employee)}\nProject: {plan.project_id}\nPlan SHA-256: {plan.sha256}\nStep: {step.step_id} {step.title}\nWork ZIP: {work_zip}\nWork ZIP SHA-256: {sha256_file(work_zip)}\n\nRead EXTERNAL_EFFECT_INSTRUCTIONS.md inside the ZIP, reconcile with current source/deployment, apply or deploy the work, and verify the real effect. {probe}Do not mark success for code/artifact production alone. On success, atomically write JSON to exactly {effect_receipt} with schema='cognilode.taskflow.external_effect.v1', status='applied', project_id, plan_sha256, step_id, work_zip_sha256, effect_kind, non-empty effect_ref, environment, checks (non-empty list of objects with command, exit_code, and observed result), and defects (list). If the effect is failed or uncertain, write status='failed' or 'uncertain'; that MUST NOT release dependents.\n\n--- FULL PLAN ---\n{plan.text}\n"""
+    return f"""You are the Codex external-effect employee assigned to apply this TaskFlow sandbox output.\n{slack_role_context(employee)}\nProject: {plan.project_id}\nPlan SHA-256: {plan.sha256}\nStep: {step.step_id} {step.title}\nWork ZIP: {work_zip}\nWork ZIP SHA-256: {sha256_file(work_zip)}\n\nRead EXTERNAL_EFFECT_INSTRUCTIONS.md inside the ZIP, reconcile with current source/deployment, apply or deploy the work, and verify the real effect. {probe}Do not mark success for code/artifact production alone. On success, atomically write JSON to exactly {effect_receipt} with schema='cognilode.taskflow.external_effect.v1', status='applied', project_id, plan_sha256, step_id, work_zip_sha256, effect_kind, non-empty effect_ref, environment, checks (non-empty list of objects with command, exit_code, and observed result), and defects (list). If the effect is failed or uncertain, write status='failed' or 'uncertain'; that MUST NOT release dependents.\n\n--- FULL PLAN ---\n{full_plan_context(plan)}\n"""
 
 
 def codex_binary_identity(binary: str) -> tuple[str, dict[str, str]]:
@@ -1862,6 +1934,21 @@ def checkoff_verified_effects(queue: QueueClient, plan: Plan, *, expected_revisi
 def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, state_root: Path, worker_id: str, manager: str, priority: int, external_employee: str, seed_step: str | None = None, active_step_ids: set[str] | None = None) -> dict[str,Any]:
     verify_plan_revision(plan)
     verify_completed_effects(queue,plan)
+    # One entry-plan revision can have many explicitly linked plan files. Do
+    # not reuse an existing D1 phase job after any of those instructions
+    # changed; the Codex owner must revise the entry plan before restarting.
+    for candidate in plan.steps:
+        if candidate.checked or (active_step_ids is not None and candidate.step_id not in active_step_ids):
+            continue
+        execution_plan = step_execution_plan(plan, candidate.step_id)
+        linked = linked_plan_context(execution_plan)
+        if not linked["sources"]:
+            continue
+        for phase in ("research", "chatgpt_sandbox", "external_effect"):
+            existing = queue.get(phase_job_id(plan, candidate.step_id, phase))
+            if existing and ((existing.get("payload") or {}).get("linked_plan_sha256") != linked["sha256"]
+                             or existing.get("linked_plan_sha256") != linked["sha256"]):
+                raise ValueError(f"linked .plan hierarchy changed or lacked custody: {candidate.step_id}/{phase}")
     repo_path = execution_repo(Path(plan.source_ref.removeprefix("file:")))
     state_root.mkdir(parents=True,exist_ok=True)
     action={"at":utc(),"project":plan.project_id,"plan_sha256":plan.sha256,"actions":[]}

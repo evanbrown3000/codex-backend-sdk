@@ -34,9 +34,9 @@ def _purpose(method: str, url: str) -> tuple[str, str, str]:
 
 def _fallback(method: str, url: str, error: str) -> dict:
     request_purpose, host, path = _purpose(method, url)
-    # Prompt and artifact transport can continue across a local sidecar outage;
-    # observability remains denied until centrally authorized.
-    allowed = request_purpose != "observability"
+    # A missing gate cannot authorize a provider request. The durable row lets
+    # the central gate account for the refusal once its container restarts.
+    allowed = False
     row = {"event_id": str(uuid.uuid4()), "at": datetime.now(timezone.utc).isoformat(),
            "environment": os.environ.get("COGNILODE_ENVIRONMENT_ID", "unknown"),
            "source": _source(), "purpose": request_purpose, "method": method,

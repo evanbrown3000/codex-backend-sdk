@@ -45,8 +45,8 @@ services:
       PATH: /usr/bin:/usr/local/bin:/bin
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
-      - ${COMPANY_RUNTIME_ROOT}/auth:/home/worker/.codex
-      - ${COMPANY_RUNTIME_ROOT}/operator:/home/worker/.config/cognilode
+      - company_auth:/home/worker/.codex
+      - company_operator:/home/worker/.config/cognilode
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
 
   provider-transport:
@@ -72,8 +72,8 @@ services:
       PATH: /usr/bin:/usr/local/bin:/bin
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
-      - ${COMPANY_RUNTIME_ROOT}/auth:/home/worker/.codex
-      - ${COMPANY_RUNTIME_ROOT}/operator:/home/worker/.config/cognilode:ro
+      - company_auth:/home/worker/.codex
+      - company_operator:/home/worker/.config/cognilode:ro
       - ${COMPANY_RUNTIME_ROOT}/worker:/home/worker/.local/share/cognilode
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
     depends_on:
@@ -104,9 +104,13 @@ services:
       PATH: /usr/bin:/usr/local/bin:/bin
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
-      - ${COMPANY_RUNTIME_ROOT}/operator:/home/worker/.config/cognilode:ro
+      - company_operator:/home/worker/.config/cognilode:ro
       - ${COMPANY_RUNTIME_ROOT}/worker:/home/worker/.local/share/cognilode
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
     depends_on:
       - provider-transport
+
+volumes:
+  company_auth:
+  company_operator:

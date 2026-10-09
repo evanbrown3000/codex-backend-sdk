@@ -203,6 +203,50 @@ def confirm_result(path: Path) -> dict[str, Any]:
         "terminal_receipt_sha256":sha(path)})
 
 
+def confirm_pending(state_root: Path) -> dict[str, Any]:
+    """Recheck local terminal results after the independent D1/Drive vacuum runs."""
+    outcomes = []
+    for result_path in sorted(state_root.glob("*/result.json")):
+        confirmed = result_path.with_name("confirmed.json")
+        if confirmed.is_file():
+            continue
+        try:
+            result = confirm_result(result_path)
+            state = str((result.get("attempt") or {}).get("state") or "")
+            if result.get("central_readback_verified") is True and state == "complete":
+                atomic_json(confirmed,{"schema":"cognilode.codex_native_resume.central_confirmation.v1",
+                    "operation_id":result_path.parent.name,"result_sha256":sha(result_path)})
+            outcomes.append({"operation_id":result_path.parent.name,"state":state,
+                             "central_readback_verified":result.get("central_readback_verified") is True})
+        except Exception as exc:
+            outcomes.append({"operation_id":result_path.parent.name,"state":"confirm_retry",
+                             "error_type":type(exc).__name__})
+    return {"ok":True,"schema":"cognilode.codex_native_resume.confirm_pending.v1",
+            "checked":len(outcomes),"results":outcomes}
+
+
+def install_confirm_timer(state_root: Path) -> dict[str, Any]:
+    """Install one bounded user timer; no provider turn is sent by this timer."""
+    unit_dir = Path.home()/".config/systemd/user"
+    service = unit_dir/"cognilode-codex-native-confirm.service"
+    timer = unit_dir/"cognilode-codex-native-confirm.timer"
+    executable = Path(__file__).resolve()
+    if any(any(char.isspace() for char in str(path)) for path in (executable,state_root)):
+        raise ValueError("native confirmation paths cannot contain whitespace")
+    service_text = ("[Unit]\nDescription=Confirm native Codex resumes after shared D1/Drive readback\n"
+                    "[Service]\nType=oneshot\nExecStart="+str(executable)+" confirm-pending --state-root "
+                    +str(state_root.resolve())+"\n")
+    timer_text = ("[Unit]\nDescription=Recheck native Codex resume readback\n"
+                  "[Timer]\nOnBootSec=2min\nOnUnitActiveSec=5min\nPersistent=true\n"
+                  "[Install]\nWantedBy=timers.target\n")
+    service.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+    service.write_text(service_text,encoding="utf-8")
+    timer.write_text(timer_text,encoding="utf-8")
+    subprocess.run(["systemctl","--user","daemon-reload"],check=True)
+    subprocess.run(["systemctl","--user","enable","--now",timer.name],check=True)
+    return {"ok":True,"service":str(service),"timer":str(timer)}
+
+
 def main() -> int:
     parser=argparse.ArgumentParser(description=__doc__)
     sub=parser.add_subparsers(dest="command",required=True)
@@ -228,11 +272,17 @@ def main() -> int:
     run.add_argument("--timeout-seconds",type=int,default=3600)
     confirm=sub.add_parser("confirm")
     confirm.add_argument("--result",type=Path,required=True)
+    pending=sub.add_parser("confirm-pending")
+    pending.add_argument("--state-root",type=Path,default=DEFAULT_STATE)
+    timer=sub.add_parser("install-confirm-timer")
+    timer.add_argument("--state-root",type=Path,default=DEFAULT_STATE)
     args=parser.parse_args()
     if args.command=="register": result=register(args)
     elif args.command=="resolve": result=post({"operation":"get_codex_native_session","session_id":args.session_id})
     elif args.command=="resume": result=resume(args)
-    else: result=confirm_result(args.result)
+    elif args.command=="confirm": result=confirm_result(args.result)
+    elif args.command=="confirm-pending": result=confirm_pending(args.state_root)
+    else: result=install_confirm_timer(args.state_root)
     print(json.dumps(result,ensure_ascii=False,sort_keys=True))
     return 0 if result.get("ok") else 1
 

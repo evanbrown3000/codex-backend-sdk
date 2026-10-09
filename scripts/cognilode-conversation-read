@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -17,6 +19,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -246,19 +249,55 @@ def delta_view(result: dict, since: str = "") -> dict:
             "next_cursor": _cursor(result["provider"], result["conversation_id"], events, len(events))}
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--provider", required=True)
-    parser.add_argument("--conversation-id", required=True)
-    parser.add_argument("--since", default="", help="opaque next_cursor from a prior read")
-    parser.add_argument("--drive-reader", type=Path, default=DEFAULT_DRIVE_READER)
-    parser.add_argument("--historical-reader", type=Path, default=DEFAULT_HISTORICAL_READER)
-    parser.add_argument("--format", choices=("json", "markdown"), default="json")
-    args = parser.parse_args()
-    result = delta_view(read_conversation(args.provider, args.conversation_id,
-                                          drive_reader=args.drive_reader,
-                                          historical_reader=args.historical_reader), args.since)
-    if args.format == "json":
+def remembered_cursor_path(root: Path, reader_id: str, provider: str, conversation_id: str) -> Path:
+    if not reader_id or len(reader_id) > 160:
+        raise ValueError("reader ID must be a nonempty bounded name")
+    key = hashlib.sha256(json.dumps([reader_id, provider, conversation_id],
+                                    ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    return root / (key + ".json")
+
+
+@contextmanager
+def remembered_cursor_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock = path.with_suffix(".lock")
+    with lock.open("a+b") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def load_remembered_cursor(path: Path, reader_id: str, provider: str, conversation_id: str) -> str:
+    if not path.is_file():
+        return ""
+    row = json.loads(path.read_text(encoding="utf-8"))
+    if ([row.get("reader_id"), row.get("provider"), row.get("conversation_id")]
+            != [reader_id, provider, conversation_id] or not isinstance(row.get("cursor"), str)):
+        raise ValueError("remembered conversation cursor identity mismatch")
+    return row["cursor"]
+
+
+def save_remembered_cursor(path: Path, reader_id: str, provider: str,
+                           conversation_id: str, cursor: str) -> None:
+    row = {"reader_id": reader_id, "provider": provider,
+           "conversation_id": conversation_id, "cursor": cursor}
+    payload = json.dumps(row, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".cursor-", delete=False) as temp:
+        tmp = Path(temp.name)
+        os.fchmod(temp.fileno(), 0o600)
+        temp.write(payload)
+        temp.flush()
+        os.fsync(temp.fileno())
+    try:
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def render_view(result: dict, output_format: str) -> None:
+    if output_format == "json":
         print(json.dumps(result, ensure_ascii=False))
     else:
         print(f"# {result['provider']}/{result['conversation_id']}\n")
@@ -268,6 +307,45 @@ def main() -> int:
         for event in result["events"]:
             print(f"## {event['role']} {event['occurred_at_utc']}\n\n{event['text']}\n")
         print(f"<!-- next_cursor: {result['next_cursor']} -->")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--provider", required=True)
+    parser.add_argument("--conversation-id", required=True)
+    parser.add_argument("--since", default="", help="opaque next_cursor from a prior read")
+    parser.add_argument("--drive-reader", type=Path, default=DEFAULT_DRIVE_READER)
+    parser.add_argument("--historical-reader", type=Path, default=DEFAULT_HISTORICAL_READER)
+    parser.add_argument("--format", choices=("json", "markdown"), default="json")
+    parser.add_argument("--remember", action="store_true",
+                        help="show the full conversation once, then only unseen events for this reader")
+    parser.add_argument("--reader-id", default=os.environ.get("COGNILODE_READER_ID", "default"))
+    parser.add_argument("--cursor-root", type=Path, default=Path.home()/".local/state/cognilode/conversation-read-cursors")
+    args = parser.parse_args()
+    if args.remember and args.since:
+        parser.error("--remember and --since cannot be combined")
+    def read() -> dict:
+        return read_conversation(args.provider, args.conversation_id,
+                                 drive_reader=args.drive_reader,
+                                 historical_reader=args.historical_reader)
+    if args.remember:
+        path=remembered_cursor_path(args.cursor_root, args.reader_id, args.provider, args.conversation_id)
+        with remembered_cursor_lock(path):
+            previous=load_remembered_cursor(path,args.reader_id,args.provider,args.conversation_id)
+            source=read()
+            try:
+                result=delta_view(source,previous)
+            except ValueError as exc:
+                if "prefix changed" not in str(exc):
+                    raise
+                result=delta_view(source)
+                result["cursor_reset_reason"]="source_prefix_changed"
+            render_view(result,args.format)
+            sys.stdout.flush()
+            save_remembered_cursor(path,args.reader_id,args.provider,args.conversation_id,
+                                   result["next_cursor"])
+    else:
+        render_view(delta_view(read(),args.since),args.format)
     return 0
 
 

@@ -56,11 +56,11 @@ CP-7 requires a real controlled outage drill: EvanPC unavailable, an alternate-d
 
 ## Conversation reads after the first view
 
-`scripts/cognilode-conversation-read` provides one read command for admitted ChatGPT.com Chat-mode events in the hosted conversation service and admitted Codex deltas in Google Drive. For example:
+`scripts/cognilode-conversation-read` reads admitted ChatGPT.com, Gemini, Claude/Anthropic, Codex D1, Google Drive Codex, and historical S3 conversations through one interface. To have a named employee see the full conversation once and only new events thereafter:
 
 ```sh
-scripts/cognilode-conversation-read --provider chatgpt.com --conversation-id CONVERSATION_ID --format markdown
+scripts/cognilode-conversation-read --provider chatgpt.com --conversation-id CONVERSATION_ID --reader-id "Elliot Mercer" --remember --format markdown
 scripts/cognilode-conversation-read --provider openai-codex --conversation-id CONVERSATION_ID --since NEXT_CURSOR --format json
 ```
 
-Save `next_cursor` from the first JSON response (or its Markdown comment) and pass it as `--since` on the next read. The cursor checks the exact prefix of message IDs, roles, and text hashes; an edited or reordered prefix produces a refresh error instead of silently hiding history. The response labels its coverage. `admitted_events_only` and `all_admitted_drive_deltas` do not assert that every provider branch has been acquired. The Drive reader path can be set with `COGNILODE_DRIVE_READBACK_SCRIPT` when the Memory Stock checkout is elsewhere.
+`--remember` stores a private cursor per employee, provider, and conversation. A changed message prefix automatically shows the full conversation again and labels the reset; it never silently hides revised history. Explicit `--since` remains available for callers that store their own `next_cursor`. The response labels its source and coverage; admitted events do not imply every provider branch has been acquired. The Drive reader path can be set with `COGNILODE_DRIVE_READBACK_SCRIPT` when Memory Stock is installed elsewhere.

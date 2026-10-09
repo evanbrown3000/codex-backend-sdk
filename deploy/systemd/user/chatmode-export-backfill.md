@@ -14,6 +14,13 @@ files live under `~/.local/share/cognilode/b4pt0r-chatmode/` with private mode.
 The service unit caps CPU at 50% and memory at 1.5 GiB. The requirements file
 pins the streaming JSON parser used to avoid loading a whole shard.
 
+The account-export request timer checks once daily and requests at most one
+fresh export in seven days while an active snapshot remains incomplete and no
+new ready URL exists. It writes a private pre-POST ledger; ambiguous 5xx or
+timeouts wait for the ready email rather than repeating the request. HTTP 401
+`reauth_required` is recorded as a pre-accept account reauthentication state.
+The timer does not send Chat-mode prompts or use ChatGPT scheduled tasks.
+
 Backfill states in `privacy-export-backfill/cursor.json` distinguish complete
 ZIP traversal from D1 and Drive readback. `d1_exact_receipts.jsonl` contains
 only source locators and hashes. The post-run retirement check runs only after

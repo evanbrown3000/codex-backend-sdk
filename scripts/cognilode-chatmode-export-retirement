@@ -61,10 +61,11 @@ def verify_one(row: dict, archive_etag: str, db: sqlite3.Connection):
                                           "conversation_id": cid})
     remote = result.get("conversation") or {}
     capture = remote.get("capture") or {}
-    expected_url = f"https://chatgpt.com/c/{row['conversation_id']}"
+    original = row["conversation_id"]
+    expected_urls = [f"https://chatgpt.com/c/{original}"] if original else []
     if (remote.get("conversation_id") != cid or
-        expected_url not in (remote.get("conversation_urls") or []) or
-        capture.get("source_conversation_id") != row["conversation_id"] or
+        (remote.get("conversation_urls") or []) != expected_urls or
+        capture.get("source_conversation_id") != original or
         capture.get("source_conversation_sha256") != row["source_conversation_sha256"] or
         capture.get("export_etag") != archive_etag or
         capture.get("source_complete") is not False or
@@ -97,6 +98,18 @@ def run(root: Path, db_path: Path, limit: int):
     rows = receipts(root / "d1_exact_receipts.jsonl")
     if len(rows) != state.get("admitted", 0) + state.get("exact_deduped", 0):
         raise RuntimeError("source cursor and unique D1 receipts disagree")
+    nonconversations = root / "nonconversation_source_items.jsonl"
+    if state.get("source_nonconversation_items", 0):
+        if not nonconversations.exists():
+            raise RuntimeError("source cursor lacks non-conversation item receipts")
+        with nonconversations.open(encoding="utf-8") as source:
+            items = [json.loads(line) for line in source]
+        locators = {(item.get("archive_etag"), item.get("member"), item.get("offset"),
+                     item.get("source_item_sha256")) for item in items}
+        if (len(locators) != state["source_nonconversation_items"] or
+            any(item.get("classification") != "empty_nonconversation_json_object" or
+                item.get("archive_etag") != state["archive_etag"] for item in items)):
+            raise RuntimeError("source non-conversation receipts differ from cursor")
     # A crash after a Drive proof but before this checkpoint is harmless: repeat
     # exact readback. A changed archive identity resets verification to zero.
     checkpoint_path = root / "retirement-checkpoint.json"

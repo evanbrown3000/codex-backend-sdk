@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""Keep the pinned company Codex release installed in a shared Docker volume."""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import subprocess
+import time
+
+
+PIN = os.environ["COGNILODE_CODEX_SOURCE_COMMIT"]
+SOURCE = Path(os.environ.get("COGNILODE_COMPANY_SOURCE_ROOT", "/runtime/source")) / "current/cognilode-codex"
+RELEASE = Path(os.environ.get("COGNILODE_CODEX_INSTALL_ROOT", "/codex"))
+
+
+def run_once() -> None:
+    if not (SOURCE / ".git").is_dir():
+        return
+    actual = subprocess.run(["git", "-c", f"safe.directory={SOURCE}", "-C", str(SOURCE),
+                             "rev-parse", "HEAD"], capture_output=True, text=True, timeout=30)
+    if actual.returncode or actual.stdout.strip() != PIN:
+        return
+    installed = RELEASE / "releases" / PIN / "codex"
+    if (installed.is_file() and os.access(installed, os.X_OK) and
+            (RELEASE / "bin/codex").is_file() and
+            (RELEASE / "bin/central-rollouts").is_file()):
+        return
+    env = os.environ.copy()
+    env["COGNILODE_CODEX_SOURCE"] = str(SOURCE)
+    env["COGNILODE_CODEX_INSTALL_ROOT"] = str(RELEASE)
+    subprocess.run([str(SOURCE / "cognilode/host-client/build-install-container-codex")],
+                   env=env, check=True, timeout=7200)
+    print(f"Codex release ready {PIN}", flush=True)
+
+
+if __name__ == "__main__":
+    while True:
+        try:
+            run_once()
+        except Exception as error:
+            print(f"Codex release pending: {type(error).__name__}: {error}", flush=True)
+        time.sleep(max(60, int(os.environ.get("COGNILODE_CODEX_BUILD_INTERVAL", "300"))))

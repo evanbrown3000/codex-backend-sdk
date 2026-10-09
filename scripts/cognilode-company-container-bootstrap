@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import json
+import hashlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -80,6 +81,37 @@ def retired_units() -> list[str]:
                   and name != SELF and "evan-recorder" not in name and "@." not in name)
 
 
+def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
+    """Apply new synchronized Compose configuration from the sole host starter."""
+    applied_digest = hashlib.sha256(COMPOSE.read_bytes()).hexdigest()
+    synced = runtime / "shared/source/current/codex-backend-sdk"
+    while True:
+        candidate = synced / "deploy/compose/company-chatmode.yml"
+        if candidate.is_file():
+            selected = subprocess.run(["git", "-C", str(synced), "rev-parse", "HEAD"],
+                                      capture_output=True, text=True, check=False).stdout.strip()
+            synced_main = subprocess.run(["git", "-C", str(synced), "rev-parse", "origin/main"],
+                                         capture_output=True, text=True, check=False).stdout.strip()
+            known_main = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+                                        capture_output=True, text=True, check=False).stdout.strip()
+            current_enough = (known_main and subprocess.run(
+                ["git", "-C", str(synced), "merge-base", "--is-ancestor", known_main, selected],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0)
+            if selected and selected == synced_main and current_enough:
+                digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+                if digest != applied_digest:
+                    try:
+                        subprocess.run(["docker", "compose", "--project-name", project,
+                                        "-f", str(candidate), "up", "-d"],
+                                       env=env, check=True, timeout=300)
+                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                        print(f"company Compose reconciliation pending: {exc}", flush=True)
+                    else:
+                        applied_digest = digest
+                        print(f"company Compose configuration applied: {selected}", flush=True)
+        time.sleep(30)
+
+
 def main() -> int:
     startup_time = time.time()
     repos = Path(os.environ.get("COMPANY_REPOS_ROOT", str(Path.home() / "Projects"))).resolve()
@@ -104,7 +136,10 @@ def main() -> int:
             # this starter. Never hand startup back to that stale checkout.
             known_main = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "origin/main"],
                                         capture_output=True, text=True, check=False).stdout.strip()
-            if (current and selected and known_main and selected == remote_main == known_main
+            current_enough = (known_main and selected and subprocess.run(
+                ["git", "-C", str(synced), "merge-base", "--is-ancestor", known_main, selected],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0)
+            if (current and selected and selected == remote_main and current_enough
                     and selected != current
                     and candidate.resolve() != Path(__file__).resolve()):
                 os.execve(sys.executable, [sys.executable, str(candidate)],
@@ -196,6 +231,7 @@ def main() -> int:
             shutil.rmtree(old)
     if legacy_relay.is_file():
         legacy_relay.unlink()
+    reconcile_compose(project, runtime, env)
     return 0
 
 

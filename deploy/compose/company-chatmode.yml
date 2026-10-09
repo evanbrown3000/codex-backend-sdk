@@ -114,6 +114,7 @@ services:
       COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
       COGNILODE_COMPANY_ROOT: /company
       COGNILODE_B4PT0R_SDK_ROOT: /company/codex-backend-sdk
+      COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
       PATH: /usr/bin:/usr/local/bin:/bin
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro

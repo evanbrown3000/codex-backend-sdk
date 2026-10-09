@@ -60,6 +60,8 @@ DEVICE_ID = os.environ.get("COGNILODE_CHATMODE_DEVICE_ID", "evanpc")
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 DEVICE_PRIORITY = int(os.environ.get("COGNILODE_CHATMODE_DEVICE_PRIORITY", "100"))
 STAGE_ROOT = ROOT / "staged-attachments"
+JOB_SCAN_PAGE_SIZE = 100
+JOB_SCAN_PAGES_PER_POLL = 4
 
 
 def provider_tool_evidence(raw: bytes, *, expected_sha256: str = "") -> list[dict]:
@@ -1046,11 +1048,62 @@ def heartbeat(device_id: str, active: int) -> None:
     event("heartbeat", device_id=device_id, available=ready, active=active)
 
 
+def scan_cursor_path(device_id: str) -> Path:
+    return ROOT / (device_id + ".job-scan.json")
+
+
+def _scan_cursors(device_id: str) -> dict:
+    try:
+        value = json.loads(scan_cursor_path(device_id).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _save_scan_cursor(device_id: str, state: str, cursor: str) -> None:
+    value = _scan_cursors(device_id)
+    value[state] = cursor
+    atomic_json(scan_cursor_path(device_id), value)
+
+
+def scan_job_state(device_id: str, state: str) -> tuple[list[dict], str]:
+    """Read a bounded slice and carry the keyset position into the next poll.
+
+    A state transition during scanning may defer a row until the next sweep,
+    but it cannot permanently bury it behind the first API page. The D1 fence
+    and provider send custody remain the authority for exactly-once effects.
+    """
+    cursor = str(_scan_cursors(device_id).get(state) or "")
+    jobs: list[dict] = []
+    seen: set[str] = set()
+    max_pages = 1 if state == "effect_pending" else JOB_SCAN_PAGES_PER_POLL
+    for _ in range(max_pages):
+        response = sender.operator_memory_post({"operation": "list_jobs", "provider": "chatgpt.com",
+                                                "state": state, "limit": JOB_SCAN_PAGE_SIZE,
+                                                "cursor": cursor})
+        if not isinstance(response, dict) or not isinstance(response.get("jobs"), list):
+            raise RuntimeError("invalid D1 list_jobs page")
+        page = response["jobs"]
+        if "next_cursor" not in response and len(page) >= JOB_SCAN_PAGE_SIZE:
+            raise RuntimeError("D1 list_jobs pagination is unavailable")
+        for job in page:
+            if not isinstance(job, dict) or not job.get("id"):
+                raise RuntimeError("invalid D1 list_jobs job")
+            if job["id"] not in seen:
+                jobs.append(job)
+                seen.add(job["id"])
+        next_cursor = response.get("next_cursor")
+        if not next_cursor:
+            return jobs, ""
+        if not isinstance(next_cursor, str) or next_cursor == cursor:
+            raise RuntimeError("invalid D1 list_jobs cursor progression")
+        cursor = next_cursor
+    return jobs, cursor
+
+
 def poll(device_id: str, active_ids: set[str], lock: threading.Lock) -> None:
-    claimed = sender.operator_memory_post({"operation": "list_jobs", "provider": "chatgpt.com",
-                                           "state": "claimed", "limit": 100}).get("jobs") or []
-    pending = sender.operator_memory_post({"operation": "list_jobs", "provider": "chatgpt.com",
-                                           "state": "effect_pending", "limit": 100}).get("jobs") or []
+    pending, pending_cursor = scan_job_state(device_id, "effect_pending")
+    claimed, claimed_cursor = scan_job_state(device_id, "claimed")
     recovery_leader = None
     if pending:
         try:
@@ -1072,7 +1125,12 @@ def poll(device_id: str, active_ids: set[str], lock: threading.Lock) -> None:
             with lock:
                 if str(job.get("id") or "") in active_ids:
                     continue
-            recover(job, device_id)
+            try:
+                recover(job, device_id)
+            except Exception as exc:
+                event("recovery_error_retry_next_sweep", job_id=job["id"],
+                      error=type(exc).__name__ + ":" + str(exc)[:200])
+    _save_scan_cursor(device_id, "effect_pending", pending_cursor)
     for job in claimed:
         if not selected_for_device(job, device_id):
             continue
@@ -1088,6 +1146,7 @@ def poll(device_id: str, active_ids: set[str], lock: threading.Lock) -> None:
                 with lock:
                     active_ids.discard(key)
         threading.Thread(target=run, daemon=True, name="chatmode-" + job_id[:24]).start()
+    _save_scan_cursor(device_id, "claimed", claimed_cursor)
 
 
 def main() -> int:

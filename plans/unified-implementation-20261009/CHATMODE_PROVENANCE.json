@@ -1,0 +1,13 @@
+{
+  "source_record": "/home/evan/.local/share/cognilode/b4pt0r-chatmode/b4pt0r-chatmode-job-eaa0845722ce21260da34172.collected.json",
+  "artifact": {
+    "name": "author-four-implementation-plans-native-codex-http-gate-rpe-taskflow-memory-decisionx.zip",
+    "path": "/home/evan/.local/share/cognilode/b4pt0r-chatmode/b4pt0r-chatmode-job-eaa0845722ce21260da34172.files/author-four-implementation-plans-native-codex-http-gate-rpe-taskflow-memory-decisionx.zip",
+    "sandbox_path": "/mnt/data/author-four-implementation-plans-native-codex-http-gate-rpe-taskflow-memory-decisionx.zip",
+    "sha256": "820a2f242b76797840d63fd8f56373cef213e7effb4db1a90fa23cd69d8b38fa",
+    "size": 2525,
+    "source": "chatgpt_interpreter_download",
+    "source_name": "author-four-implementation-plans-native-codex-http-gate-rpe-taskflow-memory-decisionx.zip"
+  },
+  "conversation_id": "6ac944f6-19f8-83ea-8168-3906736bc557"
+}

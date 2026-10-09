@@ -1,0 +1,9 @@
+project Native Codex Relay
+id native-codex-relay
+[ ] Implement AppServer relay with Modified Codex CLI unified conversation read/update/prompt integration
+    owner: Elliot Mercer
+    context:
+      - /home/evan/Projects/modified-codex-runtime
+      - /home/evan/Projects/cognilode-codex
+    acceptance:
+      preserve vanilla TUI/native semantics; incorporate follow readers and rollout comparison commit b7b4ab6026dd199b6ab29f8d5759517fbf897101

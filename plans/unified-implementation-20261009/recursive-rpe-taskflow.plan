@@ -1,0 +1,9 @@
+project Recursive RPE TaskFlow
+id recursive-rpe-taskflow
+[ ] Wire recursive RPE usage, phase cognitive operations, successor generation, and NeedsRevision feedback loop
+    owner: Avery Stone
+    context:
+      - /home/evan/Projects/research-plan-execute
+      - /home/evan/Projects/codex-backend-sdk
+    acceptance:
+      corrected assignments are generated automatically; preserve rejection/rate limits; average recurrence rhythm approximately 15 minutes with variation; add existing-image container supervision

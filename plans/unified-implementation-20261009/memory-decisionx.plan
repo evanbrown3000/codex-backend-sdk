@@ -1,0 +1,9 @@
+project Memory DecisionX Assignment Integration
+id memory-decisionx
+[ ] Integrate memory discovery, admission, semantic work delivery, and DecisionX full-conversation IAE selection into later assignments
+    owner: Nadia Brooks
+    context:
+      - /home/evan/Projects/memory-stock-canonical
+      - /home/evan/Projects/modified-codex-runtime
+    acceptance:
+      enable actual later assignment selection; ordinary work must not require a 500-source prerequisite

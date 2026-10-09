@@ -1,0 +1,11 @@
+project Credential Custodied HTTP Gateway
+id http-gateway
+[ ] Implement HTTP gate integration, source-attributed audit pipeline, policy observation gating, and container deployment path
+    owner: Daniel Reyes
+    context:
+      - /home/evan/Projects/codex-backend-sdk
+      - /home/evan/Projects/codex-backend-sdk/gate
+      - /home/evan/Projects/codex-backend-sdk/scripts
+      - /home/evan/Projects/codex-backend-sdk/deploy
+    acceptance:
+      preserve central observability disablement unless policy enables it; use existing images; no builds

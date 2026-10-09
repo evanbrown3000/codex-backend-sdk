@@ -1,0 +1,10 @@
+project Unified Cognilode Autonomous Implementation
+id unified-implementation-20261009
+[ ] Native Codex relay and conversation integration
+    child_plans: native-codex-relay.plan
+[ ] Credential-custodied HTTP gateway and audit controls
+    child_plans: http-gateway.plan
+[ ] Recursive RPE TaskFlow successor generation
+    child_plans: recursive-rpe-taskflow.plan
+[ ] Memory admission and DecisionX assignment integration
+    child_plans: memory-decisionx.plan

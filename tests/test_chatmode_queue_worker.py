@@ -211,11 +211,15 @@ def test_decisionx_ready_stock_enqueues_one_xhigh_chatmode_job_with_full_source_
     module = worker()
     module.DX_HOME = tmp_path
     source = {'provider': 'openai-codex', 'conversation_id': 'verified-1',
+              'prompt_sha256': '1'*64, 'response_sha256': '2'*64,
               'events': [turn for n in range(8) for turn in (
                   {'id': f'u{n}', 'role': 'user', 'content': f'Investigate source lineage number {n}.'},
                   {'id': f'a{n}', 'role': 'assistant', 'content': f'I compared source lineage number {n}.'})]}
     refs = [{'provider':'openai-codex','conversation_id': f'verified-{n}',
-             'prompt_sha256':'1'*64,'response_sha256':'2'*64,'source_at_utc':'2024-01-01T00:00:00+00:00'}
+             'prompt_sha256':'1'*64,'response_sha256':'2'*64,
+             'source_at_utc':(datetime(2024,1,1,tzinfo=timezone.utc)
+                              + timedelta(days=round((n-1)*800/499))).isoformat(),
+             'project_hint':f'project-{n%7}'}
             for n in range(1,501)]
     class Bridge:
         @staticmethod
@@ -229,7 +233,8 @@ def test_decisionx_ready_stock_enqueues_one_xhigh_chatmode_job_with_full_source_
     class Builder:
         @staticmethod
         def build_source_batches(_post, selected, *, output_root, bridge):
-            assert selected == refs[:1]
+            assert len(selected) == 32
+            assert len({(r['provider'],r['conversation_id']) for r in selected}) == 32
             output_root.mkdir(parents=True)
             path = output_root / 'batch-000.zip'
             path.write_bytes(b'full source packet')
@@ -241,11 +246,8 @@ def test_decisionx_ready_stock_enqueues_one_xhigh_chatmode_job_with_full_source_
     class Sender:
         @staticmethod
         def operator_memory_post(body):
-            if body['operation']=='conversations':
-                return {'ok':True,'records':[{'provider':'openai-codex','conversation_id':'verified-1'}],
-                        'next_cursor':None}
             if body['operation']=='read':
-                return {'ok':True,'conversation':source}
+                return {'ok':True,'conversation':{**source,'conversation_id':body['conversation_id']}}
             if body['operation']=='enqueue_decisionx_prompt':
                 queued.append(body)
                 return {'ok':True,'job':{'id':body['job_id'],'state':'queued'}}
@@ -261,8 +263,13 @@ def test_decisionx_ready_stock_enqueues_one_xhigh_chatmode_job_with_full_source_
     assert queued[0]['provider']=='chatgpt.com'
     assert queued[0]['reasoning_effort']=='xhigh'
     assert queued[0]['model']=='gpt-5-6-thinking'
+    assert queued[0]['priority']==72
     assert len(queued[0]['attachment_refs'])==2
     assert all(row['mirrors'][0].startswith('s3://') for row in queued[0]['attachment_refs'])
+    with zipfile.ZipFile(queued[0]['attachment_refs'][0]['ref'].removeprefix('file:')) as packet:
+        episodes=[json.loads(line) for line in packet.read('episodes.jsonl').splitlines()]
+    assert len(episodes)==32
+    assert len({row['conversation_id'] for row in episodes})==32
     with module._dx_connection() as db:
         db.execute("UPDATE episodes SET state='retry',retry_after=0")
     state=json.loads((tmp_path/'scan.json').read_text())
@@ -272,6 +279,21 @@ def test_decisionx_ready_stock_enqueues_one_xhigh_chatmode_job_with_full_source_
     module.decisionx_batch_pump()
     assert len(queued)==2
     assert queued[1]['job_id'] != queued[0]['job_id']
+
+
+def test_decisionx_source_order_rotates_years_providers_and_projects():
+    module = worker()
+    rows=[]
+    for provider in ('openai-codex','chatgpt-export-format'):
+        for year in (2024,2025,2026):
+            for n in range(5):
+                rows.append({'provider':provider,'conversation_id':f'{provider}-{year}-{n}',
+                             'source_at_utc':f'{year}-01-01T00:00:00+00:00',
+                             'project_hint':f'project-{n%2}'})
+    ordered=module._dx_diversified_source_refs(list(reversed(rows)))
+    assert len(ordered)==30
+    assert len({(row['provider'],row['source_at_utc'][:4]) for row in ordered[:6]})==6
+    assert len({row['project_hint'] for row in ordered[:12]})==2
 
 
 def test_decisionx_shared_stock_census_cannot_block_queue_polling(tmp_path):

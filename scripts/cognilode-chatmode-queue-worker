@@ -340,10 +340,12 @@ def attachment_paths(job: dict) -> list[Path]:
 # DecisionX labeling is a phase of the EXISTING D1 queue. Only derived progress
 # metadata and transient attachment ZIPs live on this network device.
 import sqlite3
+from collections import defaultdict
 from contextlib import contextmanager
 
 DX_HOME = ROOT / "decisionx-label-batches"
-DX_TARGET = 128
+DX_TARGET = 32
+DX_EPISODES_PER_SOURCE_PER_SCAN = 1
 DX_MIN = 16
 DX_TAIL_MIN = 8
 DX_INPUT_CHAR_BUDGET = 70_000  # about 20K tokens, before ZIP compression
@@ -660,6 +662,41 @@ def _dx_batch_priority(db):
     return DX_PRIORITY if prior else DX_FIRST_VERIFIED_PRIORITY
 
 
+def _dx_diversified_source_refs(refs):
+    """Round-robin verified sources across provider, year, then project hint."""
+    cohorts = defaultdict(lambda: defaultdict(list))
+    for ref in refs:
+        provider, cid = str(ref.get("provider") or ""), str(ref.get("conversation_id") or "")
+        if not provider or not cid:
+            continue
+        try:
+            year = datetime.fromisoformat(str(ref.get("source_at_utc") or "").replace(
+                "Z", "+00:00")).year
+        except ValueError:
+            year = 0
+        project = str(ref.get("project_hint") or "unclassified").strip().casefold()[:80]
+        cohorts[(provider, year)][project].append(ref)
+    by_cohort = {}
+    for cohort, projects in cohorts.items():
+        ordered = []
+        for group in projects.values():
+            group.sort(key=lambda ref: hashlib.sha256(
+                (str(ref["provider"]) + ":" + str(ref["conversation_id"])).encode()).hexdigest())
+        project_keys = sorted(projects, key=lambda key: hashlib.sha256(key.encode()).hexdigest())
+        while any(projects.values()):
+            for key in project_keys:
+                if projects[key]:
+                    ordered.append(projects[key].pop(0))
+        by_cohort[cohort] = ordered
+    cohorts_ordered = sorted(by_cohort, key=lambda key: (key[1], key[0]))
+    result = []
+    while any(by_cohort.values()):
+        for key in cohorts_ordered:
+            if by_cohort[key]:
+                result.append(by_cohort[key].pop(0))
+    return result
+
+
 def decisionx_batch_pump():
     """Incrementally create MULTI-episode Chat-mode jobs in the ONE hosted D1 queue."""
     state = _dx_load()
@@ -686,37 +723,46 @@ def decisionx_batch_pump():
         if released: event("decisionx_cancelled_batch_refs_released", episodes=released)
         pending = list(state.get("spool") or [])
         known = {e["episode_id"] for e in pending}
-        cursor = int(state.get("offset") or 0)
+        source_refs = _dx_diversified_source_refs(stock.get("verified_source_refs") or [])
+        if not source_refs:
+            raise RuntimeError("DecisionX verified stock lacks source references")
+        cursor = int(state.get("offset") or 0) % len(source_refs)
         end_of_corpus = False
-        # Scan a bounded number of centrally admitted conversations per heartbeat.
-        for _ in range(2):
-            if len(pending) >= DX_TARGET: break
-            page = sender.operator_memory_post({"operation":"conversations","limit":60,"cursor":str(cursor)})
-            if not page.get("ok"): raise RuntimeError("DecisionX source-list unavailable")
-            rows = page.get("records") or page.get("rows") or []
-            if not rows:
-                end_of_corpus = True
-                cursor = 0
+        # The verified stock itself supplies stable source handles. Select one
+        # episode from each source on this pass before returning for deeper turns.
+        for _ in range(min(len(source_refs), DX_TARGET * 4)):
+            if len(pending) >= DX_TARGET:
                 break
-            for index in rows:
-                if len(pending) >= DX_TARGET: break
-                provider, cid = index.get("provider"), index.get("conversation_id")
-                if (provider, cid) not in verified: continue
-                result = sender.operator_memory_post({"operation":"read","provider":provider,"conversation_id":cid})
-                if not result.get("ok"): continue
-                if bridge._complete_source(index, result) is None: continue
-                for episode in _dx_extract(result.get("conversation") or {}):
-                    eid, sha = episode["episode_id"], episode["source_sha256"]
-                    old = db.execute("SELECT source_sha,state,retry_after FROM episodes WHERE id=?",(eid,)).fetchone()
-                    if old and old[0]==sha and (old[1] in ("done","queued") or old[2]>time.time()): continue
-                    if eid in known: continue
-                    pending.append(_dx_ref(episode));known.add(eid)
-                    if len(pending)>=DX_TARGET: break
-            cursor += len(rows)
-            if not page.get("next_cursor"):
+            ref = source_refs[cursor]
+            cursor = (cursor + 1) % len(source_refs)
+            if cursor == 0:
                 end_of_corpus = True
-                cursor = 0
-                break
+            provider, cid = ref["provider"], ref["conversation_id"]
+            if (provider, cid) not in verified:
+                continue
+            try:
+                result = sender.operator_memory_post({"operation":"read","provider":provider,
+                                                      "conversation_id":cid})
+            except Exception as exc:
+                event("decisionx_source_retry_after_read_error", provider=provider,
+                      conversation_id=cid, error=type(exc).__name__)
+                continue
+            if not result.get("ok") or bridge._complete_source(ref, result) is None:
+                continue
+            source = result.get("conversation") or {}
+            if (source.get("prompt_sha256") != ref["prompt_sha256"]
+                or source.get("response_sha256") != ref["response_sha256"]):
+                continue
+            source_added = 0
+            for episode in _dx_extract(source):
+                eid, sha = episode["episode_id"], episode["source_sha256"]
+                old = db.execute("SELECT source_sha,state,retry_after FROM episodes WHERE id=?",(eid,)).fetchone()
+                if old and old[0]==sha and (old[1] in ("done","queued") or old[2]>time.time()): continue
+                if eid in known: continue
+                pending.append(_dx_ref(episode));known.add(eid)
+                source_added += 1
+                if source_added >= DX_EPISODES_PER_SOURCE_PER_SCAN or len(pending)>=DX_TARGET:
+                    break
         state["offset"] = cursor
         state["spool"] = pending
         # Defer tail work until there are enough candidates; avoid micro-labeling calls.

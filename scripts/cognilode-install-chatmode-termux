@@ -66,6 +66,7 @@ case "$ACTION" in
     if ! proot-distro login ubuntu -- /bin/true >/dev/null 2>&1; then
       proot-distro install ubuntu:24.04
     fi
+    proot-distro login ubuntu -- /bin/mkdir -p /root/.aws /root/.config/cognilode
     proot_run /bin/bash -lc 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 python3-venv python3-pip git curl ca-certificates awscli'
     proot_run /bin/bash -lc "if [ ! -d '$SDK_DIR/.git' ]; then git clone --filter=blob:none '$SDK_URL' '$SDK_DIR'; fi"
     proot_run /bin/bash -lc "cd '$SDK_DIR' && git fetch --quiet origin main && git checkout --detach origin/main && python3 -m venv '$SDK_VENV' && '$SDK_VENV/bin/pip' install -q -e . curl_cffi cryptography secretstorage"

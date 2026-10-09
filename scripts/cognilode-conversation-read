@@ -30,6 +30,19 @@ DEFAULT_DRIVE_READER = Path(os.environ.get(
 def _load_script(path: Path, name: str) -> Any:
     if not path.is_file():
         raise FileNotFoundError(f"conversation reader unavailable: {path}")
+    # The Drive reader is deployed as a script beside transport helpers, with
+    # Memory Stock's package in the checkout's src/ directory. Keep those
+    # import roots for its lazy imports when read_full_conversation runs.
+    import_roots = [path.parent]
+    for parent in path.parents:
+        source_root = parent / "src"
+        if (source_root / "memory_stock").is_dir():
+            import_roots.append(source_root)
+            break
+    for root in reversed(import_roots):
+        location = str(root)
+        if location not in sys.path:
+            sys.path.insert(0, location)
     loader = importlib.machinery.SourceFileLoader(name, str(path))
     spec = importlib.util.spec_from_loader(loader.name, loader)
     assert spec is not None

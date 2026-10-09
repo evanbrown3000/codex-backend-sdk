@@ -109,7 +109,7 @@ def test_high_water_pauses_before_remote_zip_request(monkeypatch, tmp_path):
     (state_root / "cursor.json").write_text(json.dumps({"archive_etag": '"etag"',
         "archive_bytes": 10, "admitted": 500, "exact_deduped": 0, "next_shard": 1,
         "position": 2, "deferred": []}))
-    monkeypatch.setattr(backfill, "AuthenticatedRangeFile", lambda *_: (_ for _ in ()).throw(
+    monkeypatch.setattr(backfill, "AuthenticatedRangeFile", lambda *_, **__: (_ for _ in ()).throw(
         AssertionError("remote ZIP must not be requested above high water")))
     result = backfill.run(url_file, maximum=100, state_root=state_root)
     assert result["state"] == "drive_lag_backpressure"
@@ -137,7 +137,7 @@ def test_expired_source_promotes_candidate_but_old_drive_lag_still_pauses(monkey
     class Expired(Exception):
         response = SimpleNamespace(status_code=403)
 
-    def source(session, url):
+    def source(session, url, **kwargs):
         if url == old_url:
             raise Expired()
         assert url == new_url
@@ -174,7 +174,7 @@ def test_renewed_url_same_archive_keeps_exact_cursor(monkeypatch, tmp_path):
     class Expired(Exception):
         response = SimpleNamespace(status_code=403)
 
-    def source(session, url):
+    def source(session, url, **kwargs):
         if url == old_url:
             raise Expired()
         return SimpleNamespace(etag='"same"', size=456)
@@ -185,3 +185,26 @@ def test_renewed_url_same_archive_keeps_exact_cursor(monkeypatch, tmp_path):
     assert url_file.read_text().strip() == new_url
     assert json.loads((root / "cursor.json").read_text())["position"] == 9
     assert not (root / "superseded-snapshots").exists()
+
+
+def test_source_retry_after_skips_next_timer_network_read(monkeypatch, tmp_path):
+    url_file = tmp_path / "privacy-export-url.txt"
+    url_file.write_text("https://chatgpt.com/backend-api/estuary/content?source\n")
+    os.chmod(url_file, 0o600)
+    root = tmp_path / "state"
+    monkeypatch.setattr(backfill.sender, "new_session", lambda *a: object())
+
+    def limited(session, url, *, retry_hook):
+        retry_hook(503, 600)
+        raise backfill.ExportRetryLater(503, 600)
+
+    monkeypatch.setattr(backfill, "AuthenticatedRangeFile", limited)
+    try:
+        backfill.run(url_file, maximum=1, state_root=root)
+        assert False, "first provider read must defer"
+    except backfill.ExportRetryLater:
+        pass
+    assert json.loads((root / "source-retry-after.json").read_text())["http_status"] == 503
+    monkeypatch.setattr(backfill, "AuthenticatedRangeFile", lambda *a, **kw: (_ for _ in ()).throw(
+        AssertionError("provider read before Retry-After")))
+    assert backfill.run(url_file, maximum=1, state_root=root)["state"] == "provider_retry_after"

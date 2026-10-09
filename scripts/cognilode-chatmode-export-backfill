@@ -10,7 +10,7 @@ reported only after that writer's exact readback, never on mere D1 admission.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import fcntl
 from hashlib import sha256
 from importlib.machinery import SourceFileLoader
@@ -25,7 +25,7 @@ import zipfile
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from chatmode_export_range import AuthenticatedRangeFile
+from chatmode_export_range import AuthenticatedRangeFile, ExportRetryLater
 from chatmode_export_rotation import (finish_promotion, is_expired_source_error,
                                       promote, _atomic_bytes)
 
@@ -366,6 +366,18 @@ def run(url_file: Path, *, maximum: int, state_root: Path = STATE_ROOT) -> dict:
     lock_path = state_root / "cursor.lock"
     with lock_path.open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        retry_path = state_root / "source-retry-after.json"
+        if retry_path.is_file():
+            retry = json.loads(retry_path.read_text(encoding="utf-8"))
+            if datetime.now(timezone.utc) < datetime.fromisoformat(retry["retry_at"]):
+                return {"state": "provider_retry_after", "http_status": retry["http_status"],
+                        "retry_at": retry["retry_at"]}
+            retry_path.unlink()
+
+        def defer_source_retry(status: int, seconds: int):
+            write_state(retry_path, {"http_status": status,
+                                     "retry_at": (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()})
+
         candidate_file = url_file.with_name("privacy-export-next-url.txt")
         finish_promotion(state_root, url_file, candidate_file)
         url = url_file.read_text(encoding="utf-8").strip()
@@ -389,14 +401,14 @@ def run(url_file: Path, *, maximum: int, state_root: Path = STATE_ROOT) -> dict:
                         "next_shard": state.get("next_shard"), "position": state.get("position")}
         session = sender.new_session(sender.DEFAULT_PROFILE, sender.DEFAULT_IMPERSONATE)
         try:
-            source = AuthenticatedRangeFile(session, url)
+            source = AuthenticatedRangeFile(session, url, retry_hook=defer_source_retry)
         except Exception as exc:
             if not is_expired_source_error(exc) or not candidate_file.is_file():
                 raise
             candidate = candidate_file.read_text(encoding="utf-8").strip()
             if not candidate.startswith("https://chatgpt.com/backend-api/estuary/content?"):
                 raise RuntimeError("unexpected replacement export URL origin or path") from exc
-            replacement = AuthenticatedRangeFile(session, candidate)
+            replacement = AuthenticatedRangeFile(session, candidate, retry_hook=defer_source_retry)
             if state is not None and (state["archive_etag"], state["archive_bytes"]) != (replacement.etag, replacement.size):
                 promote(state_root, url_file, candidate_file, state, url, candidate, replacement, exc)
                 state = None
@@ -539,7 +551,12 @@ def main():
     args = p.parse_args()
     if not 1 <= args.max_conversations <= 100:
         p.error("--max-conversations must be 1..100")
-    print(json.dumps(run(args.url_file, maximum=args.max_conversations), sort_keys=True))
+    try:
+        result = run(args.url_file, maximum=args.max_conversations)
+    except ExportRetryLater as exc:
+        result = {"state": "provider_retry_after", "http_status": exc.status_code,
+                  "retry_after_seconds": exc.retry_after_seconds}
+    print(json.dumps(result, sort_keys=True))
 
 
 if __name__ == "__main__":

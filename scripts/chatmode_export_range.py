@@ -11,6 +11,8 @@ import io
 import re
 import zipfile
 from collections import OrderedDict
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 _RANGE = re.compile(r"^bytes (\d+)-(\d+)/(\d+)$")
@@ -20,10 +22,32 @@ class ExportChanged(RuntimeError):
     pass
 
 
+class ExportRetryLater(RuntimeError):
+    def __init__(self, status_code: int, retry_after_seconds: int):
+        super().__init__(f"export source temporarily returned HTTP {status_code}")
+        self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
+
+
+def retry_after_seconds(value: str | None) -> int:
+    if value:
+        try:
+            return max(1, min(86400, int(float(value))))
+        except (ValueError, TypeError):
+            try:
+                date = parsedate_to_datetime(value)
+                return max(1, min(86400, int((date - datetime.now(timezone.utc)).total_seconds())))
+            except (TypeError, ValueError, OverflowError):
+                pass
+    return 120
+
+
 class AuthenticatedRangeFile(io.RawIOBase):
-    def __init__(self, session, url: str, *, chunk_size: int = 2 << 20):
+    def __init__(self, session, url: str, *, chunk_size: int = 2 << 20, retry_hook=None):
         self.session, self.url, self.chunk_size = session, url, chunk_size
+        self.retry_hook = retry_hook
         head = session.head(url, timeout=60, allow_redirects=False)
+        self._check_retryable(head)
         head.raise_for_status()
         self.size = int(head.headers["Content-Length"])
         self.etag = head.headers.get("ETag")
@@ -32,6 +56,14 @@ class AuthenticatedRangeFile(io.RawIOBase):
             raise ExportChanged("export lacks byte ranges or immutable ETag")
         self.position = 0
         self.cache: OrderedDict[int, bytes] = OrderedDict()
+
+    def _check_retryable(self, response):
+        status = response.status_code
+        if status in {408, 425, 429, 500, 502, 503, 504}:
+            delay = retry_after_seconds(response.headers.get("Retry-After"))
+            if self.retry_hook is not None:
+                self.retry_hook(status, delay)
+            raise ExportRetryLater(status, delay)
 
     def readable(self):
         return True
@@ -59,6 +91,7 @@ class AuthenticatedRangeFile(io.RawIOBase):
         response = self.session.get(self.url, headers={
             "Range": f"bytes={start}-{end}", "If-Range": self.etag,
         }, timeout=120, allow_redirects=False)
+        self._check_retryable(response)
         expected = f"bytes {start}-{end}/{self.size}"
         if (response.status_code != 206 or response.headers.get("Content-Range") != expected
                 or response.headers.get("ETag") != self.etag
@@ -91,4 +124,3 @@ def members(session, url: str):
     source = AuthenticatedRangeFile(session, url)
     with zipfile.ZipFile(source) as archive:
         return source, archive.infolist()
-

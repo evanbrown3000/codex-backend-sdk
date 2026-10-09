@@ -108,11 +108,15 @@ services:
     cpus: 1
     mem_limit: 2g
     pids_limit: 192
-    working_dir: /company/codex-backend-sdk
-    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-company-chatmode-runtime]
+    working_dir: /runtime
+    entrypoint: [sh, -c]
+    command:
+      - >-
+        while ! test -f /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-chatmode-runtime; do sleep 2; done;
+        exec python3 /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-chatmode-runtime
     environment:
       HOME: /home/worker
-      PYTHONPATH: /company/codex-backend-sdk/gate
+      PYTHONPATH: /runtime/source/current/codex-backend-sdk/gate:/runtime/source/current/modified-codex-runtime/src
       COGNILODE_HTTP_GATE_SOCKET: /runtime/http-gate/gate.sock
       COGNILODE_HTTP_GATE_FALLBACK_LOG: /runtime/http-gate/fallback.jsonl
       COGNILODE_HTTP_GATE_POLICY_FILE: /runtime/http-gate/policy.json
@@ -120,7 +124,8 @@ services:
       COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
       COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
       COGNILODE_COMPANY_ROOT: /company
-      COGNILODE_B4PT0R_SDK_ROOT: /company/codex-backend-sdk
+      COGNILODE_B4PT0R_SDK_ROOT: /runtime/source/current/codex-backend-sdk
+      COGNILODE_UNIFIED_PROMPTER: /runtime/source/current/modified-codex-runtime/src/modified_codex/unified_bridge.py
       COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
       COGNILODE_AWS_CLI: /usr/bin/aws
       PATH: /usr/bin:/usr/local/bin:/bin
@@ -132,6 +137,7 @@ services:
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
     depends_on:
       - provider-transport
+      - source-sync
 
   source-sync:
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}

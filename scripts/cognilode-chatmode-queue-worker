@@ -121,6 +121,7 @@ def provider_tool_evidence(raw: bytes, *, expected_sha256: str = "") -> list[dic
                     messages[mid] = {"role": author.get("role"),
                                      "name": author.get("name"),
                                      "recipient": msg.get("recipient"),
+                                     "status": msg.get("status"),
                                      "parent_id": metadata.get("parent_id") if isinstance(metadata, dict) else None}
                     return
             for key, child in value.items():
@@ -152,10 +153,12 @@ def provider_tool_evidence(raw: bytes, *, expected_sha256: str = "") -> list[dic
         if role == "assistant" and isinstance(recipient, str) and recipient not in {"", "all"}:
             calls[mid] = recipient
         if role == "tool" and isinstance(msg.get("name"), str):
-            results[mid] = (msg["name"], str(msg.get("parent_id") or ""))
+            results[mid] = (msg["name"], str(msg.get("parent_id") or ""), msg.get("status"))
     evidence = []
-    for result_id, (name, parent_id) in results.items():
-        if not parent_id or calls.get(parent_id) != name: continue
+    for result_id, (name, parent_id, status) in results.items():
+        # A paired call that remained in progress or finished with an error
+        # proves invocation, not completed native computation.
+        if not parent_id or calls.get(parent_id) != name or status != "finished_successfully": continue
         # ChatGPT Chat-mode's built-in sandbox is container.exec; Code Mode's
         # built-in sandbox is functions.exec. An opaque plugin recipient (for
         # example api_tool.call_tool or a dynamic tool ID) is not native work.

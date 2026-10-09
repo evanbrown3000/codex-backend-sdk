@@ -35,6 +35,7 @@ def test_prepare_writes_low_priority_durable_runner_but_does_not_activate(tmp_pa
     assert "--device-id \"home-android-phone\" --interval 60" in runner.read_text()
     assert (Path(env["PREFIX"]) / "var/service/cognilode-chatmode-phone/down").is_file()
     assert (Path(env["HOME"]) / ".termux/boot/20-cognilode-chatmode").is_file()
+    assert "proot-distro login ubuntu -- /bin/mkdir -p /root/.aws /root/.config/cognilode" in Path(env["COGNILODE_TEST_CALLS"]).read_text()
     assert "sv-enable" not in Path(env["COGNILODE_TEST_CALLS"]).read_text()
 
 

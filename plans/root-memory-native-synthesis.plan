@@ -7,5 +7,5 @@ id root-memory
     do:
       - Read every physically attached source batch in the ChatGPT Chat-mode native sandbox and reconstruct all full conversations with the included script.
       - Carry out the heavy semantic comparison and synthesis inside that native sandbox, with at least 500 distinct complete conversations spanning multiple years.
-      - Write substantive global.md, project.md, role.md, and EXTERNAL_EFFECT_INSTRUCTIONS.md, then run the included BUILD_MEMORY_PACKET_IN_NATIVE_SANDBOX.py to produce the single downloadable ZIP with exact source references and SHA-256 hashes.
+      - Write substantive global.md, project.md, role.md, and EXTERNAL_EFFECT_INSTRUCTIONS.md, then run the included BUILD_MEMORY_PACKET_IN_NATIVE_SANDBOX.py to produce one downloadable ZIP of at most 20 MiB with exact source references and SHA-256 hashes.
       - Write an in-chat report explaining historical changes, contradictions, failures, successes, uncertainty, and what remains incomplete.

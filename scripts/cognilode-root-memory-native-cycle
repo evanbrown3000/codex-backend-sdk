@@ -150,6 +150,8 @@ with zipfile.ZipFile("root-memory-work-product.zip", "w", compression=zipfile.ZI
     out.writestr("MANIFEST.json", json.dumps(manifest, sort_keys=True, ensure_ascii=False) + "\\n")
     for name in ("global.md", "project.md", "role.md", "EXTERNAL_EFFECT_INSTRUCTIONS.md"):
         out.write(root / name, arcname=name)
+if Path("root-memory-work-product.zip").stat().st_size > 20 * 1024 * 1024:
+    raise ValueError("root-memory output ZIP exceeds 20 MiB")
 print("packet_sha256", sha256(Path("root-memory-work-product.zip").read_bytes()).hexdigest())
 print("packet_sources", len(refs))
 '''

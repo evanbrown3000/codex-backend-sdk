@@ -91,14 +91,15 @@ def main() -> int:
     project = "cognilode-company-runtime"
     image = env.get("COGNILODE_WORKSPACE_IMAGE", "cognilode-standard-workspace:2026-09-28")
     migrate_container_browser(project, image)
-    for name in ("company_auth", "company_operator"):
+    for name in ("company_auth", "company_operator", "company_deploy_custody"):
         subprocess.run(["docker", "volume", "create", f"{project}_{name}"],
                        stdout=subprocess.DEVNULL, check=True, timeout=30)
     subprocess.run(["docker", "run", "--rm", "--user", "0",
                     "--volume", f"{project}_company_auth:/auth",
                     "--volume", f"{project}_company_operator:/operator",
+                    "--volume", f"{project}_company_deploy_custody:/deploy",
                     image,
-                    "chown", "-R", f"{os.getuid()}:{os.getgid()}", "/auth", "/operator"],
+                    "chown", "-R", f"{os.getuid()}:{os.getgid()}", "/auth", "/operator", "/deploy"],
                    stdout=subprocess.DEVNULL, check=True, timeout=60)
     command = ["docker", "compose", "--project-name", project, "-f", str(COMPOSE), "up", "-d"]
     subprocess.run(command, env=env, check=True, timeout=180)

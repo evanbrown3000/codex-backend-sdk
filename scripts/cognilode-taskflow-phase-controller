@@ -33,6 +33,7 @@ import zipfile
 
 HERE = Path(__file__).resolve().parent
 SENDER_PATH = HERE / "cognilode-b4pt0r-chatmode"
+QUEUE_WORKER_PATH = HERE / "cognilode-chatmode-queue-worker"
 SLACK_ROLES_PATH = HERE.parent / "config/employee-slack-roles.json"
 DEFAULT_SECRETARY = Path.home() / "bin/modified-codex-secretary"
 DEFAULT_STATE_ROOT = Path.home() / ".local/share/cognilode/taskflow-phase-controller"
@@ -497,10 +498,30 @@ def verified_work_attachment(job: Mapping[str, Any], plan: Plan) -> dict[str, An
     expected=str(attachments[0].get("sha256") or "")
     if not ref.startswith("file:") or not HEX64.fullmatch(expected):
         raise ValueError("external-effect ZIP reference invalid")
-    meta=verify_manifest_zip(Path(ref.removeprefix("file:")),expected_plan_sha256=plan.sha256,require_external_instructions=True)
+    path=Path(ref.removeprefix("file:"))
+    if not path.is_file():
+        path=stage_external_work_zip(attachments[0],expected)
+    meta=verify_manifest_zip(path,expected_plan_sha256=plan.sha256,require_external_instructions=True)
     if meta["sha256"] != expected:
         raise ValueError("external-effect ZIP differs from queued SHA-256")
     return meta
+
+
+def stage_external_work_zip(row: Mapping[str, Any], digest: str) -> Path:
+    """Read a returned work ZIP on a different Codex environment by exact hash."""
+    mirrors=row.get("mirrors") or []
+    if not isinstance(mirrors,list) or not mirrors:
+        raise ValueError("external-effect work ZIP is absent and has no private mirror")
+    loader=importlib.machinery.SourceFileLoader("cognilode_taskflow_attachment_stager",str(QUEUE_WORKER_PATH))
+    spec=importlib.util.spec_from_loader(loader.name,loader); assert spec
+    worker=importlib.util.module_from_spec(spec); loader.exec_module(worker)
+    errors=[]
+    for uri in mirrors:
+        try:
+            return worker._stage_remote_attachment(str(uri),digest)
+        except (OSError,ValueError,RuntimeError,subprocess.CalledProcessError) as exc:
+            errors.append(type(exc).__name__)
+    raise ValueError("external-effect work ZIP mirror staging failed: " + ",".join(errors))
 
 
 def portable_attachment_ref(path: Path, digest: str) -> dict[str, Any]:

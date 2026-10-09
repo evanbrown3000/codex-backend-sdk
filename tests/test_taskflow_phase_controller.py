@@ -235,6 +235,23 @@ print(json.dumps({'completed':True,'final_candidate':{'family':'chatgpt','name':
             with self.assertRaisesRegex(ValueError,'queued SHA-256'):
                 c.verified_work_attachment(job,plan)
 
+    def test_external_worker_stages_hash_bound_work_zip_when_original_device_path_is_absent(self):
+        plan=c.parse_plan(PLAN)
+        with tempfile.TemporaryDirectory() as td:
+            path=Path(td)/'work.zip'
+            manifest_zip(path,plan.sha256,{'EXTERNAL_EFFECT_INSTRUCTIONS.md':b'apply', 'patch.txt':b'change'})
+            digest=hashlib.sha256(path.read_bytes()).hexdigest()
+            row={'ref':'file:/first-device/only/work.zip','sha256':digest,
+                 'mirrors':[f's3://private-bucket/taskflow-artifacts/sha256/{digest}.zip']}
+            job={'attachment_refs':[row]}
+            with mock.patch.object(c,'stage_external_work_zip',return_value=path) as stage:
+                verified=c.verified_work_attachment(job,plan)
+            stage.assert_called_once_with(row,digest)
+            self.assertEqual(verified['sha256'],digest)
+            with mock.patch.object(c,'stage_external_work_zip',return_value=path):
+                with self.assertRaisesRegex(ValueError,'queued SHA-256'):
+                    c.verified_work_attachment({'attachment_refs':[{**row,'sha256':'0'*64}]},plan)
+
     def test_worker_refuses_multiphase_chatgpt_completion_without_instruction_file(self):
         with tempfile.TemporaryDirectory() as td:
             path=Path(td)/'work.zip'; path.write_bytes(b'not zip')

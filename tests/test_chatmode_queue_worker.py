@@ -233,6 +233,8 @@ def test_decisionx_native_batch_verifies_source_and_binds_returned_compute(tmp_p
         archive.writestr('parts/part-000.part',full_raw)
     computed = native.run(input_zip, tmp_path / 'native', [source_zip])
     assert computed['episode_count'] == 1
+    render = tmp_path / 'native' / computed['rendered_sources'][0]['path']
+    assert 'Research the actual requirements' in render.read_text()
     output = tmp_path / 'labels.zip'
     label = {'episode_id': episode['episode_id'], 'source_sha256': episode['source_sha256'],
              'i': 'Research the actual requirements across the historical source commits.',

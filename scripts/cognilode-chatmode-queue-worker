@@ -357,8 +357,10 @@ The attached decisionx episode ZIP and source ZIPs contain complete rendered
 conversation records for every episode, split into <=20 MiB files. Run the
 attached RUN_ME.py in YOUR native ChatGPT.com sandbox as:
 python RUN_ME.py <episode-input.zip> <output-dir> <all-complete-source-zips...>
-It verifies every episode against the complete sources and computes lexical neighbors.
-Use its neighbors.json as supporting evidence while YOU reason semantically.
+It verifies every episode against the complete sources, renders the full
+conversations under complete_sources/, and computes lexical neighbors. Read
+those renderings as context and use neighbors.json as supporting evidence while
+YOU reason semantically.
 Do not move this computation to a remote machine. Include NATIVE_COMPUTE.json
 and neighbors.json unchanged in your single returned ZIP, alongside your labels.
 

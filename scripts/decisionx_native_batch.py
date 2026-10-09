@@ -118,6 +118,20 @@ def run(source_zip: Path, output_dir: Path, source_zips: list[Path]) -> dict:
                                             for score, key in scored[:5]],
                           "top_terms": [term for term, _ in bag.most_common(15)]})
     output_dir.mkdir(parents=True, exist_ok=True)
+    rendered = []
+    render_root = output_dir / "complete_sources"
+    render_root.mkdir(exist_ok=True)
+    for key, full in sorted(sources.items()):
+        lines = [f"# {key[0]} / {key[1]}", ""]
+        for event in full.get("events") or []:
+            lines.extend(["## " + str(event.get("role") or "unknown"), "",
+                          str(event.get("content") or ""), ""])
+        body = ("\n".join(lines) + "\n").encode("utf-8")
+        filename = digest((key[0] + ":" + key[1]).encode())[:24] + ".md"
+        (render_root / filename).write_bytes(body)
+        rendered.append({"provider": key[0], "conversation_id": key[1],
+                         "path": "complete_sources/" + filename,
+                         "rendered_sha256": digest(body)})
     neighbors_raw = canonical(neighbors) + b"\n"
     (output_dir / "neighbors.json").write_bytes(neighbors_raw)
     result = {"schema": "decisionx.native_batch_compute.v1",
@@ -129,6 +143,7 @@ def run(source_zip: Path, output_dir: Path, source_zips: list[Path]) -> dict:
                                "prompt_sha256": source["prompt_sha256"],
                                "response_sha256": source["response_sha256"]}
                               for key, source in sorted(sources.items())],
+              "rendered_sources": rendered,
               "distinct_term_count": len(document_frequency),
               "neighbors_sha256": digest(neighbors_raw)}
     (output_dir / "NATIVE_COMPUTE.json").write_bytes(canonical(result) + b"\n")

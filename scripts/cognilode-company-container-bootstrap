@@ -100,7 +100,12 @@ def main() -> int:
                                       capture_output=True, text=True, check=False).stdout.strip()
             remote_main = subprocess.run(["git", "-C", str(synced), "rev-parse", "origin/main"],
                                          capture_output=True, text=True, check=False).stdout.strip()
-            if (current and selected and selected == remote_main and selected != current
+            # A promoted checkout can lag a newer origin/main already known to
+            # this starter. Never hand startup back to that stale checkout.
+            known_main = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "origin/main"],
+                                        capture_output=True, text=True, check=False).stdout.strip()
+            if (current and selected and known_main and selected == remote_main == known_main
+                    and selected != current
                     and candidate.resolve() != Path(__file__).resolve()):
                 os.execve(sys.executable, [sys.executable, str(candidate)],
                           {**os.environ, "COGNILODE_BOOTSTRAP_FROM_SYNC": "1"})

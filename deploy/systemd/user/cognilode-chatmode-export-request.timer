@@ -1,0 +1,11 @@
+[Unit]
+Description=Check account-export refresh need once daily
+
+[Timer]
+OnCalendar=*-*-* 04:17:00 UTC
+RandomizedDelaySec=10min
+Persistent=true
+Unit=cognilode-chatmode-export-request.service
+
+[Install]
+WantedBy=timers.target

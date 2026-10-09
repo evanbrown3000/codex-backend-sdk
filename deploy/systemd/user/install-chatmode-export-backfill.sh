@@ -8,11 +8,13 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 runtime=/home/evan/.local/share/cognilode/b4pt0r-chatmode
 "$runtime/venv/bin/python" -m pip install -r "$here/chatmode-export-requirements.txt"
 for name in cognilode-chatmode-export-url.service cognilode-chatmode-export-url.timer \
-            cognilode-chatmode-export-backfill.service cognilode-chatmode-export-backfill.timer; do
+            cognilode-chatmode-export-backfill.service cognilode-chatmode-export-backfill.timer \
+            cognilode-chatmode-export-request.service cognilode-chatmode-export-request.timer; do
     systemctl --user link --force "$here/$name"
 done
 systemctl --user daemon-reload
 systemctl --user enable --now cognilode-chatmode-export-url.timer \
-    cognilode-chatmode-export-backfill.timer
+    cognilode-chatmode-export-backfill.timer cognilode-chatmode-export-request.timer
 systemctl --user show cognilode-chatmode-export-url.timer \
-    cognilode-chatmode-export-backfill.timer -p ActiveState -p NextElapseUSecRealtime
+    cognilode-chatmode-export-backfill.timer cognilode-chatmode-export-request.timer \
+    -p ActiveState -p NextElapseUSecRealtime

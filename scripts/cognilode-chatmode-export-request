@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""Request a fresh account export infrequently when the active snapshot is at risk.
+
+This uses the authenticated ChatGPT settings export endpoint, not Chat-mode
+prompting. The durable pre-POST ledger treats a timeout/5xx as an ambiguous
+effect and waits for the export-ready email before any later request.
+"""
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timedelta, timezone
+from hashlib import sha256
+from importlib.machinery import SourceFileLoader
+import json
+import os
+from pathlib import Path
+import sys
+import uuid
+
+HERE = Path(__file__).resolve().parent
+sender = SourceFileLoader("chatmode_sender_export_request", str(HERE / "cognilode-b4pt0r-chatmode")).load_module()
+ROOT = Path.home() / ".local/share/cognilode/b4pt0r-chatmode"
+MIN_REQUEST_INTERVAL = timedelta(days=7)
+
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def stamp(value: datetime):
+    return value.isoformat()
+
+
+def parse_stamp(value: str):
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def write_private(path: Path, value: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    with temp.open("w", encoding="utf-8") as out:
+        json.dump(value, out, sort_keys=True, separators=(",", ":"))
+        out.write("\n")
+        out.flush()
+        os.fsync(out.fileno())
+    os.chmod(temp, 0o600)
+    os.replace(temp, path)
+
+
+def response_code(response):
+    try:
+        body = response.json()
+    except Exception:
+        return None
+    if not isinstance(body, dict):
+        return None
+    for key in ("error", "code", "detail", "status"):
+        value = body.get(key)
+        if isinstance(value, str) and len(value) < 80:
+            return value
+        if isinstance(value, dict):
+            code = value.get("code")
+            if isinstance(code, str) and len(code) < 80:
+                return code
+    return None
+
+
+def run(root: Path = ROOT, *, now: datetime | None = None, session_factory=None):
+    now = now or utc_now()
+    cursor_path = root / "privacy-export-backfill/cursor.json"
+    if not cursor_path.exists():
+        return {"state": "no_export_snapshot_to_refresh"}
+    cursor = json.loads(cursor_path.read_text(encoding="utf-8"))
+    if cursor.get("next_shard") == -1 and not cursor.get("deferred"):
+        return {"state": "snapshot_text_backfill_complete"}
+    candidate = root / "privacy-export-next-url.txt"
+    if candidate.exists():
+        return {"state": "new_export_candidate_already_held"}
+    ledger_path = root / "privacy-export-requests.json"
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8")) if ledger_path.exists() else {
+        "schema": "cognilode.chatmode.export_request.v1", "attempts": []}
+    latest = ledger["attempts"][-1] if ledger["attempts"] else None
+    if latest:
+        due = parse_stamp(latest["post_started_at"]) + MIN_REQUEST_INTERVAL
+        retry_at = parse_stamp(latest["retry_after_at"]) if latest.get("retry_after_at") else due
+        if latest["state"] == "rate_limited_pre_accept":
+            due = min(due, retry_at)
+        elif latest["state"] == "auth_rejected_pre_accept":
+            due = min(due, retry_at)
+        if now < due:
+            return {"state": "awaiting_export_ready_or_retry_window", "last_request_state": latest["state"],
+                    "next_request_at": stamp(due)}
+    if session_factory is None:
+        session_factory = lambda: sender.new_session(sender.DEFAULT_PROFILE, sender.DEFAULT_IMPERSONATE)
+    session = session_factory()
+    auth = sender.identity(session)
+    account_hash = sha256(auth["account_id"].encode()).hexdigest()
+    if latest and latest["account_sha256"] != account_hash:
+        raise RuntimeError("authenticated export account differs from request ledger")
+    attempt = {"request_id": str(uuid.uuid4()), "post_started_at": stamp(now),
+               "account_sha256": account_hash, "source_archive_etag": cursor.get("archive_etag"),
+               "state": "post_effect_unknown"}
+    ledger["attempts"].append(attempt)
+    write_private(ledger_path, ledger)  # Durable before the external POST.
+    try:
+        response = session.post(sender.BASE + "accounts/data_export",
+                                headers=sender.app_headers(auth), json={}, timeout=90)
+    except Exception as exc:
+        attempt["transport_error_kind"] = type(exc).__name__
+        write_private(ledger_path, ledger)
+        return {"state": "post_effect_unknown_wait_for_export_email", "request_id": attempt["request_id"]}
+    attempt["http_status"] = int(response.status_code)
+    code = response_code(response)
+    if code:
+        attempt["provider_code"] = code
+    if 200 <= response.status_code < 300:
+        attempt["state"] = "accepted_waiting_export_email"
+    elif response.status_code == 429:
+        delay = max(3600, sender._retry_after_seconds(dict(response.headers)))
+        attempt["state"] = "rate_limited_pre_accept"
+        attempt["retry_after_at"] = stamp(now + timedelta(seconds=delay))
+    elif response.status_code in (401, 403):
+        attempt["state"] = "auth_rejected_pre_accept"
+        attempt["retry_after_at"] = stamp(now + timedelta(hours=1))
+    elif response.status_code in (400, 422):
+        attempt["state"] = "request_shape_rejected_pre_accept"
+    else:
+        attempt["state"] = "post_effect_unknown"
+    write_private(ledger_path, ledger)
+    return {"state": attempt["state"], "request_id": attempt["request_id"],
+            "http_status": attempt["http_status"], "provider_code": code}
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--root", type=Path, default=ROOT)
+    args = p.parse_args()
+    print(json.dumps(run(args.root), sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

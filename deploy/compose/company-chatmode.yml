@@ -379,7 +379,7 @@ services:
     entrypoint: [python3, /runtime/source/current/memory-stock-canonical/deploy/conversation-vacuum/company_memory_runtime.py]
     environment:
       HOME: /home/worker
-      PYTHONPATH: /runtime/source/current/memory-stock-canonical/src
+      PYTHONPATH: /runtime/source/current/memory-stock-canonical/src:/runtime/source/current/modified-codex-runtime/src
       COGNILODE_VACUUM_HOME: /workspace/company/runtime/conversation-vacuum
       COGNILODE_VACUUM_ROOTS: /workspace/company/data/conversation-imports
       COGNILODE_PRIVACY_EXPORT_DIR: /workspace/company/data/privacy-imports
@@ -389,11 +389,17 @@ services:
       COGNILODE_DRIVE_WEB_UPLOAD: "0"
       COGNILODE_MEMORY_ARCHIVE_BUCKET: cognilode-conversation-visibility-362928919715-us-west-2
       DECISIONX_DERIVED_DB: /workspace/company/runtime/conversation-vacuum/decisionx-derived.sqlite3
+      DECISIONX_EXISTING_LLM_COMMAND: python3 /runtime/source/current/memory-stock-canonical/deploy/conversation-vacuum/decisionx_codex_command.py
+      COGNILODE_CODEX_BIN: /codex/bin/codex
+      COGNILODE_CODEX_INFERENCE_ROOT: /runtime/worker/codex-inference
+      COGNILODE_LLM_GOVERNANCE_ROOT: /runtime/worker/llm-governance
       COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
     volumes:
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime:ro
+      - ${COMPANY_RUNTIME_ROOT}/worker:/runtime/worker
       - memory_data:/workspace/company
       - memory_drive_auth:/memory-auth
+      - company_codex_release:/codex:ro
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
     depends_on:
       - source-sync

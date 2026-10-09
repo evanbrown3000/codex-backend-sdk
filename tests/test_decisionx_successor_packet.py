@@ -40,6 +40,21 @@ def test_candidate_stock_gate_precedes_use_of_any_retrieved_hit():
     assert len(calls) == 1 and calls[0]["operation"] == "decisionx_candidates"
 
 
+def test_unattended_tick_does_not_enqueue_or_scan_stock_below_descriptor_gate(tmp_path):
+    root_state = tmp_path / "root-cycle.json"
+    root_state.write_text(json.dumps({"phase": "complete", "root_job_id": "root-job"}))
+    calls = []
+
+    def post(body):
+        calls.append(body)
+        return {"ok": True, "ready": False, "distinct_sources": 42}
+
+    result = upstream.tick(post, output_root=tmp_path / "successor", root_state_path=root_state)
+    assert result == {"ok": False, "reason": "shared_descriptor_index_below_500",
+                      "distinct_sources": 42}
+    assert [body["operation"] for body in calls] == ["decisionx_candidates"]
+
+
 def test_native_reconstructs_exact_full_sources_and_rejects_tampering(tmp_path):
     target_id = "root-job-1"
     target = {"provider": "chatgpt.com", "conversation_id": "target-c",

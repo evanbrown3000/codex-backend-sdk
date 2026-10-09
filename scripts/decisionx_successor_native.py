@@ -134,6 +134,9 @@ def finish(work: Path, output: Path) -> dict:
         archive.writestr("MANIFEST.json", canonical(manifest))
         for name, raw in contents.items():
             archive.writestr(name, raw)
+    if output.stat().st_size > 20 * 1024 * 1024:
+        output.unlink()
+        raise ValueError("successor work-product ZIP exceeds 20MiB")
     return {"output": str(output), "sha256": sha(output.read_bytes()),
             "members": manifest["members"]}
 

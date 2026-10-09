@@ -350,6 +350,7 @@ DX_INPUT_CHAR_BUDGET = 70_000  # about 20K tokens, before ZIP compression
 DX_SCAN_INTERVAL_SECONDS = 600
 DX_STOCK_CACHE_SECONDS = 900
 DX_PRIORITY = 20
+DX_FIRST_VERIFIED_PRIORITY = 72
 _DX_STOCK_LOCK = threading.Lock()
 _DX_STOCK_THREAD = None
 _DX_STOCK_VALUE = None
@@ -643,6 +644,13 @@ def _dx_reconcile_queued(db):
         released += cursor.rowcount
     return released
 
+
+def _dx_batch_priority(db):
+    """Advance one verified first batch, then use low-priority quota-sensitive work."""
+    prior = db.execute("SELECT 1 FROM episodes WHERE state IN ('queued','done') LIMIT 1").fetchone()
+    return DX_PRIORITY if prior else DX_FIRST_VERIFIED_PRIORITY
+
+
 def decisionx_batch_pump():
     """Incrementally create MULTI-episode Chat-mode jobs in the ONE hosted D1 queue."""
     state = _dx_load()
@@ -754,12 +762,13 @@ def decisionx_batch_pump():
                   + "\nEpisode count: " + str(len(selected)))
         digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         id_value = "decisionx-iae-" + batch
+        priority = _dx_batch_priority(db)
         reply = sender.operator_memory_post({
             "operation":"enqueue_decisionx_prompt", "job_id":id_value,
             "provider":"chatgpt.com","prompt":prompt,
             "decisionx":{"authored_by":"DecisionX","decision_key":id_value,
                          "prompt_sha256":digest,"source_kind":"agent_memory_iae_batch"},
-            "priority":DX_PRIORITY,"project":"DecisionX",
+            "priority":priority,"project":"DecisionX",
             "role":"historical-decision-labeler","phase":"iae_label_batch",
             "reasoning_effort":"xhigh","model":"gpt-5-6-thinking",
             "taskflow_step":"iae-label-batch-"+batch,
@@ -784,7 +793,7 @@ def decisionx_batch_pump():
         state["spool"] = [e for e in pending if (e["episode_id"],e["source_sha256"]) not in selected_ids]
         atomic_json(DX_HOME/"scan.json",state)
         event("decisionx_batch_queued",job_id=id_value,episodes=len(selected),
-              priority=DX_PRIORITY,idempotent=reply.get("idempotent",False))
+              priority=priority,idempotent=reply.get("idempotent",False))
 
 def _dx_packet_paths(job):
     packets = []

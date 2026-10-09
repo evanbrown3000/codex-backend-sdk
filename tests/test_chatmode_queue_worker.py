@@ -436,6 +436,18 @@ def test_decisionx_double_triplet_is_source_anchored():
     assert module._dx_adjacent_triplet_valid({'double_triplet': None}, first)
 
 
+def test_decisionx_only_first_verified_batch_uses_catchup_priority(tmp_path):
+    module = worker()
+    module.DX_HOME = tmp_path
+    with module._dx_connection() as db:
+        assert module._dx_batch_priority(db) == 72
+        db.execute("INSERT INTO episodes(id,source_sha,state,attempts,retry_after,batch,updated) "
+                   "VALUES('first',?,'queued',1,0,'batch',0)", ('a' * 64,))
+        assert module._dx_batch_priority(db) == 20
+        db.execute("UPDATE episodes SET state='done' WHERE id='first'")
+        assert module._dx_batch_priority(db) == 20
+
+
 def test_decisionx_transport_input_retired_only_after_central_admission(tmp_path):
     module = worker()
     module.DX_HOME = tmp_path

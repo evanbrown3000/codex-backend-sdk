@@ -87,7 +87,7 @@ def executable_roster_snapshot(path: Path) -> dict[str, dict[str, str]]:
 
 
 def _complete_source(index: Mapping[str, Any], read: Mapping[str, Any]) -> datetime | None:
-    """An index identity or an interim prefix is not a complete stock source."""
+    """Verify a complete *rendered text* source; origin fidelity is separate."""
     source = read.get("conversation") or {}
     if not read.get("ok") or (source.get("provider"), source.get("conversation_id")) != (index.get("provider"), index.get("conversation_id")):
         return None
@@ -122,6 +122,24 @@ def _complete_source(index: Mapping[str, Any], read: Mapping[str, Any]) -> datet
         except ValueError:
             continue
     return min(times) if times else None
+
+
+def _source_fidelity(capture: Mapping[str, Any]) -> str:
+    """Classify provenance without upgrading a text projection to original data."""
+    kind = str(capture.get("source_kind") or "")
+    provenance = str(capture.get("source_provenance") or "")
+    if (capture.get("original_source_complete") is True
+        and capture.get("original_assets_complete") is True
+        and HEX64.fullmatch(str(capture.get("original_source_sha256") or ""))
+        and "unverified" not in provenance):
+        return "full_original"
+    if kind == "historical_s3_rendered" or "unverified_origin" in provenance:
+        return "unverified_origin_rendered_text"
+    if kind == "chatgpt_privacy_export_zip_http_range":
+        return "authenticated_export_text_projection"
+    if kind == "codex_rollout":
+        return "codex_visible_rollout_text"
+    return "drive_verified_text_projection"
 
 
 def _stock_readback_proofs(path: Path | None) -> dict[str, dict]:
@@ -164,6 +182,8 @@ def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, 
     cursor = "0"
     seen: set[tuple[str, str]] = set()
     verified_logical_ids: set[tuple[str, str]] = set()
+    full_original_ids: set[tuple[str, str]] = set()
+    full_original_times: list[datetime] = []
     verified: list[datetime] = []
     source_refs: list[dict[str, str]] = []
     pages = 0
@@ -191,9 +211,11 @@ def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, 
             # for the 500-conversation gate.
             logical_key = (("chatgpt", key[1]) if key[0] in
                            {"chatgpt.com", "chatgpt-export-format"} else key)
-            if logical_key in verified_logical_ids:
-                continue
             capture = index.get("capture") or {}
+            index_fidelity = _source_fidelity(capture)
+            if (logical_key in verified_logical_ids
+                and (index_fidelity != "full_original" or logical_key in full_original_ids)):
+                continue
             if capture.get("drive_verified") is not True or capture.get("source_response_complete") is not True:
                 continue
             proof_key = key[0] + ":" + key[1]
@@ -236,10 +258,25 @@ def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, 
                        "prompt_sha256": str(source["prompt_sha256"]),
                        "response_sha256": str(source["response_sha256"]),
                        "source_at_utc": stamp.isoformat(),
-                       "project_hint": str(index.get("project") or index.get("title") or "")[:160]}
+                       "project_hint": str(index.get("project") or index.get("title") or "")[:160],
+                       "source_fidelity": _source_fidelity(source.get("capture") or {}),
+                       "source_kind": str((source.get("capture") or {}).get("source_kind") or ""),
+                       "source_provenance": str((source.get("capture") or {}).get("source_provenance") or "")}
                 proofs[proof_key] = {"index_signature": signature, "source_ref": ref,
                                      "verified_at": time.time()}
-            ref = {**ref, "project_hint": str(index.get("project") or index.get("title") or "")[:160]}
+            ref = {**ref, "project_hint": str(index.get("project") or index.get("title") or "")[:160],
+                   "source_fidelity": (index_fidelity if
+                       capture.get("source_kind") or capture.get("source_provenance")
+                       or capture.get("original_source_complete") is True
+                       else ref.get("source_fidelity") or index_fidelity),
+                   "source_kind": str(capture.get("source_kind") or ref.get("source_kind") or ""),
+                   "source_provenance": str(capture.get("source_provenance") or ref.get("source_provenance") or "")}
+            if ref["source_fidelity"] == "full_original":
+                if logical_key not in full_original_ids:
+                    full_original_ids.add(logical_key)
+                    full_original_times.append(stamp)
+            if logical_key in verified_logical_ids:
+                continue
             verified_logical_ids.add(logical_key)
             verified.append(stamp)
             source_refs.append(ref)
@@ -259,6 +296,10 @@ def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, 
     span_days = (max(verified) - min(verified)).days if verified else 0
     source_refs.sort(key=lambda row: (row["provider"], row["conversation_id"]))
     return {"schema": "cognilode.root_shared_stock_census.v1", "distinct_complete": len(verified),
+            "completeness_scope": "drive_verified_rendered_text",
+            "distinct_full_original": len(full_original_ids),
+            "full_original_ready": (not early_complete and len(full_original_ids) >= minimum
+                                    and (max(full_original_times)-min(full_original_times)).days >= 730),
             "earliest_source_utc": min(verified).isoformat() if verified else None,
             "latest_source_utc": max(verified).isoformat() if verified else None,
             "span_days": span_days, "minimum": minimum,

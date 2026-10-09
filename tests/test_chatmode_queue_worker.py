@@ -234,10 +234,19 @@ def test_decisionx_native_batch_verifies_source_and_binds_returned_compute(tmp_p
     computed = native.run(input_zip, tmp_path / 'native', [source_zip])
     assert computed['episode_count'] == 1
     output = tmp_path / 'labels.zip'
+    label = {'episode_id': episode['episode_id'], 'source_sha256': episode['source_sha256'],
+             'i': 'Research the actual requirements across the historical source commits.',
+             'a': 'The assistant compared the source commits and reported the differences.',
+             'e': None, 'outcome': 'Source comparison observed; downstream result unknown.',
+             'tags': ['research', 'source-history'],
+             'embedding_text': 'A user requests historical source research and the assistant compares commits.',
+             'human_authorship_assessment': 'unverified user role',
+             'changed_conditions': 'The codebase may have changed since this historical turn.',
+             'double_triplet': None, 'uncertainty': 'No later user evaluation is present.'}
     with zipfile.ZipFile(output, 'w') as archive:
         archive.write(tmp_path / 'native' / 'NATIVE_COMPUTE.json', 'NATIVE_COMPUTE.json')
         archive.write(tmp_path / 'native' / 'neighbors.json', 'neighbors.json')
-        archive.writestr('decisionx_iae_labels.jsonl', '{}\n')
+        archive.writestr('decisionx_iae_labels.jsonl', json.dumps(label) + '\n')
         archive.writestr('EXTERNAL_EFFECT_INSTRUCTIONS.md', 'Admit verified labels into shared search.\n')
     input_sha = hashlib.sha256(input_zip.read_bytes()).hexdigest()
     source_sha = hashlib.sha256(source_zip.read_bytes()).hexdigest()
@@ -252,6 +261,22 @@ def test_decisionx_native_batch_verifies_source_and_binds_returned_compute(tmp_p
     assert module._dx_native_preflight(job, files, value, native_proof) is None
     assert module._dx_native_preflight(job, files, value, []) == 'missing_provider_observed_native_exec'
     assert module._dx_native_preflight(job, files, {'central_conversation_store': {}}, native_proof) == 'provider_upload_proof_missing'
+    admitted = []
+    class Sender:
+        @staticmethod
+        def operator_memory_post(body):
+            if body['operation'] == 'read':
+                return {'ok': True, 'conversation': source}
+            if body['operation'] == 'append_segments':
+                admitted.extend(body['segments'])
+                return {'ok': True}
+            raise AssertionError(body['operation'])
+    module.sender = Sender()
+    module._dx_bridge = lambda: SimpleNamespace(_complete_source=lambda _index,_read: datetime.now(timezone.utc))
+    outcome = module.decisionx_admit_labels(job, files, 'chatgpt-returned-conversation')
+    assert outcome['admitted'] == 1
+    assert admitted[0]['kind'] == 'IAE'
+    assert admitted[0]['metadata']['source_sha256'] == episode['source_sha256']
 
 
 def test_decisionx_batch_resolves_exact_source_and_drops_changed_episode():

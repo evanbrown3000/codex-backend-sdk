@@ -95,6 +95,29 @@ class NativeSessionTests(unittest.TestCase):
             ["get_codex_native_session","begin_codex_native_resume","complete_codex_native_resume"])
         self.assertEqual(requests[-1]["terminal_rollout_sha256"],native.sha(self.rollout))
 
+    def test_pending_confirmation_rechecks_without_reexecuting_provider(self):
+        result_dir=Path(self.temp.name)/"state"/"resume-1"
+        result_dir.mkdir(parents=True)
+        result=result_dir/"result.json"
+        native.atomic_json(result,{"schema":"cognilode.codex_native_resume.local_result.v1",
+            "session_id":CID,"operation_id":"resume-1",
+            "terminal_rollout_sha256":"a"*64,"terminal_output_sha256":"b"*64})
+        responses=[{"ok":True,"attempt":{"state":"awaiting_central_readback"},
+                    "central_readback_verified":False},
+                   {"ok":True,"attempt":{"state":"complete"},
+                    "central_readback_verified":True}]
+        with mock.patch.object(native,"post",side_effect=responses) as post, \
+             mock.patch.object(native.subprocess,"run") as run:
+            first=native.confirm_pending(result_dir.parent)
+            second=native.confirm_pending(result_dir.parent)
+            third=native.confirm_pending(result_dir.parent)
+        self.assertEqual(first["results"][0]["state"],"awaiting_central_readback")
+        self.assertEqual(second["results"][0]["state"],"complete")
+        self.assertEqual(third["checked"],0)
+        self.assertEqual(post.call_count,2)
+        run.assert_not_called()
+        self.assertTrue((result_dir/"confirmed.json").is_file())
+
 
 if __name__=="__main__":
     unittest.main()

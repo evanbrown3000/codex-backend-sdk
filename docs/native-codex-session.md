@@ -43,6 +43,12 @@ after ingestion. An interrupted resume without a terminal local result remains
 ambiguous and requires reconciliation of the native session; it is not safely
 replayed from a normalized conversation rendering.
 
+On each host, run `scripts/cognilode-codex-native-session install-confirm-timer`
+once. Its user timer checks pending local result receipts every five minutes
+and stops checking an operation after D1/Drive confirms the changed source and
+new events. The timer never sends a Codex prompt and never retries an ambiguous
+provider turn.
+
 The instruction bundle hash is a continuity guard. The actual system and
 developer replacement behavior must be implemented in the modified Codex
 binary used for both turns; this CLI does not inject instruction text into

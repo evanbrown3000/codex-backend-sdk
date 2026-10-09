@@ -275,6 +275,21 @@ def phase_job_id(plan: Plan, step_id: str, phase: str, attempt: int = 0) -> str:
     return stable_id(plan.project_id, plan.inflight_revisions.get(step_id, plan.sha256), step_id, phase, str(attempt))
 
 
+def step_execution_plan(plan: Plan, step_id: str) -> Plan:
+    """Preserve a step's original plan revision through later plan checkoffs."""
+    revision = plan.inflight_revisions.get(step_id, plan.sha256)
+    if revision == plan.sha256:
+        return plan
+    source = Path(plan.source_ref.removeprefix("file:"))
+    snapshot = plan_revision_path(source, revision)
+    if not snapshot.is_file() or sha256_file(snapshot) != revision:
+        raise ValueError(f"in-flight {step_id} lacks its original plan snapshot")
+    original = parse_plan(snapshot)
+    if original.project_id != plan.project_id or step_id not in original.by_id():
+        raise ValueError("in-flight plan snapshot project/step differs")
+    return original
+
+
 MAX_CHAT_NATIVE_ATTEMPTS = 3  # One original turn and at most two corrective turns.
 
 
@@ -554,6 +569,25 @@ def codex_session_identity_evidence(receipt_path: Path, job_id: str) -> dict[str
     fail closed rather than turning echoed model text into a session identity.
     """
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if receipt.get("schema") == "cognilode.taskflow.codex_resume.v1":
+        resumed = receipt.get("resume") or {}
+        source = Path(str(resumed.get("source_stderr_path") or ""))
+        output = Path(str(resumed.get("terminal_output_path") or ""))
+        cid = str(resumed.get("conversation_id") or "")
+        if (receipt.get("taskflow_route_verified") is not True
+            or receipt.get("job_id") != job_id
+            or not source.is_file() or not output.is_file()
+            or sha256_file(source) != resumed.get("source_stderr_sha256")
+            or sha256_file(output) != resumed.get("terminal_output_sha256")
+            or codex_header_session_id(source.read_text(encoding="utf-8", errors="replace")) != cid
+            or not output.read_text(encoding="utf-8", errors="replace").strip()):
+            raise ValueError("Codex resumed-session identity or terminal output differs")
+        return {"kind":"codex_session_identity", "ref":cid, "job_id":job_id,
+                "conversation_id":cid, "conversation_id_source":"codex_cli_stderr_header",
+                "source_stderr_sha256":resumed["source_stderr_sha256"],
+                "terminal_output_sha256":resumed["terminal_output_sha256"],
+                "resume_receipt_sha256":sha256_file(receipt_path),
+                "central_readback_verified":False}
     attempts = receipt.get("attempts") or []
     if not isinstance(attempts, list):
         raise ValueError("Secretary attempts are malformed")
@@ -686,6 +720,134 @@ def verify_effect_probe(step: Step) -> dict[str, Any]:
              "timeout_seconds": str(timeout_seconds), "verified_at": utc()}
     proof["sha256"] = sha256_bytes(json.dumps(proof, sort_keys=True).encode())
     return proof
+
+
+def _pending_codex_session(run_dir: Path, *, plan_sha256: str,
+                           step_id: str, work_sha256: str) -> dict[str, Any] | None:
+    """Recover only an installed Codex CLI header from an earlier real send."""
+    receipts = sorted(run_dir.glob("secretary*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for receipt_path in receipts:
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            for attempt in reversed(receipt.get("attempts") or []):
+                candidate = attempt.get("candidate") or {}
+                if candidate.get("family") not in {"installed_codex", "modified_codex"}:
+                    continue
+                full_path = Path(str(attempt.get("full_receipt_ref") or "")).resolve(strict=True)
+                if full_path.name != "receipt.json":
+                    continue
+                delivery = full_path.with_name("delivery.txt").read_text(encoding="utf-8")
+                if (f"Plan SHA-256: {plan_sha256}" not in delivery
+                    or f"Step: {step_id} " not in delivery
+                    or f"Work ZIP SHA-256: {work_sha256}" not in delivery):
+                    continue
+                stderr_path = full_path.with_name("codex.stderr")
+                raw = stderr_path.read_text(encoding="utf-8", errors="replace")
+                session_id = codex_header_session_id(raw)
+                binary = str((candidate.get("metadata") or {}).get("binary") or "")
+                if not session_id or not binary or not Path(binary).is_file() or not os.access(binary, os.X_OK):
+                    continue
+                return {"session_id":session_id, "binary":binary,
+                        "stderr_path":stderr_path, "stderr_sha256":sha256_file(stderr_path),
+                        "source_receipt_path":receipt_path,
+                        "source_receipt_sha256":sha256_file(receipt_path)}
+        except (OSError, ValueError, TypeError, AttributeError, KeyError):
+            continue
+    return None
+
+
+def resume_pending_codex_effect(*, pending: Mapping[str, Any], plan: Plan, step: Step,
+                                run_dir: Path, repo_path: Path, receipt_path: Path,
+                                work_sha256: str) -> dict[str, Any]:
+    """Continue an incomplete effect in its original session, never a new job.
+
+    A durable attempt record and per-job lock prevent minute-by-minute duplicate
+    continuations. The standard effect receipt and independent plan probe must
+    both pass before a recovered terminal route receipt is admitted.
+    """
+    run_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = run_dir / "codex-resume.lock"
+    with lock_path.open("a+") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {"state":"resume_already_running"}
+        if receipt_path.is_file():
+            try:
+                if secretary_succeeded(json.loads(receipt_path.read_text(encoding="utf-8"))):
+                    return {"state":"terminal_receipt_already_present"}
+            except (OSError, ValueError, TypeError):
+                pass
+        state_path = run_dir / "codex-resume-state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
+        previous_attempts = int(state.get("attempts") or 0)
+        retry_delay = min(6 * 3600, 900 * (2 ** min(previous_attempts, 5)))
+        if time.time() - float(state.get("last_attempt_at") or 0) < retry_delay:
+            return {"state":"resume_backoff", "attempts":int(state.get("attempts") or 0)}
+        source = _pending_codex_session(run_dir, plan_sha256=plan.sha256,
+                                        step_id=step.step_id, work_sha256=work_sha256)
+        if not source:
+            return {"state":"no_verified_original_codex_session"}
+        count = int(state.get("attempts") or 0) + 1
+        attempt_dir = run_dir / f"codex-resume-{count:04d}"
+        attempt_dir.mkdir(exist_ok=False)
+        atomic_json(state_path, {"last_attempt_at":time.time(), "attempts":count,
+                                 "session_id":source["session_id"], "state":"attempting"})
+        output_path = attempt_dir / "last_message.txt"
+        prompt = ("Continue the original TaskFlow external-effect assignment in this same "
+                  "Codex session. Inspect existing repository and deployment state first; "
+                  "do not repeat an external mutation already performed. Read the original "
+                  "work ZIP and EXTERNAL_EFFECT_INSTRUCTIONS.md. Finish the effect, write "
+                  f"the required receipt to {receipt_path.with_name('EXTERNAL_EFFECT_RESULT.json')}, "
+                  "run the plan's verification, and provide a terminal report. "
+                  f"The original work ZIP SHA-256 is {work_sha256}.")
+        command = [source["binary"], "-a", "never", "-s", "danger-full-access",
+                   "-c", 'model_reasoning_effort="high"', "exec", "resume",
+                   "--skip-git-repo-check", "-o", str(output_path),
+                   source["session_id"], "-"]
+        try:
+            cp = subprocess.run(command, input=prompt, text=True, capture_output=True,
+                                cwd=repo_path, timeout=int(os.getenv("COGNILODE_TASKFLOW_CODEX_TIMEOUT", "3600")),
+                                check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            atomic_json(state_path, {"last_attempt_at":time.time(), "attempts":count,
+                                     "session_id":source["session_id"], "state":"ambiguous_resume",
+                                     "error_type":type(exc).__name__})
+            return {"state":"ambiguous_resume", "attempts":count}
+        (attempt_dir / "codex.stdout").write_text(cp.stdout, encoding="utf-8", errors="replace")
+        (attempt_dir / "codex.stderr").write_text(cp.stderr, encoding="utf-8", errors="replace")
+        terminal = output_path.read_text(encoding="utf-8", errors="replace") if output_path.is_file() else ""
+        if cp.returncode != 0 or not terminal.strip():
+            atomic_json(state_path, {"last_attempt_at":time.time(), "attempts":count,
+                                     "session_id":source["session_id"], "state":"incomplete_resume",
+                                     "returncode":cp.returncode})
+            return {"state":"incomplete_resume", "attempts":count, "returncode":cp.returncode}
+        try:
+            verify_effect_receipt(receipt_path.with_name("EXTERNAL_EFFECT_RESULT.json"),
+                                  plan=plan, step=step, work_sha256=work_sha256)
+            verify_effect_probe(step)
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            atomic_json(state_path, {"last_attempt_at":time.time(), "attempts":count,
+                                     "session_id":source["session_id"], "state":"effect_unverified",
+                                     "error_type":type(exc).__name__})
+            return {"state":"effect_unverified", "attempts":count, "error_type":type(exc).__name__}
+        atomic_json(receipt_path, {
+            "schema":"cognilode.taskflow.codex_resume.v1", "completed":True,
+            "taskflow_route_verified":True, "job_id":pending["id"],
+            "plan_sha256":plan.sha256, "step_id":step.step_id,
+            "resume":{"conversation_id":source["session_id"],
+                      "source_stderr_path":str(source["stderr_path"]),
+                      "source_stderr_sha256":source["stderr_sha256"],
+                      "source_receipt_sha256":source["source_receipt_sha256"],
+                      "terminal_output_path":str(output_path),
+                      "terminal_output_sha256":sha256_file(output_path),
+                      "binary_sha256":sha256_file(Path(source["binary"])),
+                      "attempts":count},
+        })
+        atomic_json(state_path, {"last_attempt_at":time.time(), "attempts":count,
+                                 "session_id":source["session_id"], "state":"terminal_effect_verified"})
+        return {"state":"terminal_effect_verified", "attempts":count,
+                "conversation_id":source["session_id"]}
 
 
 def _artifact_from_chat_job(job: Mapping[str, Any]) -> Path | None:
@@ -1361,7 +1523,7 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
                 continue
             payload=row.get("payload") or {}
             if (row.get("id") != jid or row.get("provider") != provider
-                or (row.get("plan_revision") or payload.get("plan_revision")) != plan.sha256
+                or (row.get("plan_revision") or payload.get("plan_revision")) != step_execution_plan(plan,candidate.step_id).sha256
                 or (row.get("taskflow_step") or payload.get("taskflow_step")) != candidate.step_id
                 or (row.get("phase") or payload.get("taskflow_phase")) != phase):
                 raise ValueError(f"D1 exact phase job identity mismatch: {candidate.step_id}/{phase}")
@@ -1375,14 +1537,16 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
         if not active(step): continue
         owner=step.fields.get("owner") or role
         slack_role_context(owner)
-        rjob=materialize_research_job(queue,plan,step,priority,role=owner,state_root=state_root)
+        rjob=materialize_research_job(queue,step_execution_plan(plan,step.step_id),step,
+                                      priority,role=owner,state_root=state_root)
         action["actions"].append({"step":step.step_id,"phase":"research","state":rjob.get("state"),"employee":owner})
     # Reconcile research actions that crossed begin_effect before a crash/timeout. Never resend them.
     for pending in phase_jobs("research","codex.research","effect_pending"):
         payload=pending.get("payload") or {}
-        if (pending.get("plan_revision") or payload.get("plan_revision")) != plan.sha256: continue
         step=plan.by_id().get(str(pending.get("taskflow_step") or payload.get("taskflow_step")))
         if not step or not active(step): continue
+        execution_plan=step_execution_plan(plan,step.step_id)
+        if (pending.get("plan_revision") or payload.get("plan_revision")) != execution_plan.sha256: continue
         run_dir=state_root/plan.project_id/step.step_id/"research"/str(pending["id"]); out_zip=run_dir/"research.zip"
         try:
             owner=step.fields.get("owner") or role
@@ -1391,7 +1555,7 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
             receipt_path=run_dir/"secretary_receipt.json"
             if not secretary_succeeded(json.loads(receipt_path.read_text(encoding="utf-8"))):
                 raise ValueError("Codex invocation was not verified")
-            meta=verify_manifest_zip(out_zip,expected_plan_sha256=plan.sha256)
+            meta=verify_manifest_zip(out_zip,expected_plan_sha256=execution_plan.sha256)
             identity=codex_session_identity_evidence(receipt_path,str(pending["id"]))
         except Exception:
             action["actions"].append({"step":step.step_id,"phase":"research_reconcile","ok":False,"state":"awaiting_readback"}); continue
@@ -1401,7 +1565,7 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
         done=queue.complete(pending,evidence)
         committed=queue.get(str(pending["id"])) if done.get("ok") else None
         readback_ok=bool(committed and committed.get("state")=="complete" and codex_identity_readback(committed,identity) and any(e.get("kind")=="research_zip" and e.get("ref")==meta["sha256"] for e in committed.get("effect_evidence") or [] if isinstance(e,dict)))
-        if readback_ok: ensure_chat_job(queue,plan,step,meta,priority)
+        if readback_ok: ensure_chat_job(queue,step_execution_plan(plan,step.step_id),step,meta,priority)
         action["actions"].append({"step":step.step_id,"phase":"research_reconcile","ok":readback_ok,"zip":meta["sha256"]})
 
     # Research workers are generic D1 claims; this controller is their actuator.
@@ -1415,18 +1579,19 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
             break
     if rjob:
         step=plan.by_id().get(str(rjob.get("taskflow_step") or (rjob.get("payload") or {}).get("taskflow_step")))
-        if step and rjob.get("id") == phase_job_id(plan,step.step_id,"research") and rjob.get("plan_revision") == plan.sha256 and rjob.get("assigned_employee") == role:
+        if step and rjob.get("id") == phase_job_id(plan,step.step_id,"research") and rjob.get("plan_revision") == step_execution_plan(plan,step.step_id).sha256 and rjob.get("assigned_employee") == role:
             begun=queue.begin(rjob)
             if begun.get("ok"):
                 run_dir=state_root/plan.project_id/step.step_id/"research"/rjob["id"]
                 run_dir.mkdir(parents=True,exist_ok=True)
                 out_zip=run_dir/"research.zip"; prompt_path=run_dir/"prompt.md"
-                prompt_path.write_text(research_prompt(plan,step,role,out_zip),encoding="utf-8")
+                execution_plan=step_execution_plan(plan,step.step_id)
+                prompt_path.write_text(research_prompt(execution_plan,step,role,out_zip),encoding="utf-8")
                 receipt=run_secretary(secretary,prompt_path,employee=role,manager=manager,repo_path=repo_path,phase="research")
                 atomic_json(run_dir/"secretary_receipt.json",receipt)
                 try:
                     if not secretary_succeeded(receipt): raise ValueError("installed Codex invocation did not complete")
-                    meta=verify_manifest_zip(out_zip,expected_plan_sha256=plan.sha256)
+                    meta=verify_manifest_zip(out_zip,expected_plan_sha256=execution_plan.sha256)
                     receipt_path=run_dir/"secretary_receipt.json"
                     identity=codex_session_identity_evidence(receipt_path,str(rjob["id"]))
                     evidence=[{"kind":"research_zip","ref":meta["sha256"],"path":meta["path"]},
@@ -1435,7 +1600,7 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
                     done=queue.complete(rjob,evidence)
                     committed=queue.get(str(rjob["id"])) if done.get("ok") else None
                     readback_ok=bool(committed and committed.get("state")=="complete" and codex_identity_readback(committed,identity) and any(e.get("kind")=="research_zip" and e.get("ref")==meta["sha256"] for e in committed.get("effect_evidence") or [] if isinstance(e,dict)))
-                    if readback_ok: ensure_chat_job(queue,plan,step,meta,priority)
+                    if readback_ok: ensure_chat_job(queue,step_execution_plan(plan,step.step_id),step,meta,priority)
                     action["actions"].append({"step":step.step_id,"phase":"research_effect","ok":readback_ok,"zip":meta["sha256"]})
                 except Exception as exc:
                     action["actions"].append({"step":step.step_id,"phase":"research_effect","ok":False,"error":f"{type(exc).__name__}:{exc}"})
@@ -1466,7 +1631,7 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
             payload = cjob.get("payload") or {}
             if (cjob.get("id") != jid or cjob.get("provider") != "chatgpt.com"
                 or (cjob.get("phase") or payload.get("taskflow_phase")) != "chatgpt_sandbox"
-                or (cjob.get("plan_revision") or payload.get("plan_revision")) != plan.sha256
+                or (cjob.get("plan_revision") or payload.get("plan_revision")) != step_execution_plan(plan,step.step_id).sha256
                 or (cjob.get("taskflow_step") or payload.get("taskflow_step")) != step.step_id
                 or (attempt and cjob.get("reason") not in {f"native_compute_repair_attempt:{attempt}",
                                                            f"chatmode_deliverable_repair_attempt:{attempt}"})):
@@ -1474,14 +1639,15 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
             if cjob.get("state") != "complete": break
             completed_attempts.append(cjob)
             try:
-                meta = verified_chat_completion(cjob, plan)
+                meta = verified_chat_completion(cjob, step_execution_plan(plan,step.step_id))
                 if not meta: break
             except NativeEvidenceMissing as exc:
                 repair_phase = ("chatgpt_deliverable_repair" if isinstance(exc, ChatDeliverableMissing)
                                 else "native_compute_repair")
                 if attempt + 1 < MAX_CHAT_NATIVE_ATTEMPTS:
                     try:
-                        retry = ensure_native_retry_job(queue, plan, step, original, cjob, attempt + 1)
+                        retry = ensure_native_retry_job(queue, step_execution_plan(plan,step.step_id),
+                                                        step, original, cjob, attempt + 1)
                         action["actions"].append({"step":step.step_id,"phase":repair_phase,
                                                   "attempt":attempt + 1,"state":retry.get("state"),
                                                   "job_id":retry["id"]})
@@ -1492,7 +1658,7 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
                                                   "error":f"{type(repair_exc).__name__}:{repair_exc}"})
                 else:
                     try:
-                        diagnostic=ensure_native_diagnostic_job(queue,plan,step,completed_attempts,
+                        diagnostic=ensure_native_diagnostic_job(queue,step_execution_plan(plan,step.step_id),step,completed_attempts,
                                                                employee=role,state_root=state_root,priority=priority)
                         shared=queue.get(str(diagnostic["id"]))
                         if not shared or shared.get("id") != diagnostic["id"]:
@@ -1521,7 +1687,9 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
                 action["actions"].append({"step":step.step_id,"phase":"chatgpt_readback","ok":False,
                                           "attempt":attempt,"error":f"{type(exc).__name__}:{exc}"})
                 break
-            ejob=ensure_external_job(queue,plan,step,priority,meta,state_root=state_root,external_employee=external_employee)
+            ejob=ensure_external_job(queue,step_execution_plan(plan,step.step_id),step,
+                                     priority,meta,state_root=state_root,
+                                     external_employee=external_employee)
             action["actions"].append({"step":step.step_id,"phase":"external_effect","state":ejob.get("state"),
                                       "work_zip":meta["sha256"],"chat_attempt":attempt})
             break
@@ -1537,7 +1705,8 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
         try:
             if any(row is None for row in attempts):
                 raise ValueError("native diagnostic lost a completed ChatGPT attempt")
-            row=drive_native_diagnostic(queue,plan,step,attempts,role=role,manager=manager,
+            row=drive_native_diagnostic(queue,step_execution_plan(plan,step.step_id),step,attempts,
+                                        role=role,manager=manager,
                                         secretary=secretary,repo_path=repo_path,state_root=state_root,
                                         worker_id=worker_id)
             if row: action["actions"].append(row)
@@ -1547,18 +1716,35 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
     # Reconcile external effects from their durable receipt before considering a new mutation.
     for pending in phase_jobs("external_effect","codex.external-effect","effect_pending"):
         payload=pending.get("payload") or {}
-        if (pending.get("plan_revision") or payload.get("plan_revision")) != plan.sha256: continue
         step=plan.by_id().get(str(pending.get("taskflow_step") or payload.get("taskflow_step")))
         if not step or not active(step): continue
+        execution_plan=step_execution_plan(plan,step.step_id)
+        if (pending.get("plan_revision") or payload.get("plan_revision")) != execution_plan.sha256: continue
         receipt_path=state_root/plan.project_id/step.step_id/"external_effect"/str(pending["id"])/"EXTERNAL_EFFECT_RESULT.json"
+        invocation_path=receipt_path.with_name("secretary_receipt.json")
+        try:
+            prior = json.loads(invocation_path.read_text(encoding="utf-8")) if invocation_path.is_file() else {}
+            if (not secretary_succeeded(prior)
+                and pending.get("claimed_by") == external_employee
+                and pending.get("assigned_employee") == external_employee):
+                work = verified_work_attachment(pending,execution_plan)
+                resumed = resume_pending_codex_effect(
+                    pending=pending, plan=execution_plan, step=step, run_dir=receipt_path.parent,
+                    repo_path=repo_path, receipt_path=invocation_path,
+                    work_sha256=work["sha256"])
+                action["actions"].append({"step":step.step_id,
+                                          "phase":"external_effect_same_session_resume", **resumed})
+        except Exception as exc:
+            action["actions"].append({"step":step.step_id,
+                                      "phase":"external_effect_same_session_resume",
+                                      "state":"retry_next_sweep", "error_type":type(exc).__name__})
         try:
             if pending.get("claimed_by") != external_employee or pending.get("assigned_employee") != external_employee:
                 raise ValueError("external-effect employee fence mismatch")
-            invocation_path=receipt_path.with_name("secretary_receipt.json")
             if not secretary_succeeded(json.loads(invocation_path.read_text(encoding="utf-8"))):
                 raise ValueError("Codex invocation was not verified")
-            work=verified_work_attachment(pending,plan)
-            effect=verify_effect_receipt(receipt_path,plan=plan,step=step,work_sha256=work["sha256"])
+            work=verified_work_attachment(pending,execution_plan)
+            effect=verify_effect_receipt(receipt_path,plan=execution_plan,step=step,work_sha256=work["sha256"])
             probe=verify_effect_probe(step)
             identity=codex_session_identity_evidence(invocation_path,str(pending["id"]))
         except Exception:
@@ -1576,20 +1762,21 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
         if ejob: break
     if ejob:
         payload=ejob.get("payload") or {}; step=plan.by_id().get(str(ejob.get("taskflow_step") or payload.get("taskflow_step")))
-        if step and ejob.get("id") == phase_job_id(plan,step.step_id,"external_effect") and ejob.get("plan_revision") == plan.sha256 and ejob.get("assigned_employee") == external_employee:
-            try: work=verified_work_attachment(ejob,plan)
+        if step and ejob.get("id") == phase_job_id(plan,step.step_id,"external_effect") and ejob.get("plan_revision") == step_execution_plan(plan,step.step_id).sha256 and ejob.get("assigned_employee") == external_employee:
+            execution_plan=step_execution_plan(plan,step.step_id)
+            try: work=verified_work_attachment(ejob,execution_plan)
             except Exception as exc:
                 action["actions"].append({"step":step.step_id,"phase":"external_preflight","ok":False,"error":f"{type(exc).__name__}:{exc}"}); return action
             begun=queue.begin(ejob)
             if begun.get("ok"):
                 run_dir=state_root/plan.project_id/step.step_id/"external_effect"/ejob["id"]; run_dir.mkdir(parents=True,exist_ok=True)
                 effect_receipt=run_dir/"EXTERNAL_EFFECT_RESULT.json"; prompt_path=run_dir/"prompt.md"
-                prompt_path.write_text(external_prompt(plan,step,Path(work["path"]),effect_receipt,external_employee),encoding="utf-8")
+                prompt_path.write_text(external_prompt(execution_plan,step,Path(work["path"]),effect_receipt,external_employee),encoding="utf-8")
                 invocation=run_secretary(secretary,prompt_path,employee=external_employee,manager=manager,repo_path=repo_path,phase="external_effect")
                 atomic_json(run_dir/"secretary_receipt.json",invocation)
                 try:
                     if not secretary_succeeded(invocation): raise ValueError("installed Codex invocation did not complete")
-                    effect=verify_effect_receipt(effect_receipt,plan=plan,step=step,work_sha256=work["sha256"])
+                    effect=verify_effect_receipt(effect_receipt,plan=execution_plan,step=step,work_sha256=work["sha256"])
                     probe=verify_effect_probe(step)
                     identity=codex_session_identity_evidence(run_dir/"secretary_receipt.json",str(ejob["id"]))
                     evidence=[{"kind":"external_effect","ref":effect["effect_ref"],"environment":effect["environment"]},{"kind":"external_effect_receipt","ref":effect["receipt_sha256"],"path":str(effect_receipt)},{"kind":"chatgpt_work_zip","ref":work["sha256"],"path":work["path"]},{"kind":"independent_effect_probe","ref":probe["sha256"],"observed":probe["observed"],"command":probe["command"]}]

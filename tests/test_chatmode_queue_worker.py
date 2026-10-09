@@ -467,10 +467,36 @@ def test_decisionx_only_first_verified_batch_uses_catchup_priority(tmp_path):
     with module._dx_connection() as db:
         assert module._dx_batch_priority(db) == 72
         db.execute("INSERT INTO episodes(id,source_sha,state,attempts,retry_after,batch,updated) "
-                   "VALUES('first',?,'queued',1,0,'batch',0)", ('a' * 64,))
+                   "VALUES('first',?,'done',1,0,'legacy',0)", ('a' * 64,))
+        # A legacy local done row is not proof that a verified native batch ran.
+        assert module._dx_batch_priority(db) == 72
+        db.execute("INSERT INTO verified_dispatches(batch,job_id,prompt_sha,priority,queued_at) "
+                   "VALUES('verified','decisionx-iae-verified',?,72,0)", ('b' * 64,))
         assert module._dx_batch_priority(db) == 20
         db.execute("UPDATE episodes SET state='done' WHERE id='first'")
         assert module._dx_batch_priority(db) == 20
+
+
+def test_decisionx_legacy_local_done_requires_central_native_admission(tmp_path):
+    module = worker()
+    module.DX_HOME = tmp_path
+    batch = 'a' * 32
+    with module._dx_connection() as db:
+        db.execute("INSERT INTO episodes(id,source_sha,state,attempts,retry_after,batch,updated) "
+                   "VALUES('unproved',?,'done',1,0,?,0)", ('b' * 64, batch))
+
+    class Sender:
+        @staticmethod
+        def operator_memory_post(body):
+            assert body == {'operation': 'get_job', 'job_id': 'decisionx-iae-' + batch}
+            return {'job': {'id': body['job_id'], 'state': 'complete',
+                            'attachment_refs': [{'kind': 'iae_episode_batch'}],
+                            'effect_evidence': [{'kind': 'provider_conversation', 'ref': 'chat'}]}}
+
+    module.sender = Sender()
+    with module._dx_connection() as db:
+        assert module._dx_reconcile_unproved_done(db) == 1
+        assert db.execute("SELECT state FROM episodes WHERE id='unproved'").fetchone() == ('retry',)
 
 
 def test_decisionx_transport_input_retired_only_after_central_admission(tmp_path):

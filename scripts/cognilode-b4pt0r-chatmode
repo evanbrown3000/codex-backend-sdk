@@ -335,7 +335,11 @@ def new_session(profile: Path, impersonate: str):
 
 def codex_device_id() -> str:
     if os.environ.get("COGNILODE_CHATMODE_PORTABLE") == "1":
-        path = Path.home() / ".config/cognilode/chatmode-provider-device-id"
+        # Containers keep provider identity beside their writable Codex auth
+        # custody. The operator-token mount is intentionally read-only.
+        path = (Path(os.environ["CODEX_HOME"]) / "chatmode-provider-device-id"
+                if os.environ.get("CODEX_HOME") else
+                Path.home() / ".config/cognilode/chatmode-provider-device-id")
         path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = path.with_name(path.name + ".lock")
         with lock_path.open("a+", encoding="ascii") as lock:

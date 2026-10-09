@@ -95,6 +95,7 @@ services:
     environment:
       HOME: /home/worker
       CODEX_HOME: /home/worker/.codex
+      COGNILODE_CHATMODE_PORTABLE: "1"
       PYTHONPATH: /runtime/source/current/codex-backend-sdk/gate
       COGNILODE_HTTP_GATE_SOCKET: /runtime/http-gate/gate.sock
       COGNILODE_HTTP_GATE_FALLBACK_LOG: /runtime/http-gate/fallback.jsonl
@@ -130,6 +131,7 @@ services:
         exec python3 /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-chatmode-runtime
     environment:
       HOME: /home/worker
+      COGNILODE_CHATMODE_PORTABLE: "1"
       PYTHONPATH: /runtime/source/current/codex-backend-sdk/gate:/runtime/source/current/modified-codex-runtime/src
       COGNILODE_HTTP_GATE_SOCKET: /runtime/http-gate/gate.sock
       COGNILODE_HTTP_GATE_FALLBACK_LOG: /runtime/http-gate/fallback.jsonl

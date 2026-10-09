@@ -109,6 +109,12 @@ class ConversationDeltaTests(unittest.TestCase):
             self.assertEqual(list(Path(one).iterdir()),[])
             self.assertEqual(list(Path(two).iterdir()),[])
 
+    def test_shared_remember_requires_employee_identity(self):
+        argv=["conversation-read","--provider","chatgpt.com","--conversation-id","conversation-1","--remember"]
+        with mock.patch.object(sys,"argv",argv), self.assertRaises(SystemExit) as error:
+            reader.main()
+        self.assertEqual(error.exception.code,2)
+
     def test_job_id_resolves_only_matching_central_provider_readback(self):
         job={"id":"job-1","state":"complete","provider":"chatgpt.com",
              "conversation_id":"conversation-1","effect_evidence":[

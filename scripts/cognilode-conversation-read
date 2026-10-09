@@ -463,6 +463,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.remember and args.since:
         parser.error("--remember and --since cannot be combined")
+    if args.remember and args.remember_store == "shared" and args.reader_id == "default":
+        parser.error("shared --remember requires --reader-id or COGNILODE_READER_ID for the named employee")
     job_link = None
     if args.job_id:
         job_link = resolve_job_conversation(args.job_id, expected_provider=args.provider,

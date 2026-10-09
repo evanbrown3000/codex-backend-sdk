@@ -32,7 +32,10 @@ def request_json(base: str, path: str, token: str, *, method: str = 'POST',
     })
     try:
         with urlopen(request, timeout=timeout) as response:
-            result = json.load(response)
+            try:
+                result = json.load(response)
+            except (ValueError, UnicodeDecodeError) as error:
+                raise CentralHTTPError('central_http_non_json_response') from error
     except HTTPError as error:
         try:
             failure = json.loads(error.read(4096))

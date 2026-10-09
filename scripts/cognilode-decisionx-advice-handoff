@@ -93,6 +93,10 @@ def exact_refs(rows: Any, *, candidate: bool = False) -> list[dict[str, str]]:
         if not isinstance(row, Mapping) or not all(isinstance(row.get(k), str) and row[k] for k in fields):
             raise ValueError("malformed source or candidate reference")
         value = {k: row[k] for k in fields}
+        if not candidate:
+            for field in ("source_fidelity", "source_kind", "source_provenance"):
+                if field in row:
+                    value[field] = str(row[field])
         if any(not HEX64.fullmatch(value[k]) for k in ("prompt_sha256", "response_sha256", "source_sha256")):
             raise ValueError("invalid source hash")
         key = ((value["segment_id"], value["provider"], value["conversation_id"])
@@ -273,8 +277,16 @@ def verify_inputs(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapp
             or source.get("response_sha256") != ref["response_sha256"]
             or (source.get("capture") or {}).get("source_sha256") != ref["source_sha256"]):
             raise ValueError("uploaded full-source contents differ from shared readback")
+        if ref.get("source_fidelity"):
+            root = load(HERE / "cognilode-root-plan-handoff", "dx_advice_source_fidelity")
+            if (root._source_fidelity(source.get("capture") or {}) != ref["source_fidelity"]
+                or source.get("source_fidelity") != ref["source_fidelity"]
+                or source.get("source_kind") != ref.get("source_kind")
+                or source.get("source_provenance") != ref.get("source_provenance")):
+                raise ValueError("uploaded source fidelity differs from shared readback")
     native = load(HERE / "decisionx_successor_native.py", "dx_advice_render_verifier")
-    historical_rendered = "".join(native.render(full[(ref["provider"], ref["conversation_id"])]) + "\n\n"
+    historical_rendered = "".join(native.render(full[(ref["provider"], ref["conversation_id"])],
+                                               include_fidelity=bool(ref.get("source_fidelity"))) + "\n\n"
                                   for ref in packet["source_refs"])
     return hashes, source_refs, candidate_refs, source_refs_sha, digest(historical_rendered.encode("utf-8"))
 

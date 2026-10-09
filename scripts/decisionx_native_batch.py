@@ -133,7 +133,12 @@ def run(source_zip: Path, output_dir: Path, source_zips: list[Path]) -> dict:
     render_root = output_dir / "complete_sources"
     render_root.mkdir(exist_ok=True)
     for key, full in sorted(sources.items()):
-        lines = [f"# {key[0]} / {key[1]}", ""]
+        capture = full.get("capture") or {}
+        lines = [f"# {key[0]} / {key[1]}", "",
+                 "Source fidelity: " + str(full.get("source_fidelity") or "unclassified_text_projection"),
+                 "Source kind: " + str(full.get("source_kind") or capture.get("source_kind") or "unknown"),
+                 "Source provenance: " + str(full.get("source_provenance") or capture.get("source_provenance") or "unverified"),
+                 "These rendered messages do not establish original media or tool completeness.", ""]
         for event in full.get("events") or []:
             lines.extend(["## " + str(event.get("role") or "unknown"), "",
                           str(event.get("content") or ""), ""])

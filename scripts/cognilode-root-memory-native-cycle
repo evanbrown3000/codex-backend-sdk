@@ -90,12 +90,19 @@ def source_record(post: Callable[[dict[str, Any]], Mapping[str, Any]], ref: Mapp
     if bridge._complete_source(ref, result) is None:
         raise ValueError("selected full source is no longer complete/Drive-verified")
     row = result["conversation"]
+    capture = row.get("capture") or {}
     if (row.get("prompt_sha256") != ref["prompt_sha256"]
         or row.get("response_sha256") != ref["response_sha256"]):
         raise ValueError("selected source hash changed since census")
+    fidelity = bridge._source_fidelity(capture)
+    if ref.get("source_fidelity") and ref["source_fidelity"] != fidelity:
+        raise ValueError("selected source fidelity changed since census")
     selected = {"provider": ref["provider"], "conversation_id": ref["conversation_id"],
                 "prompt_sha256": ref["prompt_sha256"], "response_sha256": ref["response_sha256"],
-                "source_at_utc": ref["source_at_utc"], "capture": row.get("capture") or {},
+                "source_at_utc": ref["source_at_utc"], "capture": capture,
+                "source_fidelity": fidelity,
+                "source_kind": str(capture.get("source_kind") or ""),
+                "source_provenance": str(capture.get("source_provenance") or ""),
                 "events": row.get("events") or []}
     return (json.dumps(selected, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
 

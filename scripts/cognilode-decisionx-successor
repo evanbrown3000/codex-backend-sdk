@@ -197,7 +197,10 @@ def source_refs(post: Callable[[dict], Mapping], selected: list[dict], bridge: A
                "prompt_sha256": source.get("prompt_sha256"),
                "response_sha256": source.get("response_sha256"),
                "source_sha256": capture.get("source_sha256"),
-               "source_at_utc": stamp.isoformat()}
+               "source_at_utc": stamp.isoformat(),
+               "source_fidelity": bridge._source_fidelity(capture),
+               "source_kind": str(capture.get("source_kind") or ""),
+               "source_provenance": str(capture.get("source_provenance") or "")}
         require(all(HEX64.fullmatch(str(ref[k] or "")) for k in
                     ("prompt_sha256", "response_sha256", "source_sha256")),
                 "historical source hash missing")
@@ -270,9 +273,13 @@ def packet(post: Callable[[dict], Mapping], target_job_id: str, *, output_root: 
 
 PROMPT = """You are a ChatGPT.com Chat-mode DecisionX successor analyst. Use high reasoning.
 All heavy computation must run in your own native ChatGPT sandbox. The attached ZIPs
-contain the current complete conversation, native verifier, source-linked historical
-descriptors, and complete historical conversations chosen from a shared stock of at
+contain the current rendered conversation, native verifier, source-linked historical
+descriptors, and Drive-verified rendered historical conversations chosen from a shared stock of at
 least 500 independently Drive-verified conversations spanning more than two years.
+Read each source's fidelity tier and provenance. Historical S3 rendered text
+does not establish authenticated original media or tool records; neither do
+visible Codex rollouts or privacy-export text projections. Never infer that
+missing evidence exists.
 
 Save every attached ZIP in your native sandbox, extract `RUN_ME.py` from
 `TARGET_AND_CANDIDATES.zip`, then run

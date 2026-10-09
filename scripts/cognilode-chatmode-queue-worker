@@ -383,6 +383,10 @@ It verifies every episode against the complete sources, renders the full
 conversations under complete_sources/, and computes lexical neighbors. Read
 those renderings as context and use neighbors.json as supporting evidence while
 YOU reason semantically.
+Each source rendering states its fidelity tier and provenance. Historical S3
+rendered text has unverified original origin; Codex visible rollouts and privacy
+export text projections do not prove original media or tool completeness. Use
+the tier when judging evidence and never upgrade it by inference.
 Do not move this computation to a remote machine. Include NATIVE_COMPUTE.json
 and neighbors.json unchanged in your single returned ZIP, alongside your labels.
 

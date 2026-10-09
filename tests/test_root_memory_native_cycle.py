@@ -36,6 +36,9 @@ class FakeBridge:
         row = read.get("conversation") or {}
         return datetime.now(timezone.utc) if row.get("capture", {}).get("drive_verified") else None
 
+    def _source_fidelity(self, _capture):
+        return "drive_verified_text_projection"
+
 
 class FakeD1:
     def __init__(self, refs):

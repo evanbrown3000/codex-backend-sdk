@@ -58,9 +58,27 @@ def test_successor_retrieves_only_sources_available_before_target_provider_turn(
         def _complete_source(index, _read):
             return datetime(2026, 1, 1, tzinfo=timezone.utc)
 
+        @staticmethod
+        def _source_fidelity(_capture):
+            return "drive_verified_text_projection"
+
     refs, candidates = upstream.source_refs(post, selected, Bridge(), as_of=cutoff, limit=1)
     assert [row['conversation_id'] for row in refs] == ['past']
     assert [row['conversation_id'] for row in candidates] == ['past']
+    assert refs[0]['source_fidelity'] == 'drive_verified_text_projection'
+
+
+def test_future_successor_render_exposes_source_fidelity_without_changing_legacy_render():
+    source = {'provider':'chatgpt-export-format','conversation_id':'history-1',
+              'source_fidelity':'unverified_origin_rendered_text',
+              'source_kind':'historical_s3_rendered',
+              'source_provenance':'chatgpt_export_render_format_unverified_origin',
+              'events':[{'role':'user','content':'A historical instruction'}]}
+    assert 'Source fidelity:' not in native.render(source)
+    rendered = native.render(source,include_fidelity=True)
+    assert 'Source fidelity: unverified_origin_rendered_text' in rendered
+    assert 'Source provenance: chatgpt_export_render_format_unverified_origin' in rendered
+    assert 'does not establish original media or tool completeness' in rendered
 
 
 class MissingSegmentHTTP(RuntimeError):

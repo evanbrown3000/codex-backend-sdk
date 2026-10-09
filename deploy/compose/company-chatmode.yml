@@ -521,6 +521,7 @@ services:
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
       COGNILODE_REPOSITORIES_ROOT: /runtime/source/current
       COGNILODE_RPE_PROVIDER: chatgpt.com
+      COGNILODE_RPE_CRITICAL_PILOT_RUN_ID: rpe-cf35d031f25f907c907ec3f4
       COGNILODE_RPE_REPOSITORY_REF: company://repository/codex-backend-sdk
       COGNILODE_TASKFLOW_DISPATCH_CLI: /company/codex-backend-sdk/scripts/cognilode-taskflow-dispatch
       COGNILODE_TASKFLOW_SECRETARY_COMMAND: python3 -m modified_codex.taskflow_secretary submit

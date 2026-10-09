@@ -594,7 +594,8 @@ def tick(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, output_root: Pa
          plan_output_root: Path, bucket: str = DEFAULT_BUCKET,
          prepare_fn: Callable[..., dict[str, Any]] = prepare,
          finalize_fn: Callable[..., dict[str, Any]] = finalize,
-         handoff_fn: Callable[..., dict[str, Any]] | None = None) -> dict[str, Any]:
+         handoff_fn: Callable[..., dict[str, Any]] | None = None,
+         outcome_fn: Callable[..., dict[str, Any]] | None = None) -> dict[str, Any]:
     """Advance one causal stage; hosted historical rhythm alone sends provider turns."""
     state_path = output_root / "cycle-state.json"
     state = json.loads(state_path.read_text()) if state_path.exists() else {"phase": "ready"}
@@ -657,29 +658,58 @@ def tick(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, output_root: Pa
                 return {"ok": False, "phase": phase, "reason": "root_plan_retry_delayed",
                         "retry_after_epoch": state["retry_after_epoch"], "provider_requests_created": 0}
             attempt = int(state.get("root_attempt") or 0) + 1
-            replacement = finalize_fn(post, native_job_id=str(state["native_job_id"]),
-                                      bucket=bucket, root_attempt=attempt)
-            if not replacement.get("ok"):
-                return replacement
-            successor_id = str(replacement["root_job"]["job_id"])
-            _atomic_state(state_path, {"phase": "await_root", "native_job_id": state["native_job_id"],
-                                       "root_job_id": successor_id, "root_attempt": attempt,
-                                       "source_set_sha256": state["source_set_sha256"]})
+            if state.get("root_job_kind") == "outcome_successor":
+                recurrence = outcome_fn or _load(BRIDGE, "root_outcome_retry").enqueue_outcome_gated_successor
+                replacement = recurrence(post, state=state, output_root=output_root,
+                                         bucket=bucket, attempt=attempt)
+                if replacement.get("phase") != "await_root":
+                    return replacement
+                successor_id = str(replacement["root_job_id"])
+                next_state = {**state, "phase": "await_root", "root_job_id": successor_id,
+                              "root_attempt": attempt,
+                              "prior_root_job_id": replacement["prior_root_job_id"],
+                              "outcome_zip_sha256": replacement["outcome_zip_sha256"],
+                              "root_job_kind": "outcome_successor"}
+                next_state.pop("retry_after_epoch", None)
+                next_state.pop("retry_reason", None)
+            else:
+                replacement = finalize_fn(post, native_job_id=str(state["native_job_id"]),
+                                          bucket=bucket, root_attempt=attempt)
+                if not replacement.get("ok"):
+                    return replacement
+                successor_id = str(replacement["root_job"]["job_id"])
+                next_state = {"phase": "await_root", "native_job_id": state["native_job_id"],
+                              "root_job_id": successor_id, "root_attempt": attempt,
+                              "source_set_sha256": state["source_set_sha256"]}
+            _atomic_state(state_path, next_state)
             return {"ok": True, "phase": "await_root", "root_job_id": successor_id,
                     "replaced_bad_job_id": root_id, "provider_requests_created": 0}
         _atomic_state(state_path, {"phase": "complete", "native_job_id": state["native_job_id"],
                                    "root_job_id": root_id, "plan_sha256": result["plan_sha256"],
                                    "plan_path": result.get("plan_path"),
                                    "root_memory_packet_sha256": result.get("root_memory_packet_sha256"),
+                                   "previous_root_job_id": state.get("prior_root_job_id"),
+                                   "root_job_kind": state.get("root_job_kind"),
+                                   "outcome_zip_sha256": state.get("outcome_zip_sha256"),
                                    "source_set_sha256": state["source_set_sha256"],
                                    "completed_at": datetime.now(timezone.utc).isoformat()})
         return {"ok": True, "phase": "complete", "root_job_id": root_id,
                 "plan_sha256": result["plan_sha256"], "provider_requests_created": 0}
     if phase == "complete":
+        recurrence = outcome_fn or _load(BRIDGE, "root_outcome_recurrence").enqueue_outcome_gated_successor
+        successor = recurrence(post, state=state, output_root=output_root,
+                               bucket=bucket, attempt=0)
+        if successor.get("phase") == "await_root":
+            _atomic_state(state_path, {**state, "phase": "await_root",
+                                       "root_job_id": successor["root_job_id"],
+                                       "prior_root_job_id": successor["prior_root_job_id"],
+                                       "root_job_kind": "outcome_successor",
+                                       "root_attempt": 0,
+                                       "outcome_zip_sha256": successor["outcome_zip_sha256"]})
+            return successor
         completed = datetime.fromisoformat(str(state["completed_at"]))
         if (datetime.now(timezone.utc) - completed).total_seconds() < 86400:
-            return {"ok": True, "phase": "complete", "root_job_id": state["root_job_id"],
-                    "provider_requests_created": 0}
+            return {**successor, "root_job_id": state["root_job_id"]}
         bridge = _load(BRIDGE, "root_memory_bridge_fingerprint")
         stock = bridge.shared_stock_census(post, minimum=500,
                                            checkpoint_path=output_root / "stock-readback-proofs.json")

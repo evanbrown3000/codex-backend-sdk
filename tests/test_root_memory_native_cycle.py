@@ -91,6 +91,66 @@ def refs(count=500):
 
 
 class RootMemoryCycleTests(unittest.TestCase):
+    def test_completed_root_waits_for_effects_then_queues_and_retries_outcome_successor(self):
+        d1 = FakeD1([])
+        calls = []
+
+        def outcome(_post, *, state, output_root, bucket, attempt):
+            calls.append((state.get("root_job_id"), attempt))
+            if not state.get("effects_ready"):
+                return {"ok": True, "phase": "complete", "reason": "awaiting_verified_outcomes",
+                        "provider_requests_created": 0}
+            return {"ok": True, "phase": "await_root",
+                    "root_job_id": f"outcome-{attempt}", "prior_root_job_id": "original-root",
+                    "root_job_kind": "outcome_successor", "root_attempt": attempt,
+                    "outcome_zip_sha256": "d" * 64, "provider_requests_created": 0}
+
+        def no_initial_finalize(*_args, **_kwargs):
+            raise AssertionError("outcome successor must not recreate the initial root job")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / "cycle-state.json"
+            initial = {"phase": "complete", "native_job_id": "native-1",
+                       "root_job_id": "original-root", "source_set_sha256": "a" * 64,
+                       "root_memory_packet_sha256": "b" * 64,
+                       "plan_path": str(root / "installed.plan"),
+                       "completed_at": datetime.now(timezone.utc).isoformat()}
+            state_path.write_text(json.dumps(initial))
+            kwargs = {"output_root": root, "plan_output_root": root / "plans",
+                      "outcome_fn": outcome, "finalize_fn": no_initial_finalize,
+                      "handoff_fn": lambda *_args, **_kwargs: {
+                          "ok": True, "plan_sha256": "e" * 64,
+                          "plan_path": str(root / "next.plan"),
+                          "root_memory_packet_sha256": "b" * 64,
+                          "secretary_taskflow_installation": {"ok": True}}}
+            self.assertEqual(cycle.tick(d1, **kwargs)["reason"], "awaiting_verified_outcomes")
+            self.assertEqual(json.loads(state_path.read_text())["phase"], "complete")
+            state_path.write_text(json.dumps({**initial, "effects_ready": True}))
+            self.assertEqual(cycle.tick(d1, **kwargs)["root_job_id"], "outcome-0")
+            queued = json.loads(state_path.read_text())
+            self.assertEqual(queued["root_job_kind"], "outcome_successor")
+            self.assertEqual(queued["prior_root_job_id"], "original-root")
+            d1.jobs["outcome-0"] = {"state": "queued"}
+            self.assertEqual(cycle.tick(d1, **kwargs)["job_state"], "queued")
+            d1.jobs["outcome-0"] = {"state": "failed"}
+            self.assertEqual(cycle.tick(d1, **kwargs)["reason"], "root_plan_retry_delayed")
+            delayed = json.loads(state_path.read_text())
+            delayed["retry_after_epoch"] = 1
+            state_path.write_text(json.dumps(delayed))
+            self.assertEqual(cycle.tick(d1, **kwargs)["root_job_id"], "outcome-1")
+            retried = json.loads(state_path.read_text())
+            self.assertEqual(retried["root_attempt"], 1)
+            self.assertEqual(retried["prior_root_job_id"], "original-root")
+            self.assertNotIn("retry_after_epoch", retried)
+            d1.jobs["outcome-1"] = {"state": "complete"}
+            self.assertEqual(cycle.tick(d1, **kwargs)["phase"], "complete")
+            completed = json.loads(state_path.read_text())
+            self.assertEqual(completed["root_job_id"], "outcome-1")
+            self.assertEqual(completed["previous_root_job_id"], "original-root")
+            self.assertNotIn("prior_root_job_id", completed)
+            self.assertEqual(calls, [("original-root", 0), ("original-root", 0), ("outcome-0", 1)])
+
     def test_successful_native_handoff_retires_only_transient_source_staging(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

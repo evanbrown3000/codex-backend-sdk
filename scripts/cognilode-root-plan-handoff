@@ -293,7 +293,10 @@ def handoff(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, job_id: str,
     plan, source_sha = extract_plan(job, central)
     memory_packet_sha = verify_root_memory_packet(job, central, stock, minimum=minimum)
     rendered = render_taskflow(plan, conversation_id=job["conversation_id"], assistant_sha256=source_sha)
-    target = output_root / (str(plan["project_id"]) + ".plan")
+    # Preserve successive root revisions as separate reviewed files. The installer
+    # repoints the same project service at the newly committed revision.
+    revision = source_sha[:12] + "-" + _sha(str(job["conversation_id"]))[:8]
+    target = output_root / (str(plan["project_id"]) + "-" + revision + ".plan")
     output_root.mkdir(parents=True, exist_ok=True)
     repo = subprocess.run(["git", "-C", str(output_root), "rev-parse", "--show-toplevel"],
                           text=True, capture_output=True, timeout=10, check=False)

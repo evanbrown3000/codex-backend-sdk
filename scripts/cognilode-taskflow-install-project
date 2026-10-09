@@ -83,6 +83,7 @@ def install(args: argparse.Namespace) -> dict[str, object]:
         "%h/Projects/codex-backend-sdk", str(ROOT)), encoding="utf-8")
     for argv in (["systemctl", "--user", "daemon-reload"],
                  ["systemctl", "--user", "enable", "--now", f"cognilode-taskflow-phase-controller@{args.instance}.service"],
+                 ["systemctl", "--user", "restart", f"cognilode-taskflow-phase-controller@{args.instance}.service"],
                  ["systemctl", "--user", "is-active", f"cognilode-taskflow-phase-controller@{args.instance}.service"]):
         subprocess.run(argv, check=True, capture_output=True, text=True, timeout=45)
     return {"ok": True, "instance": args.instance, "unit": f"cognilode-taskflow-phase-controller@{args.instance}.service",

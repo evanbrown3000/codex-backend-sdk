@@ -90,6 +90,36 @@ def refs(count=500):
 
 
 class RootMemoryCycleTests(unittest.TestCase):
+    def test_bad_native_deliverable_gets_delayed_successor_on_same_rhythm_queue(self):
+        d1 = FakeD1([])
+        attempts = []
+        def stage(_post, **kwargs):
+            attempt = kwargs.get("attempt", 0)
+            attempts.append(attempt)
+            return {"ok": True, "job": {"job_id": f"native-a{attempt}"},
+                    "source_set_sha256": "a" * 64}
+        def bad_output(_post, **_kwargs):
+            raise ValueError("completed job had no native work ZIP")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            kwargs = {"output_root": root, "plan_output_root": root / "plans",
+                      "prepare_fn": stage, "finalize_fn": bad_output}
+            self.assertEqual(cycle.tick(d1, **kwargs)["native_job_id"], "native-a0")
+            d1.jobs["native-a0"] = {"state": "complete"}
+            delayed = cycle.tick(d1, **kwargs)
+            self.assertFalse(delayed["ok"])
+            self.assertEqual(delayed["reason"], "native_deliverable_retry_delayed")
+            self.assertEqual(attempts, [0])
+            state_path = root / "cycle-state.json"
+            state = json.loads(state_path.read_text())
+            state["retry_after_epoch"] = 1
+            state_path.write_text(json.dumps(state))
+            successor = cycle.tick(d1, **kwargs)
+            self.assertEqual(successor["native_job_id"], "native-a1")
+            self.assertEqual(successor["replaced_bad_job_id"], "native-a0")
+            self.assertEqual(attempts, [0, 1])
+            self.assertEqual(successor["provider_requests_created"], 0)
+
     def test_tick_advances_native_root_secretary_without_direct_provider_send(self):
         d1 = FakeD1([])
         with tempfile.TemporaryDirectory() as directory:

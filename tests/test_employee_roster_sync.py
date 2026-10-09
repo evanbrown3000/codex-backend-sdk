@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -52,8 +53,10 @@ def test_activation_requires_named_completed_job_and_central_readback(tmp_path, 
     executable.chmod(0o755)
     monkeypatch.setattr(module.Path, "home", lambda: tmp_path)
 
+    terminal = "Maya completed the research ZIP with a manifest."
     readback = {"ok": True, "conversation": {"conversation_id": cid,
-                "events": [{"role": "assistant", "source_content_complete": True}]}}
+                "response_sha256": hashlib.sha256(terminal.encode()).hexdigest(),
+                "events": [{"role": "assistant", "content": terminal}]}}
 
     def post(request):
         if request["operation"] == "list_jobs":
@@ -61,10 +64,10 @@ def test_activation_requires_named_completed_job_and_central_readback(tmp_path, 
         assert request == {"operation": "read", "provider": "openai-codex", "conversation_id": cid}
         return readback
 
-    readback["conversation"]["events"][0]["source_content_complete"] = False
+    readback["conversation"]["response_sha256"] = "0" * 64
     result = module.reconcile([snapshots], installed_path=installed, candidates_path=candidates, post=post)
     assert result["activated"] == []
-    readback["conversation"]["events"][0]["source_content_complete"] = True
+    readback["conversation"]["response_sha256"] = hashlib.sha256(terminal.encode()).hexdigest()
     result = module.reconcile([snapshots], installed_path=installed, candidates_path=candidates, post=post)
     assert result["activated"] == ["Maya Chen"]
     assert json.loads(installed.read_text())["employees"]["Maya Chen"]["role"] == "Staff Systems Integration Engineer"

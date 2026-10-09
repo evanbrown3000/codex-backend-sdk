@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import html
 import importlib.machinery
 import importlib.util
@@ -131,9 +132,15 @@ def verified_employee_job(job: dict[str, Any], candidate: dict[str, Any], post) 
     conversation = read.get("conversation") or {}
     if not read.get("ok") or conversation.get("conversation_id") != cid:
         return False
+    # The Codex normalized reader does not set source_content_complete. Its
+    # response_sha256 is the hash of the selected assistant text; verify that
+    # exact text is present in the central read before installing the name.
+    response_sha = str(conversation.get("response_sha256") or "")
     events = conversation.get("events") or []
     if not any(isinstance(e, dict) and e.get("role") == "assistant"
-               and e.get("source_content_complete") is True for e in events):
+               and isinstance(e.get("content"), str) and e["content"].strip()
+               and hashlib.sha256(e["content"].encode()).hexdigest() == response_sha
+               for e in events):
         return False
     # The installed route must be backed by the user's actual Codex executable.
     executable = Path.home() / ".local/bin/codex"

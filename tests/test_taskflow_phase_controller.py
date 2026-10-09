@@ -74,6 +74,71 @@ class FakeQueue:
         raise AssertionError(body)
 
 class Tests(unittest.TestCase):
+    def test_returned_work_zip_is_published_with_full_private_readback(self):
+        with tempfile.TemporaryDirectory() as td:
+            path=Path(td)/'work.zip'
+            with zipfile.ZipFile(path,'w') as z:z.writestr('EXTERNAL_EFFECT_INSTRUCTIONS.md','apply')
+            digest=hashlib.sha256(path.read_bytes()).hexdigest()
+            calls=[]
+            def aws_run(argv, **kwargs):
+                action=argv[2]; calls.append(action)
+                if action=='head-object':
+                    if calls.count('head-object')==1:
+                        return subprocess.CompletedProcess(argv,1,'','not found')
+                    return subprocess.CompletedProcess(argv,0,json.dumps({
+                        'ContentLength':path.stat().st_size,'Metadata':{'sha256':digest}}),'')
+                if action=='get-object':
+                    Path(argv[-3]).write_bytes(path.read_bytes())
+                return subprocess.CompletedProcess(argv,0,'{}','')
+            with mock.patch.dict(os.environ,{'COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET':'private-test-bucket',
+                                              'COGNILODE_AWS_CLI':'aws'}), \
+                 mock.patch.object(w.subprocess,'run',side_effect=aws_run), \
+                 mock.patch.object(w,'ROOT',Path(td)):
+                uri=w.publish_taskflow_work_zip(path,digest)
+            self.assertEqual(uri,f's3://private-test-bucket/taskflow-artifacts/sha256/{digest}.zip')
+            self.assertEqual(calls,['head-object','put-object','head-object','get-object'])
+
+    def test_completed_chat_artifact_stages_from_private_mirror_on_other_device(self):
+        with tempfile.TemporaryDirectory() as td:
+            plan=c.parse_plan(PLAN)
+            path=Path(td)/'work.zip'
+            manifest_zip(path,plan.sha256,{'EXTERNAL_EFFECT_INSTRUCTIONS.md':b'apply','src/a.py':b'print(1)'})
+            digest=hashlib.sha256(path.read_bytes()).hexdigest()
+            row={'kind':'chatgpt_sandbox_artifact','ref':digest,'path':'/other-device/work.zip',
+                 'mirrors':[f's3://private-bucket/taskflow-artifacts/sha256/{digest}.zip']}
+            job={'conversation_id':'conv-1','effect_evidence':[row,
+                 {'kind':'provider_conversation','ref':'conv-1'},
+                 {'kind':'central_conversation_readback','ref':'conv-1'},
+                 {'kind':'provider_observed_native_exec','tool':'container.exec','ref':'result-1',
+                  'call_ref':'call-1','raw_stream_sha256':'a'*64}]}
+            with mock.patch.object(c,'stage_external_work_zip',return_value=path) as stage:
+                self.assertEqual(c.verified_chat_completion(job,plan)['sha256'],digest)
+            stage.assert_called_once_with({'mirrors':row['mirrors']},digest)
+
+    def test_taskflow_job_waits_for_private_zip_before_d1_completion(self):
+        with tempfile.TemporaryDirectory() as td:
+            path=Path(td)/'work.zip'
+            with zipfile.ZipFile(path,'w') as z:z.writestr('EXTERNAL_EFFECT_INSTRUCTIONS.md','apply')
+            digest=hashlib.sha256(path.read_bytes()).hexdigest()
+            value={'assistant_terminal':True,'conversation_id':'conv-1',
+                   'central_conversation_store':{'central_readback_verified':True,'conversation_id':'conv-1'},
+                   'downloaded_files':[{'path':str(path),'sha256':digest,'name':'work.zip'}]}
+            job={'id':'job-1','taskflow_multi_phase':True,'phase':'chatgpt_sandbox',
+                 'claimed_by':'worker-1','lease_token':'token','lease_generation':1}
+            with mock.patch.object(w,'publish_taskflow_work_zip',side_effect=RuntimeError('private GET failed')), \
+                 mock.patch.object(w.sender,'operator_memory_post') as complete, \
+                 mock.patch.object(w,'event'):
+                self.assertFalse(w.complete_from_result(job,value))
+                complete.assert_not_called()
+            mirror=f's3://private-bucket/taskflow-artifacts/sha256/{digest}.zip'
+            with mock.patch.object(w,'publish_taskflow_work_zip',return_value=mirror), \
+                 mock.patch.object(w.sender,'operator_memory_post',return_value={'ok':True}) as complete, \
+                 mock.patch.object(w,'atomic_json'), mock.patch.object(w,'event'):
+                self.assertTrue(w.complete_from_result(job,value))
+            evidence=complete.call_args.args[0]['effect_evidence']
+            artifact=next(e for e in evidence if e['kind']=='chatgpt_sandbox_artifact')
+            self.assertEqual(artifact['mirrors'],[mirror])
+
     def test_verified_checkoff_preserves_parallel_sibling_dependency_and_restart(self):
         with tempfile.TemporaryDirectory() as td:
             repo=Path(td)

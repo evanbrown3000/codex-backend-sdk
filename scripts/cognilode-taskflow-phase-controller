@@ -603,8 +603,27 @@ def _artifact_from_chat_job(job: Mapping[str, Any]) -> Path | None:
     candidates=[]
     for row in job.get("effect_evidence") or job.get("effect_evidence_json") or []:
         if isinstance(row,dict) and row.get("kind") == "chatgpt_sandbox_artifact" and row.get("path"):
-            candidates.append(Path(str(row["path"])))
-    return candidates[0] if len(candidates)==1 else None
+            candidates.append(row)
+    if len(candidates) != 1:
+        return None
+    row=candidates[0]
+    digest=str(row.get("ref") or "")
+    if not HEX64.fullmatch(digest):
+        raise ValueError("ChatGPT work ZIP has no exact SHA-256")
+    path=Path(str(row["path"]))
+    if path.is_file() and sha256_file(path) == digest:
+        return path
+    mirrors=list(row.get("mirrors") or [])
+    # Older completed D1 rows predate explicit mirror evidence. The immutable
+    # digest still identifies the same private launchpad object exactly.
+    bucket=os.environ.get("COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET", "").strip()
+    if bucket:
+        fallback=f"s3://{bucket}/taskflow-artifacts/sha256/{digest}.zip"
+        if fallback not in mirrors:
+            mirrors.append(fallback)
+    if mirrors:
+        return stage_external_work_zip({"mirrors":mirrors},digest)
+    raise ValueError("ChatGPT work ZIP is not available on this device and has no private mirror")
 
 
 def verified_chat_completion(job: Mapping[str, Any], plan: Plan) -> dict[str, Any] | None:
@@ -615,7 +634,7 @@ def verified_chat_completion(job: Mapping[str, Any], plan: Plan) -> dict[str, An
     meta = verify_manifest_zip(path, expected_plan_sha256=plan.sha256, require_external_instructions=True)
     evidence = [e for e in job.get("effect_evidence") or [] if isinstance(e, dict)]
     matching = [e for e in evidence if e.get("kind") == "chatgpt_sandbox_artifact"
-                and e.get("path") == str(path) and e.get("ref") == meta["sha256"]]
+                and e.get("ref") == meta["sha256"]]
     if len(matching) != 1:
         raise ValueError("ChatGPT artifact evidence SHA mismatch")
     conversation_id = str(job.get("conversation_id") or "")

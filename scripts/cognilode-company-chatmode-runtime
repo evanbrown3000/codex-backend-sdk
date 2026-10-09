@@ -33,9 +33,11 @@ def main() -> int:
     state = Path.home() / ".local/share/cognilode"
     state.mkdir(parents=True, exist_ok=True)
     provider_socket = Path(os.environ["COGNILODE_PROVIDER_SOCKET"])
+    unified = Path(os.environ.get("COGNILODE_COMPANY_SOURCE_ROOT", "/runtime/source")) / \
+        "current/modified-codex-runtime/src/modified_codex/unified_bridge.py"
     operator_token = Path(os.environ["COGNILODE_OPERATOR_TOKEN_FILE"])
     gate_policy = Path(os.environ["COGNILODE_HTTP_GATE_POLICY_FILE"])
-    while not STOP and not (provider_socket.exists() and operator_token.is_file()
+    while not STOP and not (provider_socket.exists() and unified.is_file() and operator_token.is_file()
                             and gate_policy.is_file()):
         time.sleep(2)
     if STOP:

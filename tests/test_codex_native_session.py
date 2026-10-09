@@ -118,6 +118,41 @@ class NativeSessionTests(unittest.TestCase):
         run.assert_not_called()
         self.assertTrue((result_dir/"confirmed.json").is_file())
 
+    def test_activation_hashes_release_and_behavior_bytes_before_posting(self):
+        root=Path(self.temp.name)
+        system=root/"system.txt";system.write_text("correct system replacement")
+        developer=root/"developer.txt";developer.write_text("correct developer replacement")
+        behavior=root/"behavior.json"
+        behavior.write_text(json.dumps({"schema":"cognilode.codex.native_instruction_behavior.v1",
+            "binary_sha256":native.sha(self.binary),"system_replacement_observed":True,
+            "developer_replacement_observed":True,"same_session_resume_observed":True,
+            "observed_session_id":"223e4567-e89b-12d3-a456-426614174000",
+            "terminal_rollout_sha256":"a"*64,"initial_event_count":2}))
+        release=root/"release.json"
+        release.write_text(json.dumps({"schema":"cognilode.codex.native_instruction_release.v1",
+            "binary_sha256":native.sha(self.binary),"bundle_sha256":native.sha(self.bundle),
+            "system_sha256":native.sha(system),"developer_sha256":native.sha(developer),
+            "behavior_receipt_sha256":native.sha(behavior)}))
+        args=types.SimpleNamespace(session_id=CID,environment_id="evanpc-workspace",
+            binary_path=self.binary,instruction_bundle_path=self.bundle,
+            system_instructions_path=system,developer_instructions_path=developer,
+            release_manifest_path=release,behavior_receipt_path=behavior)
+        requests=[]
+        def post(body):
+            requests.append(body)
+            if body["operation"]=="get_codex_native_session":
+                return {"ok":True,"session":{"environment_id":"evanpc-workspace",
+                    "binary_sha256":native.sha(self.binary),"source_admitted":True}}
+            return {"ok":True,"session":{"instruction_status":"release_verified",
+                "instruction_release_sha256":native.sha(release),
+                "instruction_bundle_sha256":native.sha(self.bundle)}}
+        with mock.patch.object(native,"post",side_effect=post):
+            self.assertTrue(native.activate(args)["ok"])
+            behavior.write_text(behavior.read_text()+" ")
+            with self.assertRaisesRegex(ValueError,"do not support activation"):
+                native.activate(args)
+        self.assertEqual(len([x for x in requests if x["operation"]=="activate_codex_native_instructions"]),1)
+
 
 if __name__=="__main__":
     unittest.main()

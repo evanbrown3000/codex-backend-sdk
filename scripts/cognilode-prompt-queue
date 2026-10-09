@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Live view of the one D1 prompt queue; `follow SHA5` expands a prompt."""
+from __future__ import annotations
+
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+import time
+
+
+def _sender():
+    path = Path(__file__).with_name("cognilode-b4pt0r-chatmode")
+    loader = importlib.machinery.SourceFileLoader("cognilode_prompt_queue_sender", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def _jobs(sender, state: str, limit: int = 150) -> list[dict]:
+    rows, cursor = [], ""
+    while len(rows) < limit:
+        page = sender.operator_memory_post({"operation": "list_jobs", "provider": "chatgpt.com",
+                                            "state": state, "limit": min(100, limit - len(rows)), "cursor": cursor})
+        rows.extend(page.get("jobs") or [])
+        cursor = page.get("next_cursor") or ""
+        if not cursor:
+            break
+    return rows
+
+
+def _account() -> str:
+    label = os.environ.get("COGNILODE_CHATMODE_ACCOUNT_LABEL", "").strip()
+    if label:
+        return label
+    try:
+        value = json.loads((Path.home() / ".codex/auth.json").read_text())
+        return str((value.get("tokens") or {}).get("account_id") or "unidentified")
+    except (OSError, ValueError):
+        return "unidentified"
+
+
+def _target(job: dict, account: str) -> str:
+    return " ".join((
+        "platform=" + str(job.get("provider") or "chatgpt.com"),
+        "environment=" + str(job.get("target_environment") or job.get("research_environment") or "evanpc"),
+        "model=" + str(job.get("requested_model") or job.get("model") or "gpt-5-6-thinking"),
+        "reasoning=" + str(job.get("reasoning_effort") or "xhigh"),
+        "account=" + account,
+        "framework=computerusex.chatgpt_http_or_browser",
+    ))
+
+
+def _citation(job: dict) -> str:
+    digest = str(job.get("prompt_sha256") or "")
+    return "[" + digest[:5] + "](prompt://" + digest + ")" if len(digest) == 64 else "[missing]"
+
+
+def _line(job: dict, account: str) -> str:
+    preview = " ".join(str(job.get("prompt") or "").split())[:100]
+    return f"{_citation(job)} {preview} | {_target(job, account)} | job={job.get('id')}"
+
+
+def _render(sender) -> str:
+    clock = sender.operator_memory_post({"operation": "rhythm_read"})
+    queued = _jobs(sender, "queued", 150)
+    active = []
+    for state in ("claimed", "effect_pending", "dispatched", "harvesting", "harvest_failed"):
+        active.extend(_jobs(sender, state, 30))
+    recent = _jobs(sender, "complete", 150)
+    recent.extend(active)
+    recent = [row for row in recent if row.get("rhythm_slot_index") is not None or row.get("effect_started_at")]
+    recent.sort(key=lambda row: str(row.get("effect_started_at") or row.get("rhythm_claimed_at")
+                                    or row.get("completed_at") or row.get("updated_at") or ""), reverse=True)
+    account = _account()
+    lines = ["# ChatGPT.com Chat-mode prompt queue", "",
+             "Shared D1 queue; live historical-rhythm clock; `cognilode-prompt-queue follow SHA5` expands a citation.",
+             "Upcoming job-to-slot pairings are candidates; dependency readiness and the live gate decide each claim.",
+             f"Tape slot {clock.get('clock', {}).get('next_slot_index')} | next due {clock.get('next_due_at')} | "
+             f"maximum gap {clock.get('clock', {}).get('pacing', {}).get('max_gap_ms', 'historical')} ms | "
+             f"gate {clock.get('gate_status', {}).get('reason', 'open')}", "", "## Upcoming", ""]
+    slots = clock.get("upcoming_slots") or []
+    for position, job in enumerate(queued[:20]):
+        slot = slots[position] if position < len(slots) else {}
+        lines.append(f"{slot.get('due_at', 'pending slot')} slot={slot.get('slot_index', '?')} "
+                     f"priority={job.get('priority', 0)} {_line(job, account)}")
+    if not queued:
+        lines.append("No queued ChatGPT jobs.")
+    lines.extend(("", "## Recently sent and in progress", ""))
+    for job in recent[:20]:
+        sent_at = job.get("effect_started_at") or job.get("rhythm_claimed_at") or job.get("updated_at")
+        lines.append(f"{sent_at} state={job.get('state')} slot={job.get('rhythm_slot_index', '?')} "
+                     f"conversation={job.get('conversation_id') or '-'} {_line(job, account)}")
+    if not recent:
+        lines.append("No recent sends.")
+    return "\n".join(lines) + "\n"
+
+
+def _follow(sender, prefix: str) -> int:
+    if len(prefix) < 1 or len(prefix) > 64 or any(c not in "0123456789abcdef" for c in prefix.lower()):
+        raise SystemExit("provide a hexadecimal prompt SHA prefix (normally five characters)")
+    matches = []
+    for state in ("queued", "claimed", "effect_pending", "dispatched", "harvesting", "harvest_failed", "complete"):
+        matches.extend(row for row in _jobs(sender, state, 500)
+                       if str(row.get("prompt_sha256") or "").startswith(prefix.lower()))
+    if len(matches) != 1:
+        raise SystemExit(f"citation resolves to {len(matches)} jobs; provide the full SHA or job ID")
+    job = matches[0]
+    print(f"job={job['id']} sha256={job['prompt_sha256']}\n\n{job['prompt']}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("command", nargs="?", choices=("show", "watch", "follow"), default="show")
+    parser.add_argument("citation", nargs="?")
+    parser.add_argument("--interval", type=int, default=60)
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+    sender = _sender()
+    if args.command == "follow":
+        if not args.citation:
+            parser.error("follow requires a citation")
+        return _follow(sender, args.citation)
+    while True:
+        result = _render(sender)
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=args.output.parent,
+                                             prefix=".prompt-queue-", delete=False) as stream:
+                stream.write(result)
+                temp = Path(stream.name)
+            temp.replace(args.output)
+        else:
+            print(result, flush=True)
+        if args.command != "watch":
+            return 0
+        time.sleep(max(10, args.interval))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

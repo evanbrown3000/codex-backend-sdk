@@ -1,5 +1,6 @@
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
+import hashlib
 import json
 from pathlib import Path
 
@@ -94,3 +95,37 @@ def test_local_terminal_rejects_tampered_artifact(tmp_path):
 def test_retry_after_is_not_shortened():
     assert collector.retry_after_seconds("900") == 900
     assert collector.retry_after_seconds("55") >= 60
+
+
+def test_terminal_without_zip_gets_fresh_read_and_preserves_first_terminal_time(monkeypatch, tmp_path):
+    stem = "b4pt0r-chatmode-no-zip"
+    receipt = tmp_path / f"{stem}.sse.receipt.json"
+    receipt.write_text(json.dumps({"user_message_id": "user-id", "conversation_id": "conv-1",
+                                   "state": "provider_accepted"}))
+    collected = tmp_path / f"{stem}.collected.json"
+    collected.write_text(json.dumps({"complete": True, "prompt": "Do work", "result": {
+        "conversation_id": "conv-1", "assistant_terminal": True,
+        "terminal_assistant_text": "No work ZIP yet", "completed_at": 1000,
+        "downloaded_files": [], "central_conversation_store": {"ok": True,
+            "central_readback_verified": True, "conversation_id": "conv-1",
+            "central_tool_event_count": 0,
+            "central_raw_sse_source": {"readback_verified": True}},
+    }}))
+    calls = []
+    monkeypatch.setattr(collector, "get_conversation", lambda *args: (object(), object(), {}, "device"))
+    monkeypatch.setattr(collector, "exact_terminal", lambda *args: ({"id": "user-id"}, {"id": "assistant-1"}))
+    monkeypatch.setattr(collector.sender, "message_text", lambda msg: "Do work" if msg["id"] == "user-id" else "No work ZIP yet")
+    zip_path = tmp_path / "work.zip"
+    zip_path.write_bytes(b"PK fixture")
+    digest = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+    def downloads(*args, **kwargs):
+        calls.append("GET")
+        return [] if len(calls) == 1 else [{"name": "work.zip", "path": str(zip_path), "sha256": digest}]
+    monkeypatch.setattr(collector.sender, "download_interpreter_artifacts", downloads)
+    monkeypatch.setattr(collector.sender, "admit_central_conversation", lambda **kwargs: {
+        "ok": True, "central_readback_verified": True, "conversation_id": "conv-1"})
+    assert collector.collect(receipt)["state"] == "collected"
+    assert json.loads(collected.read_text())["result"]["completed_at"] == 1000
+    assert collector.collect(receipt)["state"] == "collected"
+    assert len(calls) == 2
+    assert json.loads(collected.read_text())["result"]["downloaded_files"][0]["sha256"] == digest

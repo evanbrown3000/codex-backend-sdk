@@ -282,6 +282,10 @@ class NativeEvidenceMissing(ValueError):
     """A definitive completed Chat-mode turn had no provider-observed native execution."""
 
 
+class ChatDeliverableMissing(NativeEvidenceMissing):
+    """A definitive terminal Chat-mode turn lacked a usable work ZIP."""
+
+
 def final_dependency_ids(plan: Plan, step: Step) -> list[str]:
     by_id = plan.by_id()
     inherited = [dep for dep in step.dependencies if by_id[dep].checked and dep not in plan.completed_effects]
@@ -628,11 +632,21 @@ def _artifact_from_chat_job(job: Mapping[str, Any]) -> Path | None:
 
 def verified_chat_completion(job: Mapping[str, Any], plan: Plan) -> dict[str, Any] | None:
     """Require a ZIP, central readback, and a paired provider-native tool result."""
+    evidence = [e for e in job.get("effect_evidence") or [] if isinstance(e, dict)]
+    failures = [e for e in evidence if e.get("kind") == "chatgpt_terminal_deliverable_failure"]
+    if failures:
+        conversation_id = str(job.get("conversation_id") or "")
+        if (len(failures) != 1 or not HEX64.fullmatch(str(failures[0].get("ref") or ""))
+            or failures[0].get("conversation_id") != conversation_id
+            or not conversation_id or not all(any(e.get("kind") == kind and e.get("ref") == conversation_id
+                                                for e in evidence)
+                                              for kind in ("provider_conversation", "central_conversation_readback"))):
+            raise ValueError("ChatGPT failed-deliverable D1 evidence is incomplete")
+        raise ChatDeliverableMissing("ChatGPT completed terminal turn without a usable work ZIP")
     path = _artifact_from_chat_job(job)
     if not path:
         return None
     meta = verify_manifest_zip(path, expected_plan_sha256=plan.sha256, require_external_instructions=True)
-    evidence = [e for e in job.get("effect_evidence") or [] if isinstance(e, dict)]
     matching = [e for e in evidence if e.get("kind") == "chatgpt_sandbox_artifact"
                 and e.get("ref") == meta["sha256"]]
     if len(matching) != 1:
@@ -798,15 +812,26 @@ def ensure_native_retry_job(queue: QueueClient, plan: Plan, step: Step, original
     if original["prompt"] != chatgpt_prompt(plan, step, {"sha256": original_refs[0]["sha256"]}):
         raise ValueError("original ChatGPT prompt differs from the plan and research ZIP")
     jid = phase_job_id(plan, step.step_id, "chatgpt_sandbox", attempt)
-    prompt = (str(original["prompt"]) + "\n\nNative execution repair: The previous completed turn supplied a ZIP, "
-              "but its provider stream did not show a matched native container.exec or functions.exec call and result. "
-              "Perform the substantive compute in this ChatGPT chat-mode sandbox with its native execution tool. "
-              "Return a fresh single ZIP and in-chat report as instructed above.\n")
+    missing_zip = any(isinstance(e,dict) and e.get("kind") == "chatgpt_terminal_deliverable_failure"
+                      for e in previous.get("effect_evidence") or [])
+    repair_reason = (f"chatmode_deliverable_repair_attempt:{attempt}" if missing_zip
+                     else f"native_compute_repair_attempt:{attempt}")
+    if missing_zip:
+        prompt = (str(original["prompt"]) + "\n\nChat-mode deliverable repair: The previous completed turn did not provide "
+                  "a usable work ZIP after bounded GET-only collection. Perform the substantive compute in this "
+                  "ChatGPT chat-mode native sandbox. Return a fresh single downloadable ZIP with the required "
+                  "manifest and external-effect instructions.\n")
+    else:
+        # Preserve the exact historical retry prompt for already queued jobs.
+        prompt = (str(original["prompt"]) + "\n\nNative execution repair: The previous completed turn supplied a ZIP, "
+                  "but its provider stream did not show a matched native container.exec or functions.exec call and result. "
+                  "Perform the substantive compute in this ChatGPT chat-mode sandbox with its native execution tool. "
+                  "Return a fresh single ZIP and in-chat report as instructed above.\n")
     existing = queue.get(jid)
     if existing:
         if (existing.get("provider") != "chatgpt.com" or existing.get("plan_revision") != plan.sha256
             or existing.get("phase") != "chatgpt_sandbox"
-            or existing.get("reason") != f"native_compute_repair_attempt:{attempt}"
+            or existing.get("reason") != repair_reason
             or existing.get("attachment_refs") != original_refs
             or existing.get("taskflow_dependencies") != [str(previous["id"])]
             or existing.get("prompt") != prompt
@@ -820,7 +845,7 @@ def ensure_native_retry_job(queue: QueueClient, plan: Plan, step: Step, original
                 "reasoning_effort": original.get("reasoning_effort") or "xhigh",
                 "assigned_employee": original.get("assigned_employee") or "ChatGPT chat-mode native sandbox",
                 "attachment_refs": json.loads(json.dumps(original_refs)), "phase_attempt": attempt,
-                "reason": f"native_compute_repair_attempt:{attempt}"})
+                "reason": repair_reason})
     job["payload"]["phase_attempt"] = attempt
     job["payload"]["native_repair_of"] = str(original["id"])
     return queue.enqueue(job)
@@ -852,14 +877,25 @@ def ensure_native_diagnostic_job(queue: QueueClient, plan: Plan, step: Step,
     research_sha = str(research_ref.get("sha256") or "")
     if not HEX64.fullmatch(research_sha):
         raise ValueError("native diagnostic lacks SHA-bound original research ZIP")
-    prompt = (f"You are the named Codex research employee diagnosing three completed ChatGPT chat-mode turns.\n"
+    missing_zip = any(any(isinstance(e,dict) and e.get("kind") == "chatgpt_terminal_deliverable_failure"
+                          for e in row.get("effect_evidence") or []) for row in attempts)
+    introduction = ("You are the named Codex research employee diagnosing three completed ChatGPT chat-mode turns "
+                    "with missing work ZIPs and/or provider-native execution proof.\n" if missing_zip else
+                    "You are the named Codex research employee diagnosing three completed ChatGPT chat-mode turns.\n")
+    diagnosis_instruction = (
+        "and inspect any returned ZIPs. Determine whether the missing native evidence is an old capture/parser defect, "
+        "a real failure to use ChatGPT's native sandbox, or a missing deliverable. Prepare a concrete revised "
+        "research/repair plan for the manager. " if missing_zip else
+        "and inspect the returned ZIPs. Determine whether the missing native evidence is an old capture/parser defect "
+        "or a real failure to use ChatGPT's native sandbox. Prepare a concrete revised research/repair plan for the manager. "
+    )
+    prompt = (introduction +
               f"Project: {plan.project_id}\nPlan SHA-256: {plan.sha256}\n"
               f"Step: {step.step_id} {step.title}\nOriginal research ZIP: {research_ref.get('ref')}\n"
               f"Original research ZIP SHA-256: {research_sha}\n"
               f"Completed conversation sources: {json.dumps(sources, sort_keys=True)}\n\n"
               "Read all three conversations and their provider stream/tool records through the shared conversation reader "
-              "and inspect the returned ZIPs. Determine whether the missing native evidence is an old capture/parser defect "
-              "or a real failure to use ChatGPT's native sandbox. Prepare a concrete revised research/repair plan for the manager. "
+              + diagnosis_instruction +
               "Do not send another ChatGPT prompt, deploy an external effect, or check off the TaskFlow step. "
               f"Write exactly {report} as JSON with schema='cognilode.taskflow.native_compute_diagnostic.v1', "
               "sources (one object per completed conversation with job_id, conversation_id, finding), "
@@ -1340,7 +1376,8 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
                 or (cjob.get("phase") or payload.get("taskflow_phase")) != "chatgpt_sandbox"
                 or (cjob.get("plan_revision") or payload.get("plan_revision")) != plan.sha256
                 or (cjob.get("taskflow_step") or payload.get("taskflow_step")) != step.step_id
-                or (attempt and cjob.get("reason") != f"native_compute_repair_attempt:{attempt}")):
+                or (attempt and cjob.get("reason") not in {f"native_compute_repair_attempt:{attempt}",
+                                                           f"chatmode_deliverable_repair_attempt:{attempt}"})):
                 raise ValueError(f"D1 exact ChatGPT attempt identity mismatch: {step.step_id}/{attempt}")
             if cjob.get("state") != "complete": break
             completed_attempts.append(cjob)
@@ -1348,16 +1385,18 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
                 meta = verified_chat_completion(cjob, plan)
                 if not meta: break
             except NativeEvidenceMissing as exc:
+                repair_phase = ("chatgpt_deliverable_repair" if isinstance(exc, ChatDeliverableMissing)
+                                else "native_compute_repair")
                 if attempt + 1 < MAX_CHAT_NATIVE_ATTEMPTS:
                     try:
                         retry = ensure_native_retry_job(queue, plan, step, original, cjob, attempt + 1)
-                        action["actions"].append({"step":step.step_id,"phase":"native_compute_repair",
+                        action["actions"].append({"step":step.step_id,"phase":repair_phase,
                                                   "attempt":attempt + 1,"state":retry.get("state"),
                                                   "job_id":retry["id"]})
                         if retry.get("state") == "complete":
                             continue
                     except Exception as repair_exc:
-                        action["actions"].append({"step":step.step_id,"phase":"native_compute_repair","ok":False,
+                        action["actions"].append({"step":step.step_id,"phase":repair_phase,"ok":False,
                                                   "error":f"{type(repair_exc).__name__}:{repair_exc}"})
                 else:
                     try:
@@ -1370,11 +1409,15 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
                                  "state":"diagnostic_routed","project":plan.project_id,
                                  "plan_sha256":plan.sha256,"step":step.step_id,
                                  "attempt_job_ids":[row["id"] for row in completed_attempts],
+                                 "defect_kinds":[("missing_work_zip" if any(isinstance(e,dict) and e.get("kind")=="chatgpt_terminal_deliverable_failure"
+                                                                   for e in row.get("effect_evidence") or []) else "missing_native_proof")
+                                                 for row in completed_attempts],
                                  "diagnostic_job_id":diagnostic["id"],"shared_store":"d1_job_queue",
                                  "route":"codex.research named employee diagnostic"}
                         failure_path=state_root/plan.project_id/step.step_id/"native_compute_failure.json"
                         atomic_json(failure_path,failure)
-                        action["actions"].append({"step":step.step_id,"phase":"native_compute_exhausted",
+                        action["actions"].append({"step":step.step_id,"phase":("chatgpt_phase_exhausted" if isinstance(exc,ChatDeliverableMissing)
+                                                                                 else "native_compute_exhausted"),
                                                   "state":"diagnostic_routed","diagnostic_job_id":diagnostic["id"],
                                                   "diagnostic_state":shared.get("state"),"receipt":str(failure_path),
                                                   "error":str(exc)})

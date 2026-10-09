@@ -7,6 +7,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import zipfile
+from types import SimpleNamespace
 
 import pytest
 
@@ -392,3 +393,87 @@ def test_alternate_device_recovers_pending_turn_when_original_heartbeat_stales(m
     import threading
     module.poll('laptop', set(), threading.Lock())
     assert recovered == [('pending-1', 'laptop')]
+
+
+def test_terminal_missing_zip_waits_for_fresh_get_then_completes_failed_deliverable(monkeypatch, tmp_path):
+    module = worker()
+    module.ROOT = tmp_path / "worker"
+    output = tmp_path / "outputs"
+    output.mkdir()
+    base = 1_800_000_000.0
+    clock = [base]
+    monkeypatch.setattr(module.time, "time", lambda: clock[0])
+    job = {"id": "taskflow-missing-zip", "provider": "chatgpt.com", "phase": "chatgpt_sandbox",
+           "state": "effect_pending", "claimed_by": "rhythm:evanpc", "lease_token": "fence",
+           "lease_generation": 1,
+           "effect_started_at": datetime.fromtimestamp(base - 100, timezone.utc).isoformat()}
+    value = {"assistant_terminal": True, "terminal_assistant_text": "Finished without a ZIP",
+             "terminal_assistant_message_id": "assistant-1", "conversation_id": "conv-1",
+             "completed_at": base, "downloaded_files": [],
+             "central_conversation_store": {"central_readback_verified": True, "conversation_id": "conv-1"}}
+    receipt = output / (module.job_stem(job["id"]) + ".sse.receipt.json")
+    receipt.write_text(json.dumps({"user_message_id": "user-1", "conversation_id": "conv-1"}))
+    operations = []
+    class Sender:
+        DEFAULT_OUTPUT_ROOT = output
+        @staticmethod
+        def operator_memory_post(body):
+            operations.append(body["operation"])
+            if body["operation"] == "complete_job":
+                job.update(state="complete", conversation_id=body["conversation_id"],
+                           effect_evidence=body["effect_evidence"])
+                return {"ok": True}
+            if body["operation"] == "get_job":
+                return {"ok": True, "job": job}
+            raise AssertionError(body)
+    module.sender = Sender()
+    monkeypatch.setattr(module, "result_for_job", lambda _id: value)
+    monkeypatch.setattr(module, "reconcile_ambiguous", lambda *args: pytest.fail("ambiguous reconcile after terminal"))
+    collector_calls = []
+    def collection(*args, **kwargs):
+        assert "--receipt" in args[0]
+        collector_calls.append(1)
+        state = "retryable_collection_error" if len(collector_calls) == 2 else "collected"
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"outcomes": [{"state": state,
+            "record": str(output / (module.job_stem(job["id"]) + ".collected.json"))}]}))
+    monkeypatch.setattr(module.subprocess, "run", collection)
+    module.recover(job)
+    assert job["state"] == "effect_pending"
+    assert operations == []
+    clock[0] = base + 1900
+    module.recover(job)
+    assert job["state"] == "effect_pending", "a post-deadline transient GET is not a provider work defect"
+    assert operations == []
+    clock[0] += module.TERMINAL_DELIVERABLE_RECHECK_SECONDS + 1
+    module.recover(job)
+    assert job["state"] == "complete"
+    assert operations == ["complete_job", "get_job"]
+    failure = next(e for e in job["effect_evidence"] if e["kind"] == "chatgpt_terminal_deliverable_failure")
+    assert failure["conversation_id"] == "conv-1"
+    assert module.job_state_path(job["id"]).is_file()
+
+
+def test_transient_collector_error_cannot_be_labeled_provider_deliverable_failure(monkeypatch, tmp_path):
+    module = worker()
+    module.ROOT = tmp_path / "worker"
+    output = tmp_path / "outputs"
+    output.mkdir()
+    now = 1_800_000_000.0
+    monkeypatch.setattr(module.time, "time", lambda: now)
+    job = {"id": "taskflow-transient", "provider": "chatgpt.com", "phase": "chatgpt_sandbox",
+           "state": "effect_pending", "effect_started_at": datetime.fromtimestamp(now - 4000, timezone.utc).isoformat()}
+    value = {"assistant_terminal": True, "terminal_assistant_text": "No ZIP observed",
+             "terminal_assistant_message_id": "assistant-1", "conversation_id": "conv-1",
+             "completed_at": now - 1900, "downloaded_files": [],
+             "central_conversation_store": {"central_readback_verified": True, "conversation_id": "conv-1"}}
+    (output / (module.job_stem(job["id"]) + ".sse.receipt.json")).write_text(json.dumps({"user_message_id": "u"}))
+    module.sender = SimpleNamespace(DEFAULT_OUTPUT_ROOT=output)
+    monkeypatch.setattr(module, "result_for_job", lambda _id: value)
+    monkeypatch.setattr(module, "complete_failed_deliverable", lambda *args, **kwargs: pytest.fail("false defect"))
+    monkeypatch.setattr(module, "reconcile_ambiguous", lambda *args: pytest.fail("ambiguous reconcile after terminal"))
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0,
+        stdout=json.dumps({"outcomes": [{"state": "provider_rate_limited"}]})))
+    module.recover(job)
+    state = json.loads(module.job_state_path(job["id"]).read_text())
+    assert state["state"] == "terminal_deliverable_collection"
+    assert state["deliverable_fresh_collection_at"] == 0

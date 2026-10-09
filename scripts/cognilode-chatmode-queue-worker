@@ -62,6 +62,9 @@ DEVICE_PRIORITY = int(os.environ.get("COGNILODE_CHATMODE_DEVICE_PRIORITY", "100"
 STAGE_ROOT = ROOT / "staged-attachments"
 JOB_SCAN_PAGE_SIZE = 100
 JOB_SCAN_PAGES_PER_POLL = 4
+TERMINAL_DELIVERABLE_RECHECK_SECONDS = 300
+TERMINAL_DELIVERABLE_WINDOW_SECONDS = 1800
+TERMINAL_DELIVERABLE_ABSOLUTE_SECONDS = 10800
 
 
 def provider_tool_evidence(raw: bytes, *, expected_sha256: str = "") -> list[dict]:
@@ -697,6 +700,61 @@ def validated_result(value: dict) -> tuple[str, list[dict]] | None:
     return conversation_id, files
 
 
+def terminal_deliverable_candidate(job: dict, value: dict | None) -> bool:
+    """A final, centrally reread TaskFlow turn whose work ZIP is unusable."""
+    if not value or job.get("provider") != "chatgpt.com" or job.get("phase") != "chatgpt_sandbox":
+        return False
+    central = value.get("central_conversation_store") or {}
+    cid = str(value.get("conversation_id") or "")
+    return bool(value.get("assistant_terminal") is True and value.get("terminal_assistant_text")
+                and value.get("terminal_assistant_message_id") and cid
+                and central.get("central_readback_verified") is True
+                and central.get("conversation_id") == cid and validated_result(value) is None)
+
+
+def terminal_deliverable_deadline(job: dict, value: dict) -> float:
+    observed = float(value.get("completed_at") or 0)
+    if observed <= 0:
+        raise ValueError("terminal collector has no durable completion timestamp")
+    started = datetime.fromisoformat(str(job.get("effect_started_at") or "").replace("Z", "+00:00")).timestamp()
+    if started <= 0:
+        raise ValueError("D1 job lacks durable effect start")
+    return min(observed + TERMINAL_DELIVERABLE_WINDOW_SECONDS,
+               started + TERMINAL_DELIVERABLE_ABSOLUTE_SECONDS)
+
+
+def complete_failed_deliverable(job: dict, value: dict, *, deadline: float) -> bool:
+    """Fenced completion records a work-product defect, never TaskFlow success."""
+    if not terminal_deliverable_candidate(job, value):
+        return False
+    cid = str(value["conversation_id"])
+    text_sha = hashlib.sha256(str(value["terminal_assistant_text"]).encode()).hexdigest()
+    evidence = [{"kind": "provider_conversation", "ref": cid},
+                {"kind": "central_conversation_readback", "ref": cid},
+                {"kind": "chatgpt_terminal_deliverable_failure", "ref": text_sha,
+                 "conversation_id": cid,
+                 "terminal_assistant_message_id": str(value["terminal_assistant_message_id"]),
+                 "reason": "no_usable_single_work_zip_after_bounded_get_collection",
+                 "collection_deadline_epoch": deadline}]
+    evidence.extend(tool_evidence_from_result(value))
+    reply = sender.operator_memory_post({"operation": "complete_job", **fence(job),
+                                         "conversation_id": cid, "effect_evidence": evidence})
+    if not reply.get("ok"):
+        event("failed_deliverable_completion_retry_required", job_id=job["id"], error=reply.get("error"))
+        return False
+    committed = sender.operator_memory_post({"operation": "get_job", "job_id": job["id"]}).get("job") or {}
+    matching = [row for row in committed.get("effect_evidence") or [] if isinstance(row, dict)
+                and row.get("kind") == "chatgpt_terminal_deliverable_failure" and row.get("ref") == text_sha]
+    if committed.get("state") != "complete" or committed.get("conversation_id") != cid or len(matching) != 1:
+        event("failed_deliverable_readback_retry_required", job_id=job["id"], conversation_id=cid)
+        return False
+    atomic_json(job_state_path(job["id"]), {"state": "complete_failed_deliverable", "job_id": job["id"],
+                                             "conversation_id": cid, "terminal_text_sha256": text_sha})
+    event("job_completed_failed_deliverable", job_id=job["id"], conversation_id=cid,
+          terminal_text_sha256=text_sha)
+    return True
+
+
 def publish_taskflow_work_zip(path: Path, digest: str) -> str:
     """Make a returned ZIP readable by the external-effect employee's device.
 
@@ -829,6 +887,13 @@ def recover(job: dict, device_id: str = DEVICE_ID) -> None:
         return
     if value and validated_result(value):
         return  # Central/effect admission can retry without more provider reads.
+    state_path = job_state_path(job["id"])
+    try:
+        prior_state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
+    except (OSError, ValueError):
+        prior_state = {}
+    if terminal_deliverable_candidate(job, value) and time.time() < float(prior_state.get("deliverable_next_collect_at") or 0):
+        return
     receipt = sender.DEFAULT_OUTPUT_ROOT / (job_stem(job["id"]) + ".sse.receipt.json")
     if not receipt.exists():
         try:
@@ -844,12 +909,39 @@ def recover(job: dict, device_id: str = DEVICE_ID) -> None:
                 "attached_context_files": [], "recovered_from_central_custody": True})
             event("cross_device_receipt_reconstructed", job_id=job["id"], conversation_id=conversation_id)
     if receipt.exists():
-        subprocess.run([sys.executable, str(COLLECTOR_PATH), "--limit", "40"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180, check=False)
+        collection = subprocess.run([sys.executable, str(COLLECTOR_PATH), "--receipt", str(receipt), "--limit", "1"],
+                                    capture_output=True, text=True, timeout=180, check=False)
+        outcomes = []
+        try:
+            body = json.loads(collection.stdout) if collection.returncode == 0 else {}
+            outcomes = body.get("outcomes") or []
+            fresh_collection = bool(len(outcomes) == 1 and outcomes[0].get("state") == "collected"
+                                    and outcomes[0].get("record") == str(receipt.with_name(
+                                        receipt.name.removesuffix(".sse.receipt.json") + ".collected.json")))
+        except (ValueError, TypeError, AttributeError):
+            fresh_collection = False
         value = result_for_job(job["id"])
         if value:
             if complete_from_result(job, value) or validated_result(value):
                 return
+        if terminal_deliverable_candidate(job, value):
+            now = time.time()
+            deadline = terminal_deliverable_deadline(job, value)
+            latest_fresh = now if fresh_collection else float(prior_state.get("deliverable_fresh_collection_at") or 0)
+            # A prior successful GET cannot justify failure classification if
+            # the current post-deadline collector request hit 403/502/429.
+            if now >= deadline and fresh_collection:
+                complete_failed_deliverable(job, value, deadline=deadline)
+                return
+            next_at = now + TERMINAL_DELIVERABLE_RECHECK_SECONDS
+            atomic_json(state_path, {**prior_state, "state": "terminal_deliverable_collection",
+                                     "job_id": job["id"], "deliverable_deadline_at": deadline,
+                                     "deliverable_next_collect_at": next_at,
+                                     "deliverable_fresh_collection_at": latest_fresh,
+                                     "collector_state": outcomes[0].get("state") if collection.returncode == 0 and outcomes else "collector_error"})
+            event("terminal_deliverable_collection_wait", job_id=job["id"], conversation_id=value["conversation_id"],
+                  deadline_at=deadline, next_collect_at=next_at, fresh_collection=bool(latest_fresh))
+            return
     reconcile_ambiguous(job, device_id)
 
 

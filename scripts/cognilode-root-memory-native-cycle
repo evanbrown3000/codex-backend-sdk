@@ -465,6 +465,23 @@ def _atomic_state(path: Path, value: Mapping[str, Any]) -> None:
     os.replace(temporary, path)
 
 
+def retire_local_source_staging(job: Mapping[str, Any], *, output_root: Path) -> int:
+    """Remove transient 500-source input ZIPs after shared mirror+native readback."""
+    removed = 0
+    root = output_root.resolve()
+    for attachment in job.get("attachment_refs") or []:
+        if not isinstance(attachment, Mapping) or not str(attachment.get("ref") or "").startswith("file:"):
+            continue
+        if not attachment.get("mirrors"):
+            continue
+        path = Path(str(attachment["ref"])[5:]).resolve()
+        if (path.is_relative_to(root) and path.is_file()
+            and _sha(path.read_bytes()) == attachment.get("sha256")):
+            path.unlink()
+            removed += 1
+    return removed
+
+
 def _retry_due(state_path: Path, state: dict[str, Any], reason: str) -> bool:
     """Delay definitive bad deliverable successors to avoid Chat-mode prompt spam."""
     now = datetime.now(timezone.utc).timestamp()
@@ -514,11 +531,13 @@ def tick(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, output_root: Pa
         if not result.get("ok"):
             return result
         root_id = str(result["root_job"]["job_id"])
+        retired = retire_local_source_staging(job, output_root=output_root)
         _atomic_state(state_path, {"phase": "await_root", "native_job_id": native_id,
                                    "root_job_id": root_id,
                                    "root_attempt": 0,
                                    "source_set_sha256": state["source_set_sha256"]})
         return {"ok": True, "phase": "await_root", "root_job_id": root_id,
+                "retired_local_source_zips": retired,
                 "provider_requests_created": 0}
     if phase == "await_root":
         root_id = str(state["root_job_id"])

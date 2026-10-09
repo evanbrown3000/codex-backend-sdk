@@ -142,8 +142,13 @@ class RootMemoryCycleTests(unittest.TestCase):
             self.assertEqual(cycle.tick(d1, **kwargs)["phase"], "await_native")
             d1.jobs["native-1"] = {"state": "queued"}
             self.assertEqual(cycle.tick(d1, **kwargs)["job_state"], "queued")
-            d1.jobs["native-1"] = {"state": "complete"}
+            staged = root / "batch-000.zip"
+            staged.write_bytes(b"transient-source-packet")
+            d1.jobs["native-1"] = {"state": "complete", "attachment_refs": [{
+                "ref": "file:" + str(staged), "sha256": sha256(staged.read_bytes()).hexdigest(),
+                "mirrors": ["s3://private/exact-source.zip"]}]}
             self.assertEqual(cycle.tick(d1, **kwargs)["phase"], "await_root")
+            self.assertFalse(staged.exists())
             d1.jobs["root-1"] = {"state": "complete"}
             self.assertEqual(cycle.tick(d1, **kwargs)["phase"], "complete")
             self.assertEqual(cycle.tick(d1, **kwargs)["phase"], "complete")

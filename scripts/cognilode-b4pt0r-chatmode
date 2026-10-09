@@ -1912,6 +1912,38 @@ def send(args: argparse.Namespace) -> dict:
         device_id = device_id_from_cookies(session)
         transport = "host_chrome_state_http"
 
+    if args.conversation_id:
+        # An older central readback is not sufficient to determine an existing
+        # ChatGPT branch's current parent. Consult the provider before uploading
+        # attachments or submitting the next user message. This is GET-only.
+        existing, session, auth, device_id, read_events, read_state = _hydrate_with_recovery(
+            args, session, auth, device_id, args.conversation_id, max_attempts=3
+        )
+        if existing is None:
+            raise CapabilityError("conversation_resume_read_failed",
+                                  "existing provider conversation could not be read: " + str(read_state))
+        chain = branch_messages(existing)
+        active = next((message for message in reversed(chain)
+                       if isinstance(message.get("author"), dict)
+                       and message["author"].get("role") in ("user", "assistant")
+                       and isinstance(message.get("id"), str) and message["id"]), None)
+        if not active:
+            raise CapabilityError("conversation_resume_parent_missing",
+                                  "existing provider branch has no source-identified terminal message")
+        author = active["author"]["role"]
+        metadata = active.get("metadata") if isinstance(active.get("metadata"), dict) else {}
+        is_terminal = (author == "assistant" and (
+            active.get("end_turn") is True or metadata.get("finish_details") is not None
+            or metadata.get("is_complete") is True))
+        if not is_terminal:
+            raise CapabilityError("conversation_resume_pending_turn",
+                                  "provider branch has an unfinished or unacknowledged user turn")
+        provider_parent = active["id"]
+        if args.parent_message_id and args.parent_message_id != provider_parent:
+            raise CapabilityError("conversation_resume_stale_parent",
+                                  "target ChatGPT branch changed since DecisionX selected its instruction")
+        args.parent_message_id = provider_parent
+
     attachments, attachment_requests, session, auth, device_id = upload_attachments_durable(
         args, session, auth, device_id, args.attach, output_root / f"{result_id}.uploads.json")
     message_id, payload = build_payload(

@@ -48,6 +48,22 @@ class ConversationDeltaTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "another conversation"):
             reader.delta_view({**self.full, "conversation_id": "conversation-2"}, cursor)
 
+    def test_hosted_provider_read_preserves_provider_identity(self):
+        response = {"conversation": {"provider": "gemini.com", "conversation_id": "g-1", "events": [
+            {"id": "u-1", "role": "user", "content": "question", "source_content_complete": True},
+            {"id": "a-1", "role": "assistant", "content": "answer", "source_content_complete": True},
+        ]}}
+        sender = mock.Mock()
+        sender.operator_memory_post.return_value = response
+        with mock.patch.object(reader, "_load_script", return_value=sender):
+            full = reader.read_conversation("gemini.com", "g-1")
+            self.assertEqual(full["provider"], "gemini.com")
+            self.assertEqual(full["events"][1]["text"], "answer")
+            self.assertEqual(sender.operator_memory_post.call_args.args[0]["provider"], "gemini.com")
+            sender.operator_memory_post.return_value = {"conversation": {**response["conversation"], "provider": "chatgpt.com"}}
+            with self.assertRaisesRegex(ValueError, "identity mismatch"):
+                reader.read_conversation("gemini.com", "g-1")
+
     def test_deployed_reader_can_import_sibling_and_checkout_package(self):
         with tempfile.TemporaryDirectory() as temporary:
             checkout = Path(temporary)

@@ -381,6 +381,12 @@ class ConversationDeltaTests(unittest.TestCase):
         self.assertEqual(len(advances), 1)
         self.assertEqual(advances[0][1:3], ("chatgpt.com", "conversation-1"))
 
+    def test_inbox_detail_requires_remembered_page_cursor(self):
+        with mock.patch.object(sys, "argv", ["conversation-read", "--inbox", "--inbox-detail"]):
+            with self.assertRaises(SystemExit) as error:
+                reader.main()
+        self.assertEqual(error.exception.code, 2)
+
     def test_imported_chatgpt_export_read_keeps_unverified_origin_and_drive_fence(self):
         cid = "8452f74b-bf54-400b-9626-ba99c4578fd6"
         capture = {"source_kind": "historical_s3_rendered",

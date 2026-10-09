@@ -255,6 +255,7 @@ services:
       COGNILODE_DRIVE_WEB_UPLOAD: "0"
       COGNILODE_MEMORY_ARCHIVE_BUCKET: cognilode-conversation-visibility-362928919715-us-west-2
       DECISIONX_DERIVED_DB: /workspace/company/runtime/conversation-vacuum/decisionx-derived.sqlite3
+      COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
     volumes:
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime:ro
       - memory_data:/workspace/company
@@ -285,6 +286,7 @@ services:
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
       COGNILODE_REPOSITORIES_ROOT: /runtime/source/current
       COGNILODE_RPE_PROVIDER: chatgpt.com
+      COGNILODE_RPE_REPOSITORY_REF: company://repository/codex-backend-sdk
       COGNILODE_TASKFLOW_DISPATCH_CLI: /company/codex-backend-sdk/scripts/cognilode-taskflow-dispatch
       COGNILODE_TASKFLOW_SECRETARY_COMMAND: python3 -m modified_codex.taskflow_secretary submit
       COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer

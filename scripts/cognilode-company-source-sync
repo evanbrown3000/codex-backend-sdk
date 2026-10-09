@@ -27,8 +27,21 @@ MEMORY_MINIMUM = "b4a4878d47abe142b75ab23c74f9b6dc1ce67cba"
 def credential() -> str:
     record = subprocess.run(["/usr/bin/aws", "secretsmanager", "get-secret-value", "--region",
                              "us-west-2", "--secret-id", SECRET, "--query", "SecretString",
-                             "--output", "text"], check=True, capture_output=True,
+                             "--output", "text"], check=False, capture_output=True,
                             text=True, timeout=30)
+    if record.returncode:
+        detail = record.stderr.lower()
+        if "read-only file system" in detail and "/.aws/cli/cache/" in detail:
+            reason = "aws_role_cache_not_writable"
+        elif "expiredtoken" in detail or "expired token" in detail:
+            reason = "aws_session_expired"
+        elif "accessdenied" in detail:
+            reason = "aws_secret_access_denied"
+        elif "could not connect" in detail or "connection" in detail:
+            reason = "aws_endpoint_unreachable"
+        else:
+            reason = "aws_secret_read_unavailable"
+        raise RuntimeError(reason)
     value = json.loads(record.stdout)
     token = value.get("api_key", "") if isinstance(value, dict) else ""
     if not isinstance(token, str) or not token or len(token) > 4096:
@@ -126,9 +139,13 @@ def sync_once() -> None:
 
 
 if __name__ == "__main__":
+    retry = 300
     while True:
         try:
             sync_once()
+            retry = 300
+            time.sleep(max(300, int(os.environ.get("COGNILODE_SOURCE_SYNC_INTERVAL", "10800"))))
         except Exception as error:
             print(f"source sync pending: {type(error).__name__}: {error}", flush=True)
-        time.sleep(max(300, int(os.environ.get("COGNILODE_SOURCE_SYNC_INTERVAL", "10800"))))
+            time.sleep(retry)
+            retry = min(900, retry * 2)

@@ -1,5 +1,9 @@
+x-company-aws-cli-cache: &company_aws_cli_cache
+  - /home/worker/.aws/cli/cache:uid=1000,gid=1000,mode=0700
+
 services:
   http-gate:
+    tmpfs: *company_aws_cli_cache
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
     network_mode: bridge
@@ -30,6 +34,7 @@ services:
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
 
   credential-sync:
+    tmpfs: *company_aws_cli_cache
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
     network_mode: bridge
@@ -109,6 +114,7 @@ services:
       - credential-sync
 
   chatmode:
+    tmpfs: *company_aws_cli_cache
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
     network_mode: bridge
@@ -151,6 +157,7 @@ services:
       - source-sync
 
   source-sync:
+    tmpfs: *company_aws_cli_cache
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
     network_mode: bridge
@@ -172,6 +179,7 @@ services:
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
 
   codex-release-custody:
+    tmpfs: *company_aws_cli_cache
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
     network_mode: bridge
@@ -272,6 +280,7 @@ services:
       - credential-sync
 
   taskflow-worker:
+    tmpfs: *company_aws_cli_cache
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
     network_mode: bridge
@@ -445,6 +454,7 @@ services:
         condition: service_healthy
 
   memory:
+    tmpfs: *company_aws_cli_cache
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
     network_mode: bridge
@@ -483,6 +493,7 @@ services:
       - credential-sync
 
   rpe-worker:
+    tmpfs: *company_aws_cli_cache
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
     network_mode: bridge
@@ -533,6 +544,7 @@ services:
       - codex-builder
 
   effect-reviewer:
+    tmpfs: *company_aws_cli_cache
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
     network_mode: bridge

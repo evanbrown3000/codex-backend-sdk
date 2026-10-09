@@ -30,6 +30,34 @@ STOCK_CLI=os.environ.get('COGNILODE_STOCK_CLI',
     '/runtime/source/current/memory-stock-canonical/deploy/conversation-vacuum/conversation_stock_api.py')
 STOCK_DB=os.environ.get('COGNILODE_STOCK_DB',
     '/memory-stock/runtime/conversation-vacuum/intake.sqlite3')
+AWS_BROKER_SOCKET=os.environ.get('COGNILODE_AWS_BROKER_SOCKET','/runtime/aws-broker/broker.sock')
+
+def aws_session(payload):
+    """Forward a bounded STS request to the isolated local credential broker."""
+    purpose=str(payload.get('purpose') or '') if isinstance(payload,dict) else ''
+    if purpose not in ('artifact-read','artifact-write','secrets-read','secrets-write'):
+        raise ValueError('invalid AWS credential purpose')
+    request=json.dumps({'purpose':purpose},separators=(',',':')).encode()
+    with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as connection:
+        connection.settimeout(40)
+        connection.connect(AWS_BROKER_SOCKET)
+        connection.sendall(len(request).to_bytes(4,'big')+request)
+        prefix=b''
+        while len(prefix)<4:
+            chunk=connection.recv(4-len(prefix))
+            if not chunk: raise RuntimeError('incomplete AWS broker response')
+            prefix+=chunk
+        length=int.from_bytes(prefix,'big')
+        if length<1 or length>32_768: raise RuntimeError('invalid AWS broker response')
+        content=b''
+        while len(content)<length:
+            chunk=connection.recv(length-len(content))
+            if not chunk: raise RuntimeError('incomplete AWS broker response')
+            content+=chunk
+    response=json.loads(content)
+    if not isinstance(response,dict) or not response.get('ok'):
+        raise RuntimeError('scoped AWS broker unavailable')
+    return response
 
 def drive_rollout(payload):
     """Forward only the restricted rollout operation to local credential custody."""
@@ -214,7 +242,7 @@ def heartbeat():
                     codex_ready=True
             except OSError:
                 codex_ready=False
-            body=json.dumps({'node_id':NODE_ID,'environment_id':ENVIRONMENT_ID,'image':'company-docker','codex_exec_server':codex_ready,'network_public':True,'network_local':True}).encode()
+            body=json.dumps({'node_id':NODE_ID,'environment_id':ENVIRONMENT_ID,'image':'company-docker','codex_exec_server':codex_ready,'aws_broker':Path(AWS_BROKER_SOCKET).is_socket(),'network_public':True,'network_local':True}).encode()
             req=urllib.request.Request(CENTRAL+'/api/operator/remote-shell/heartbeat',data=body,method='POST',headers={'Authorization':'Bearer '+NODE_TOKEN,'Content-Type':'application/json','User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36','Accept':'application/json,text/plain,*/*','Origin':CENTRAL,'Referer':CENTRAL+'/'})
             with urllib.request.urlopen(req,timeout=12) as r:
                 write_hb(200<=r.status<300,http_status=r.status)
@@ -230,7 +258,7 @@ class H(BaseHTTPRequestHandler):
         if self.path=='/healthz': return self.sendj({'ok':True,'node_id':NODE_ID,'workspace':WORKSPACE,'container':True})
         self.sendj({'error':'not found'},404)
     def do_POST(self):
-        if self.path not in ('/mcp','/provider','/rollouts','/conversations'): return self.sendj({'error':'not found'},404)
+        if self.path not in ('/mcp','/provider','/rollouts','/conversations','/aws-session'): return self.sendj({'error':'not found'},404)
         if not hmac.compare_digest(self.headers.get('Authorization',''),'Bearer '+BEARER): return self.sendj({'error':'unauthorized'},401)
         payload={}
         try:
@@ -240,6 +268,7 @@ class H(BaseHTTPRequestHandler):
             if self.path=='/provider': return self.sendj(provider_operation(json.loads(self.rfile.read(n))))
             if self.path=='/rollouts': return self.sendj(drive_rollout(json.loads(self.rfile.read(n))))
             if self.path=='/conversations': return self.sendj(stock_conversation(json.loads(self.rfile.read(n))))
+            if self.path=='/aws-session': return self.sendj(aws_session(json.loads(self.rfile.read(n))))
             payload=json.loads(self.rfile.read(n)); method=payload.get('method'); rid=payload.get('id')
             if method=='initialize': result={'protocolVersion':'2025-06-18','capabilities':{'tools':{}},'serverInfo':{'name':'cognilode-company-remote-shell','version':'3.0.0'}}
             elif method=='tools/list': result={'tools':[{'name':x,'description':x,'inputSchema':{'type':'object'}} for x in ('shell_execute','shell_start','shell_poll','shell_write','shell_terminate')]}

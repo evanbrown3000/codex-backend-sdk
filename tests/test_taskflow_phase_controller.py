@@ -96,6 +96,7 @@ class Tests(unittest.TestCase):
         plan=c.parse_plan(PLAN); step=plan.by_id()['AM-5']
         proof=c.verify_effect_probe(step)
         self.assertEqual(proof['observed'],'active')
+        self.assertEqual(proof['timeout_seconds'],'300')
         self.assertEqual(len(proof['sha256']),64)
         from dataclasses import replace
         bad=replace(step,fields={'effect_probe_command':'/usr/bin/printf missing','effect_probe_expected':'active'})

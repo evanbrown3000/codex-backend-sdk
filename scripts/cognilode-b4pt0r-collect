@@ -56,6 +56,11 @@ def artifact_matches(item: dict) -> bool:
     return digest.hexdigest() == expected
 
 
+def has_collected_zip(result: dict) -> bool:
+    return any(isinstance(item, dict) and str(item.get("name") or item.get("path") or "").lower().endswith(".zip")
+               and artifact_matches(item) for item in result.get("downloaded_files") or [])
+
+
 def atomic_json(path: Path, value: dict) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
@@ -120,10 +125,12 @@ def collect(receipt_path: Path, *, allow_provider_read: bool = True) -> dict:
         return {"state": "ignored", "receipt": str(receipt_path)}
     stem = receipt_path.name.removesuffix(".sse.receipt.json")
     collected_path = receipt_path.with_name(stem + ".collected.json")
+    prior_terminal_at = None
     if collected_path.is_file():
         existing = json.loads(collected_path.read_text())
         if existing.get("complete") is True:
             prior_result = existing.get("result") if isinstance(existing.get("result"), dict) else {}
+            prior_terminal_at = prior_result.get("completed_at")
             prior_central = prior_result.get("central_conversation_store") if isinstance(prior_result.get("central_conversation_store"), dict) else {}
             source = prior_central.get("central_raw_sse_source") if isinstance(prior_central.get("central_raw_sse_source"), dict) else {}
             if (prior_central.get("central_tool_event_count") is None or source.get("readback_verified") is not True) and prior_result.get("raw_sha256") and existing.get("prompt") and prior_result.get("terminal_assistant_text"):
@@ -134,9 +141,11 @@ def collect(receipt_path: Path, *, allow_provider_read: bool = True) -> dict:
                         result=upgraded_result, attachments=list(receipt.get("attached_context_files") or []))
                     upgraded_result["central_conversation_store"] = central
                     atomic_json(collected_path, {**existing, "result": upgraded_result})
-                    return {"state": "central_tool_history_upgraded", "receipt": str(receipt_path),
-                            "tool_events": central.get("central_tool_event_count", 0), "central_ok": central.get("ok") is True}
-            return {"state": "already_collected", "receipt": str(receipt_path)}
+                    if not allow_provider_read or has_collected_zip(upgraded_result):
+                        return {"state": "central_tool_history_upgraded", "receipt": str(receipt_path),
+                                "tool_events": central.get("central_tool_event_count", 0), "central_ok": central.get("ok") is True}
+            if not allow_provider_read or has_collected_zip(prior_result):
+                return {"state": "already_collected", "receipt": str(receipt_path)}
     record_path = receipt_path.with_name(stem + ".json")
     if record_path.is_file():
         try:
@@ -150,7 +159,7 @@ def collect(receipt_path: Path, *, allow_provider_read: bool = True) -> dict:
         files = list(local_result.get("downloaded_files") or [])
         files_complete = not links or (len(files) >= len(links) and all(
             artifact_matches(item) for item in files))
-        if local_prompt and local_text and local_result.get("assistant_terminal") and files_complete:
+        if local_prompt and local_text and local_result.get("assistant_terminal") and files_complete and (has_collected_zip(local_result) or not allow_provider_read):
             central = local_result.get("central_conversation_store") or {}
             if not central.get("ok"):
                 central = sender.admit_central_conversation(
@@ -200,7 +209,7 @@ def collect(receipt_path: Path, *, allow_provider_read: bool = True) -> dict:
         "provider_model_observed": provider_metadata.get("model_slug"),
         "provider_thinking_effort_observed": provider_metadata.get("thinking_effort"),
         "downloaded_files": downloads,
-        "completed_at": now,
+        "completed_at": prior_terminal_at or now,
         "raw_sha256": hashlib.sha256(raw).hexdigest(),
         "raw_bytes": len(raw),
         "raw_path_host": str(raw_path),
@@ -232,6 +241,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dir", action="append", default=[])
     parser.add_argument("--limit", type=int, default=40)
+    parser.add_argument("--receipt", type=Path, default=None,
+                        help="recover one exact send receipt without scanning unrelated turns")
     args = parser.parse_args()
     roots = [Path(p).expanduser() for p in args.dir] or [sender.DEFAULT_OUTPUT_ROOT]
     global_state_path = roots[0] / "collector_global_state.json"
@@ -240,12 +251,13 @@ def main() -> int:
     except (OSError, ValueError):
         global_state = {}
     global_cooldown_until = float(global_state.get("cooldown_until_epoch") or 0)
-    paths = sorted((p for root in roots if root.is_dir()
-                    for p in root.glob("*.sse.receipt.json")), key=lambda p: p.stat().st_mtime, reverse=True)
+    recent_paths = sorted((p for root in roots if root.is_dir()
+                           for p in root.glob("*.sse.receipt.json")), key=lambda p: p.stat().st_mtime, reverse=True)
+    paths = [args.receipt] if args.receipt and args.receipt.is_file() else ([] if args.receipt else recent_paths)
     # Do not spend account-wide provider reads while a new Chat-mode send is
     # still being prepared or streamed. Local terminal records remain eligible.
     active_mutation = False
-    for path in paths[:10]:
+    for path in recent_paths[:10]:
         try:
             recent = json.loads(path.read_text())
         except (OSError, ValueError):

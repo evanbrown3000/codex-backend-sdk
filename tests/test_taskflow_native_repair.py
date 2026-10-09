@@ -58,6 +58,15 @@ class NativeRepairTests(unittest.TestCase):
                              "ref": "result-1", "call_ref": "call-1", "raw_stream_sha256": "a" * 64})
         job.update(state="complete", conversation_id=cid, effect_evidence=evidence)
 
+    def complete_without_zip(self, job):
+        cid = "conversation-" + job["id"]
+        job.update(state="complete", conversation_id=cid, effect_evidence=[
+            {"kind": "provider_conversation", "ref": cid},
+            {"kind": "central_conversation_readback", "ref": cid},
+            {"kind": "chatgpt_terminal_deliverable_failure", "ref": "b" * 64,
+             "conversation_id": cid, "terminal_assistant_message_id": "terminal-1",
+             "reason": "no_usable_single_work_zip_after_bounded_get_collection"}])
+
     def tick(self):
         with mock.patch.object(c, "run_secretary", return_value={"completed": False}):
             return c.run_once(queue=self.q, plan=self.plan, role="Elliot Mercer", secretary=self.repo / "secretary",
@@ -98,6 +107,30 @@ class NativeRepairTests(unittest.TestCase):
         self.original["state"] = "claimed"
         self.tick()
         self.assertIsNone(self.q.get(c.phase_job_id(self.plan, "S", "chatgpt_sandbox", 1)))
+        self.assertIsNone(self.q.get(c.phase_job_id(self.plan, "S", "external_effect")))
+
+    def test_definitive_missing_zip_gets_bounded_rhythm_retry_and_diagnostic(self):
+        self.complete_without_zip(self.original)
+        first = self.tick()
+        retry1 = self.q.get(c.phase_job_id(self.plan, "S", "chatgpt_sandbox", 1))
+        self.assertEqual(retry1["state"], "queued")
+        self.assertEqual(retry1["attachment_refs"], self.original["attachment_refs"])
+        self.assertEqual(retry1["reason"], "chatmode_deliverable_repair_attempt:1")
+        self.assertIn("did not provide a usable work ZIP", retry1["prompt"])
+        self.assertTrue(any(a.get("phase") == "chatgpt_deliverable_repair" for a in first["actions"]))
+        self.assertIsNone(self.q.get(c.phase_job_id(self.plan, "S", "external_effect")))
+        self.complete_without_zip(retry1)
+        self.tick()
+        retry2 = self.q.get(c.phase_job_id(self.plan, "S", "chatgpt_sandbox", 2))
+        self.complete_without_zip(retry2)
+        result = self.tick()
+        self.assertIsNone(self.q.get(c.phase_job_id(self.plan, "S", "chatgpt_sandbox", 3)))
+        diagnostic = self.q.get(c.native_diagnostic_job_id(self.plan, self.step))
+        self.assertEqual(diagnostic["provider"], "codex.research")
+        self.assertIn("missing work ZIPs", diagnostic["prompt"])
+        failure = json.loads((self.state / self.plan.project_id / "S" / "native_compute_failure.json").read_text())
+        self.assertEqual(failure["defect_kinds"], ["missing_work_zip"] * 3)
+        self.assertTrue(any(a.get("phase") == "chatgpt_phase_exhausted" for a in result["actions"]))
         self.assertIsNone(self.q.get(c.phase_job_id(self.plan, "S", "external_effect")))
 
     def test_existing_inflight_external_effect_suppresses_old_evidence_retry(self):

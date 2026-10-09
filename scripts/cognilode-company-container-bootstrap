@@ -84,7 +84,9 @@ def retired_units() -> list[str]:
 def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
     """Apply new synchronized Compose configuration from the sole host starter."""
     applied_digest = hashlib.sha256(COMPOSE.read_bytes()).hexdigest()
+    applied_compose = COMPOSE
     synced = runtime / "shared/source/current/codex-backend-sdk"
+    memory_applied = runtime / "shared/memory-source-applied"
     while True:
         candidate = synced / "deploy/compose/company-chatmode.yml"
         if candidate.is_file():
@@ -108,7 +110,26 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
                         print(f"company Compose reconciliation pending: {exc}", flush=True)
                     else:
                         applied_digest = digest
+                        applied_compose = candidate
                         print(f"company Compose configuration applied: {selected}", flush=True)
+        memory_source = runtime / "shared/source/current/memory-stock-canonical"
+        if (memory_source / ".git").exists():
+            revision = subprocess.run(["git", "-c", "safe.directory=*", "-C", str(memory_source),
+                                       "rev-parse", "HEAD"], capture_output=True, text=True,
+                                      check=False).stdout.strip()
+            previous = memory_applied.read_text(encoding="utf-8").strip() if memory_applied.is_file() else ""
+            if revision and revision != previous:
+                try:
+                    subprocess.run(["docker", "compose", "--project-name", project,
+                                    "-f", str(applied_compose), "restart", "memory"],
+                                   env=env, check=True, timeout=180)
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                    print(f"memory source restart pending: {exc}", flush=True)
+                else:
+                    temporary = memory_applied.with_suffix(".tmp")
+                    temporary.write_text(revision + "\n", encoding="utf-8")
+                    temporary.replace(memory_applied)
+                    print(f"memory source applied: {revision}", flush=True)
         time.sleep(30)
 
 

@@ -68,6 +68,19 @@ TERMINAL_DELIVERABLE_WINDOW_SECONDS = 1800
 TERMINAL_DELIVERABLE_ABSOLUTE_SECONDS = 10800
 
 
+def sender_prefix() -> list[str]:
+    """Use authentication held on this device for every provider operation."""
+    source = os.environ.get("COGNILODE_CHATMODE_AUTH_SOURCE", "codex").strip().lower()
+    if source not in {"codex", "chrome"}:
+        raise ValueError("COGNILODE_CHATMODE_AUTH_SOURCE must be codex or chrome")
+    command = [sys.executable, str(SENDER_PATH), "--auth-source", source]
+    if source == "chrome":
+        profile = os.environ.get("COGNILODE_CHATMODE_CHROME_PROFILE", "").strip()
+        if profile:
+            command.extend(["--chrome-profile", profile])
+    return command
+
+
 def provider_tool_evidence(raw: bytes, *, expected_sha256: str = "") -> list[dict]:
     """Identify completed provider tool calls from the actual ChatGPT stream.
 
@@ -1451,7 +1464,7 @@ def reconcile_ambiguous(job: dict, device_id: str = DEVICE_ID) -> None:
     prompt_path = ROOT / "prompts" / (hashlib.sha256(job_id.encode()).hexdigest() + ".txt")
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     prompt_path.write_text(prompt, encoding="utf-8")
-    command = [sys.executable, str(SENDER_PATH), "reconcile", "--queue-job-id", job_id,
+    command = sender_prefix() + ["reconcile", "--queue-job-id", job_id,
                "--prompt-file", str(prompt_path), "--scan-offset",
                str(int(prior.get("reconcile_scan_offset") or 0))]
     ROOT.mkdir(parents=True, exist_ok=True)
@@ -1532,7 +1545,7 @@ def stable_user_message_id(job_id: str) -> str:
 
 
 def sender_command(job: dict, prompt_path: Path, attachments: list[Path]) -> list[str]:
-    command = [sys.executable, str(SENDER_PATH), "send", "--prompt-file", str(prompt_path),
+    command = sender_prefix() + ["send", "--prompt-file", str(prompt_path),
                "--queue-job-id", str(job["id"]),
                "--model", str(job.get("requested_model") or job.get("model") or "gpt-5-6-thinking"),
                "--effort", str(job.get("reasoning_effort") or "xhigh"),
@@ -1669,7 +1682,7 @@ def execute(job: dict, device_id: str = DEVICE_ID) -> None:
 
 def health_ready() -> bool:
     try:
-        response = subprocess.run([sys.executable, str(SENDER_PATH), "health"],
+        response = subprocess.run(sender_prefix() + ["health"],
                                   capture_output=True, text=True, timeout=30, check=False)
         return response.returncode == 0 and json.loads(response.stdout).get("ok") is True
     except Exception:

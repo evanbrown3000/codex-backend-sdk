@@ -26,6 +26,27 @@ def worker():
     return module
 
 
+def test_second_device_browser_auth_is_used_for_health_send_and_reconcile(monkeypatch, tmp_path):
+    module = worker()
+    profile = tmp_path / "Chrome Profile"
+    profile.mkdir()
+    monkeypatch.setenv("COGNILODE_CHATMODE_AUTH_SOURCE", "chrome")
+    monkeypatch.setenv("COGNILODE_CHATMODE_CHROME_PROFILE", str(profile))
+    prefix = module.sender_prefix()
+    assert prefix[2:] == ["--auth-source", "chrome", "--chrome-profile", str(profile)]
+    command = module.sender_command({"id": "job-1"}, tmp_path / "prompt", [])
+    assert command[:len(prefix) + 1] == prefix + ["send"]
+    calls = []
+    def run(command, **_kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout='{"ok":true}')
+    monkeypatch.setattr(module.subprocess, "run", run)
+    assert module.health_ready() is True
+    assert calls[-1] == prefix + ["health"]
+    monkeypatch.setenv("COGNILODE_CHATMODE_AUTH_SOURCE", "codex")
+    assert module.sender_prefix()[2:] == ["--auth-source", "codex"]
+
+
 def test_bounded_job_scan_reaches_later_pages_after_state_changes(tmp_path):
     module = worker()
     module.ROOT = tmp_path

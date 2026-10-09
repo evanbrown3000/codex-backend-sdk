@@ -13,6 +13,7 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -89,14 +90,18 @@ def exact_terminal(conversation: dict, user_message_id: str) -> tuple[dict, dict
 
 
 def get_conversation(conversation_id: str, preferred: str):
-    candidates = ("chrome", "codex") if preferred == "host_chrome_state_http" else ("codex", "chrome")
+    local_source = os.environ.get("COGNILODE_CHATMODE_AUTH_SOURCE", "").strip().lower()
+    candidates = (("chrome", "codex") if local_source == "chrome" or preferred == "host_chrome_state_http"
+                  else ("codex", "chrome"))
     failures = []
     for source in candidates:
         try:
             if source == "codex":
                 session, auth, device_id = sender.codex_identity()
             else:
-                session = sender.new_session(sender.DEFAULT_PROFILE, sender.DEFAULT_IMPERSONATE)
+                local_profile = os.environ.get("COGNILODE_CHATMODE_CHROME_PROFILE", "").strip()
+                profile = Path(local_profile).expanduser() if local_profile else sender.DEFAULT_PROFILE
+                session = sender.new_session(profile, sender.DEFAULT_IMPERSONATE)
                 auth = sender.identity(session)
                 device_id = sender.device_id_from_cookies(session)
             response = session.get(sender.BASE + "conversation/" + conversation_id,

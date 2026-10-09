@@ -5,8 +5,8 @@ revision or enqueue DX-2 from this proposal. After DX-1 has a terminal external
 effect and verified checkoff, amend only the DX-2 step with these fields:
 
 ```plan
-    required_nested_source_packet: /home/evan/.local/share/cognilode/taskflow-launchpad/decisionx/DX2_historical_S3_500_20261009.zip
-    required_nested_source_sha256: <SHA-256 of the completed source ZIP>
+    required_nested_source_packet: /home/evan/.local/share/cognilode/taskflow-launchpad/decisionx/DX2_historical_S3_500_relevant_20261009.zip
+    required_nested_source_sha256: 5d2ae3f433867effd71cc5aa926b80e034c906b63ecbb4e4824d0e65ab9e4f15
     required_nested_source_minimum: 500
 ```
 
@@ -26,6 +26,6 @@ in the ChatGPT Chat-mode agent's native sandbox. The S3 object origin still
 requires provenance analysis; the packet proves transport/readback and exact
 membership, not the authority of a directory name.
 
-Before merging/deploying this controller branch, replace the placeholder SHA
-above with the completed ZIP digest and run the focused TaskFlow tests. Keep
+Before merging/deploying this controller branch, verify the recorded ZIP digest
+and run the focused TaskFlow tests. Keep
 the historical rhythm queue and existing D1 lease/completion path unchanged.

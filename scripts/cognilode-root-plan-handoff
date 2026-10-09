@@ -20,6 +20,7 @@ import shlex
 import subprocess
 import sys
 from typing import Any, Callable, Mapping
+import zipfile
 
 HERE = Path(__file__).resolve().parent
 SENDER = HERE / "cognilode-b4pt0r-chatmode"
@@ -81,6 +82,7 @@ def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, 
     cursor = "0"
     seen: set[tuple[str, str]] = set()
     verified: list[datetime] = []
+    source_refs: list[dict[str, str]] = []
     pages = 0
     while True:
         page = post({"operation": "conversations", "limit": 60, "cursor": cursor})
@@ -100,9 +102,14 @@ def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, 
             capture = index.get("capture") or {}
             if capture.get("drive_verified") is not True or capture.get("source_response_complete") is not True:
                 continue
-            stamp = _complete_source(index, post({"operation": "read", "provider": key[0], "conversation_id": key[1]}))
+            source_read = post({"operation": "read", "provider": key[0], "conversation_id": key[1]})
+            stamp = _complete_source(index, source_read)
             if stamp is not None:
                 verified.append(stamp)
+                source = source_read["conversation"]
+                source_refs.append({"provider": key[0], "conversation_id": key[1],
+                                    "prompt_sha256": str(source["prompt_sha256"]),
+                                    "response_sha256": str(source["response_sha256"])})
         next_cursor = str(page.get("next_cursor") or "")
         if not next_cursor:
             break
@@ -110,12 +117,58 @@ def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, 
             raise ValueError("shared conversation index cursor stalled")
         cursor = next_cursor
     span_days = (max(verified) - min(verified)).days if verified else 0
+    source_refs.sort(key=lambda row: (row["provider"], row["conversation_id"]))
     return {"schema": "cognilode.root_shared_stock_census.v1", "distinct_complete": len(verified),
             "earliest_source_utc": min(verified).isoformat() if verified else None,
             "latest_source_utc": max(verified).isoformat() if verified else None,
             "span_days": span_days, "minimum": minimum,
             "multi_year_ready": len(verified) >= minimum and span_days >= 730,
-            "index_identities_seen": len(seen), "pages": pages}
+            "index_identities_seen": len(seen), "pages": pages,
+            "verified_source_refs": source_refs}
+
+
+def verify_root_memory_packet(job: Mapping[str, Any], central: Mapping[str, Any],
+                              stock: Mapping[str, Any], *, minimum: int = 500) -> str:
+    """Ensure the root actually received multi-layer memory from the shared stock."""
+    expected_refs = {(str(row["provider"]), str(row["conversation_id"]),
+                      str(row["prompt_sha256"]), str(row["response_sha256"]))
+                     for row in stock.get("verified_source_refs") or []}
+    uploads = central.get("provider_structured_uploads") or []
+    for attachment in job.get("attachment_refs") or []:
+        if not isinstance(attachment, Mapping) or not str(attachment.get("ref") or "").startswith("file:/"):
+            continue
+        path = Path(str(attachment["ref"])[5:])
+        digest = str(attachment.get("sha256") or "")
+        if (not HEX64.fullmatch(digest) or not path.is_file()
+            or sha256(path.read_bytes()).hexdigest() != digest
+            or not any(isinstance(row, Mapping) and row.get("sha256") == digest for row in uploads)):
+            continue
+        try:
+            with zipfile.ZipFile(path) as archive:
+                if archive.testzip() is not None or "MANIFEST.json" not in archive.namelist():
+                    continue
+                manifest = json.loads(archive.read("MANIFEST.json"))
+                if manifest.get("schema") != "cognilode.root_memory_packet.v1":
+                    continue
+                rows = manifest.get("source_refs") or []
+                cited = {(str(row["provider"]), str(row["conversation_id"]),
+                          str(row["prompt_sha256"]), str(row["response_sha256"]))
+                         for row in rows if isinstance(row, Mapping)}
+                if len(cited) < minimum or not cited <= expected_refs:
+                    continue
+                sections = manifest.get("sections") or {}
+                if not isinstance(sections, Mapping) or not all(k in sections for k in ("global", "project", "role")):
+                    continue
+                if any(not isinstance(sections[k], Mapping) or not str(sections[k].get("path") or "")
+                       or sections[k]["path"] not in archive.namelist()
+                       or sha256(archive.read(sections[k]["path"])).hexdigest() != sections[k].get("sha256")
+                       or len(archive.read(sections[k]["path"]).strip()) < 100
+                       for k in ("global", "project", "role")):
+                    continue
+                return digest
+        except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile):
+            continue
+    raise ValueError("no provider-uploaded, shared-source-verified root memory packet")
 
 
 def extract_plan(job: Mapping[str, Any], central: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
@@ -206,13 +259,16 @@ def handoff(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, job_id: str,
             install: Callable[[Path, Mapping[str, Any]], Mapping[str, Any]] | None = None) -> dict[str, Any]:
     stock = shared_stock_census(post, minimum=minimum)
     if not stock["multi_year_ready"]:
-        return {"ok": False, "reason": "shared_multi_year_stock_incomplete", "stock": stock,
+        public_stock = {key: value for key, value in stock.items() if key != "verified_source_refs"}
+        return {"ok": False, "reason": "shared_multi_year_stock_incomplete", "stock": public_stock,
                 "provider_requests_created": 0, "plan_written": False}
     result = post({"operation": "get_job", "job_id": job_id})
     job = result.get("job") or {}
     read = post({"operation": "read", "provider": "chatgpt.com",
                  "conversation_id": job.get("conversation_id")})
-    plan, source_sha = extract_plan(job, read.get("conversation") or {})
+    central = read.get("conversation") or {}
+    plan, source_sha = extract_plan(job, central)
+    memory_packet_sha = verify_root_memory_packet(job, central, stock, minimum=minimum)
     rendered = render_taskflow(plan, conversation_id=job["conversation_id"], assistant_sha256=source_sha)
     target = output_root / (str(plan["project_id"]) + ".plan")
     output_root.mkdir(parents=True, exist_ok=True)
@@ -243,8 +299,10 @@ def handoff(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, job_id: str,
     installation = install(target, plan) if install is not None else None
     if installation is not None and installation.get("ok") is not True:
         raise ValueError("TaskFlow/Secretary service installation did not verify")
+    public_stock = {key: value for key, value in stock.items() if key != "verified_source_refs"}
     return {"ok": True, "plan_path": str(target), "plan_sha256": _sha(rendered),
-            "root_assistant_sha256": source_sha, "stock": stock,
+            "root_assistant_sha256": source_sha, "root_memory_packet_sha256": memory_packet_sha,
+            "stock": public_stock,
             "provider_requests_created": 0, "plan_written": True,
             "secretary_taskflow_installation": installation}
 

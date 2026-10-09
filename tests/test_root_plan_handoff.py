@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/cognilode-root-plan-handoff"
@@ -150,6 +151,21 @@ class RootPlanHandoffTests(unittest.TestCase):
             (Path(directory) / "README.md").write_text("Project\n")
             subprocess.run(["git", "-C", directory, "add", "README.md"], check=True)
             subprocess.run(["git", "-C", directory, "commit", "-qm", "initial"], check=True)
+            refs = bridge.shared_stock_census(d1, minimum=2)["verified_source_refs"]
+            packet = Path(directory) / "root-memory.zip"
+            bodies = {"global": b"Global history spanning many years. " * 8,
+                      "project": b"Project-specific memory with source links. " * 8,
+                      "role": b"Role-specific prior outcomes and lessons. " * 8}
+            manifest = {"schema": "cognilode.root_memory_packet.v1", "source_refs": refs,
+                        "sections": {key: {"path": key + ".md", "sha256": sha256(body).hexdigest()}
+                                     for key, body in bodies.items()}}
+            with zipfile.ZipFile(packet, "w") as archive:
+                archive.writestr("MANIFEST.json", json.dumps(manifest))
+                for key, body in bodies.items():
+                    archive.writestr(key + ".md", body)
+            packet_sha = sha256(packet.read_bytes()).hexdigest()
+            job["attachment_refs"] = [{"ref": "file:" + str(packet), "sha256": packet_sha}]
+            central["provider_structured_uploads"] = [{"sha256": packet_sha}]
             def install(path, value):
                 installed.append((path, value))
                 return {"ok": True, "single_queue": "cloudflare-d1"}
@@ -164,6 +180,11 @@ class RootPlanHandoffTests(unittest.TestCase):
                                     check=True, capture_output=True, text=True)
             self.assertEqual(source.stdout, installed[0][0].read_text())
             self.assertEqual(result["provider_requests_created"], 0)
+            self.assertEqual(result["root_memory_packet_sha256"], packet_sha)
+            central["provider_structured_uploads"] = []
+            with self.assertRaises(ValueError):
+                bridge.handoff(d1, job_id="root-job", output_root=Path(directory),
+                               minimum=2, install=install)
 
 
 if __name__ == "__main__":

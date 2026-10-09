@@ -14,6 +14,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -543,18 +544,32 @@ def _atomic_state(path: Path, value: Mapping[str, Any]) -> None:
 
 def retire_local_source_staging(job: Mapping[str, Any], *, output_root: Path) -> int:
     """Remove transient 500-source input ZIPs after shared mirror+native readback."""
-    removed = 0
     root = output_root.resolve()
+    staged = []
     for attachment in job.get("attachment_refs") or []:
         if not isinstance(attachment, Mapping) or not str(attachment.get("ref") or "").startswith("file:"):
-            continue
+            return 0
         if not attachment.get("mirrors"):
-            continue
+            return 0
         path = Path(str(attachment["ref"])[5:]).resolve()
-        if (path.is_relative_to(root) and path.is_file()
-            and _sha(path.read_bytes()) == attachment.get("sha256")):
+        if (not path.is_relative_to(root)
+            or not path.name.startswith("batch-") or path.suffix != ".zip"):
+            return 0
+        if path.is_file() and _sha(path.read_bytes()) != attachment.get("sha256"):
+            return 0
+        staged.append(path)
+    if not staged or len({path.parent for path in staged}) != 1:
+        return 0
+    removed = 0
+    for path in staged:
+        if path.is_file():
             path.unlink()
             removed += 1
+    if staged[0].parent != root:
+        cache = staged[0].parent / ".verified-sources"
+        if cache.is_dir():
+            shutil.rmtree(cache)
+    (root / "verified-selection.json").unlink(missing_ok=True)
     return removed
 
 

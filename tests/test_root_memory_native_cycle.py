@@ -91,6 +91,28 @@ def refs(count=500):
 
 
 class RootMemoryCycleTests(unittest.TestCase):
+    def test_successful_native_handoff_retires_only_transient_source_staging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batch_root = root / "source-set"
+            batch_root.mkdir()
+            cache = batch_root / ".verified-sources"
+            cache.mkdir()
+            (cache / "source.json").write_text("derived source packet")
+            (root / "verified-selection.json").write_text("derived selection")
+            source = root / "original-source.jsonl"
+            source.write_text("original source remains")
+            packet = batch_root / "batch-000.zip"
+            packet.write_bytes(b"physical source packet")
+            job = {"attachment_refs": [{"ref": "file:" + str(packet),
+                                        "sha256": sha256(packet.read_bytes()).hexdigest(),
+                                        "mirrors": ["s3://private/content-addressed"]}]}
+            self.assertEqual(cycle.retire_local_source_staging(job, output_root=root), 1)
+            self.assertFalse(packet.exists())
+            self.assertFalse(cache.exists())
+            self.assertFalse((root / "verified-selection.json").exists())
+            self.assertEqual(source.read_text(), "original source remains")
+
     def test_private_source_mirror_requires_full_remote_sha_readback(self):
         with tempfile.TemporaryDirectory() as directory:
             packet = Path(directory) / "source.zip"

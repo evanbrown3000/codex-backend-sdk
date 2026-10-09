@@ -262,6 +262,22 @@ class AdviceHandoffTests(unittest.TestCase):
                                        check=True, capture_output=True)
             self.assertEqual(committed.stdout, plan)
 
+    def test_unattended_tick_distinguishes_provider_wait_from_terminal_failure(self):
+        state = {"value": "queued"}
+        def post(body):
+            self.assertEqual(body["operation"], "get_job")
+            return {"ok": True, "job": {"id": "dx-1", "state": state["value"]}}
+        with tempfile.TemporaryDirectory() as directory:
+            pending = handoff.tick(post, job_id="dx-1", output_root=Path(directory),
+                                   state_root=Path(directory) / "state")
+            self.assertEqual(pending["phase"], "waiting_provider")
+            self.assertTrue(pending["ok"])
+            state["value"] = "failed"
+            failed = handoff.tick(post, job_id="dx-1", output_root=Path(directory),
+                                  state_root=Path(directory) / "state")
+            self.assertEqual(failed["phase"], "predecessor_failed")
+            self.assertFalse(failed["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()

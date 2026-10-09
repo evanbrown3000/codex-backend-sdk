@@ -15,7 +15,7 @@ import select
 import subprocess
 import sys
 import time
-from urllib.request import Request, urlopen
+from cognilode_central_http import request_json
 
 
 BASE = os.environ.get('COGNILODE_OPERATOR_URL', 'https://cognilode.com').rstrip('/')
@@ -29,14 +29,8 @@ UUID = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,40}$')
 
 def stock(body: dict) -> dict:
     token = TOKEN_FILE.read_text().strip().removeprefix('Bearer ').strip()
-    request = Request(BASE + '/api/operator/conversation-stock',
-        data=json.dumps(body, separators=(',', ':')).encode(), method='POST',
-        headers={'authorization': 'Bearer ' + token, 'content-type': 'application/json',
-            'accept': 'application/json,text/plain,*/*',
-            'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36',
-            'origin': BASE, 'referer': BASE + '/'})
-    with urlopen(request, timeout=60) as response:
-        value = json.load(response)
+    value = request_json(BASE, '/api/operator/conversation-stock', token,
+        body=body, timeout=60)
     if not value.get('ok'):
         raise RuntimeError('central conversation stock unavailable')
     return value

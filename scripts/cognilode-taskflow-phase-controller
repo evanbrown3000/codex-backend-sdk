@@ -471,7 +471,7 @@ def verify_effect_probe(step: Step) -> dict[str, str]:
     """Independently read the effect with a command authored in the .plan file."""
     command = str(step.fields.get("effect_probe_command") or "").strip()
     expected = str(step.fields.get("effect_probe_expected") or "").strip()
-    timeout_seconds = int(step.fields.get("effect_probe_timeout_seconds") or 120)
+    timeout_seconds = int(step.fields.get("effect_probe_timeout_seconds") or 300)
     argv = shlex.split(command)
     if not argv or not Path(argv[0]).is_absolute() or not expected:
         raise ValueError("TaskFlow step needs an absolute read-only effect_probe_command and effect_probe_expected")

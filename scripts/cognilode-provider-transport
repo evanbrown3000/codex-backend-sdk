@@ -16,6 +16,7 @@ SENDER = Path(__file__).with_name("cognilode-b4pt0r-chatmode")
 COLLECTOR = Path(__file__).with_name("cognilode-b4pt0r-collect")
 COUNTER_LOCK = threading.Lock()
 ACTIVE_SENDS = 0
+DRAINING = False
 
 
 def transport(args: list[str], send_fence: dict | None = None) -> dict:
@@ -31,6 +32,10 @@ def transport(args: list[str], send_fence: dict | None = None) -> dict:
         return {"exit_code": 64, "stderr": "queued provider send requires effect fence"}
     if verb == "send":
         with COUNTER_LOCK:
+            if DRAINING:
+                return {"exit_code": 75, "stdout": json.dumps({"ok": False,
+                        "state": "provider_transport_draining",
+                        "provider_acceptance_observed": False})}
             ACTIVE_SENDS += 1
     try:
         try:
@@ -52,11 +57,16 @@ def transport(args: list[str], send_fence: dict | None = None) -> dict:
 
 class Handler(socketserver.StreamRequestHandler):
     def handle(self):
+        global DRAINING
         try:
             request = json.loads(self.rfile.readline(1048576))
             if request.get("operation") == "active":
                 with COUNTER_LOCK:
-                    response = {"active": ACTIVE_SENDS}
+                    response = {"active": ACTIVE_SENDS, "draining": DRAINING}
+            elif request.get("operation") == "drain":
+                with COUNTER_LOCK:
+                    DRAINING = True
+                    response = {"active": ACTIVE_SENDS, "draining": True}
             elif request.get("operation") == "transport":
                 response = transport(request.get("args"), request.get("send_fence"))
             else:

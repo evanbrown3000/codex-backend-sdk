@@ -82,12 +82,15 @@ services:
     mem_limit: 2g
     pids_limit: 192
     working_dir: /company/codex-backend-sdk
-    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-provider-transport]
-    command: [--socket, /runtime/provider.sock]
+    entrypoint: [sh, -c]
+    command:
+      - |
+        while ! test -f /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-source-generation; do sleep 2; done
+        exec python3 /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-source-generation --script cognilode-provider-transport --drain-socket /runtime/provider.sock -- --socket /runtime/provider.sock
     environment:
       HOME: /home/worker
       CODEX_HOME: /home/worker/.codex
-      PYTHONPATH: /company/codex-backend-sdk/gate
+      PYTHONPATH: /runtime/source/current/codex-backend-sdk/gate
       COGNILODE_HTTP_GATE_SOCKET: /runtime/http-gate/gate.sock
       COGNILODE_HTTP_GATE_FALLBACK_LOG: /runtime/http-gate/fallback.jsonl
       COGNILODE_HTTP_GATE_POLICY_FILE: /runtime/http-gate/policy.json

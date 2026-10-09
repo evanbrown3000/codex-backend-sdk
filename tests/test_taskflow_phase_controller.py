@@ -119,7 +119,7 @@ id parallel
             self.assertEqual(current.completed_effect_revisions['A'],original.sha256)
             c.verify_completed_effects(q,current)
             self.assertEqual(current.inflight_revisions['B'],original.sha256)
-            self.assertEqual(c.final_dependency_ids(current,current.by_id()['C']),[])
+            self.assertEqual(c.final_dependency_ids(current,current.by_id()['C']),[a['id']])
             self.assertTrue(c.completed_prerequisites(q,current,current.by_id()['C']))
             original_evidence=a['effect_evidence']
             a['effect_evidence']=[row for row in original_evidence if row['kind']!='independent_effect_probe']
@@ -160,7 +160,7 @@ id parallel
             archived_middle=c.parse_plan(c.plan_revision_path(path,current.sha256))
             c.verify_completed_effects(q,archived_middle)
             self.assertNotIn('B',revised.inflight_revisions)
-            self.assertEqual(c.final_dependency_ids(revised,revised.by_id()['D']),[])
+            self.assertEqual(c.final_dependency_ids(revised,revised.by_id()['D']),[b['id']])
             forged_c=c.phase_job_id(original,'C','external_effect')
             forged_text=revised.text.replace('id parallel\n','id parallel\ncompleted_effect C '+original.sha256+' '+forged_c+'\n')
             path.write_text(forged_text.replace('[ ] C follows A','[x] C follows A'))

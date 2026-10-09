@@ -280,7 +280,8 @@ def final_dependency_ids(plan: Plan, step: Step) -> list[str]:
     inherited = [dep for dep in step.dependencies if by_id[dep].checked and dep not in plan.completed_effects]
     if inherited:
         raise ValueError(f"checked dependency lacks a D1-verified external effect: {', '.join(inherited)}")
-    return [phase_job_id(plan, dep, "external_effect") for dep in step.dependencies if not by_id[dep].checked]
+    return [plan.completed_effects[dep] if by_id[dep].checked else phase_job_id(plan, dep, "external_effect")
+            for dep in step.dependencies]
 
 
 def safe_zip_members(path: Path) -> list[zipfile.ZipInfo]:

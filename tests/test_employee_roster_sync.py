@@ -65,12 +65,16 @@ def test_activation_requires_named_completed_job_and_central_readback(tmp_path, 
         return readback
 
     readback["conversation"]["response_sha256"] = "0" * 64
-    result = module.reconcile([snapshots], installed_path=installed, candidates_path=candidates, post=post)
+    activations = tmp_path / "activations.json"
+    result = module.reconcile([snapshots], installed_path=installed, candidates_path=candidates,
+                              activations_path=activations, post=post)
     assert result["activated"] == []
     readback["conversation"]["response_sha256"] = hashlib.sha256(terminal.encode()).hexdigest()
-    result = module.reconcile([snapshots], installed_path=installed, candidates_path=candidates, post=post)
+    result = module.reconcile([snapshots], installed_path=installed, candidates_path=candidates,
+                              activations_path=activations, post=post)
     assert result["activated"] == ["Maya Chen"]
     assert json.loads(installed.read_text())["employees"]["Maya Chen"]["role"] == "Staff Systems Integration Engineer"
+    assert json.loads(activations.read_text())["employees"]["Maya Chen"]["conversation_id"] == cid
 
 
 def test_candidate_role_is_not_installed_role(tmp_path, monkeypatch):

@@ -1,21 +1,26 @@
 {
-  "schema": "cognilode.employee_slack_roles.v1",
-  "captured_at": "2026-10-08",
+  "captured_at": "2026-10-09",
   "employees": {
     "Elliot Mercer": {
-      "role": "Principal Platform Systems Engineer",
       "org": "Platform Engineering; Research Engineering; Infrastructure & Reliability",
+      "role": "Principal Platform Systems Engineer",
       "slack_message": "https://everything-ces8532.slack.com/archives/C0C6QT9RF5Z/p1791233502037239"
     },
+    "Maya Chen": {
+      "org": "Platform Engineering",
+      "role": "Staff Systems Integration Engineer",
+      "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791233715823319"
+    },
     "Nadia Brooks": {
-      "role": "Staff Knowledge Systems Engineer",
       "org": "Research Engineering (liaison: Data Platform)",
+      "role": "Staff Knowledge Systems Engineer",
       "slack_message": "https://everything-ces8532.slack.com/archives/C0C6QT9RF5Z/p1791233488008789"
     },
     "Rina Hale": {
-      "role": "Principal Systems Integration Engineer",
       "org": "Platform Engineering & Infrastructure/Reliability",
+      "role": "Principal Systems Integration Engineer",
       "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RSC49NZ/p1791233048652669"
     }
-  }
+  },
+  "schema": "cognilode.employee_slack_roles.v1"
 }

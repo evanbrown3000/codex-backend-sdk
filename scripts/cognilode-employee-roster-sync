@@ -23,6 +23,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLED = ROOT / "config/employee-slack-roles.json"
 CANDIDATES = ROOT / "config/employee-slack-candidates.json"
+ACTIVATIONS = ROOT / "config/employee-route-activations.json"
 SENDER = ROOT / "scripts/cognilode-b4pt0r-chatmode"
 DEFAULT_SNAPSHOTS = (Path.home() / ".local/share/cognilode/"
                      "spine-rpe-decisionx-batches-20261007T223721Z/decisionx-spine/slack")
@@ -105,33 +106,33 @@ def _sender():
     return module
 
 
-def verified_employee_job(job: dict[str, Any], candidate: dict[str, Any], post) -> bool:
+def verified_employee_job(job: dict[str, Any], post) -> dict[str, str] | None:
     name = str(job.get("assigned_employee") or "")
     if (job.get("state") != "complete" or job.get("claimed_by") != name
         or job.get("provider") not in {"codex.research", "codex.external-effect"}
         or job.get("prompt_author") != "taskflow_plan"
         or not isinstance(job.get("taskflow_plan_receipt"), dict)
         or name not in str(job.get("prompt") or "")):
-        return False
+        return None
     evidence = [e for e in job.get("effect_evidence") or [] if isinstance(e, dict)]
     effect_kind = "research_zip" if job["provider"] == "codex.research" else "external_effect"
     if not any(e.get("kind") == effect_kind and e.get("ref") for e in evidence):
-        return False
+        return None
     identities = [e for e in evidence if e.get("kind") == "codex_session_identity"
                   and e.get("job_id") == job.get("id")
                   and e.get("conversation_id_source") == "codex_cli_stderr_header"]
     if len(identities) != 1:
-        return False
+        return None
     cid = str(identities[0].get("conversation_id") or "")
     if not re.fullmatch(r"[0-9a-f-]{36}", cid):
-        return False
+        return None
     if job.get("conversation_id") not in (None, cid):
-        return False
+        return None
     # A completed D1 job alone does not prove that other agents can read the turn.
     read = post({"operation": "read", "provider": "openai-codex", "conversation_id": cid})
     conversation = read.get("conversation") or {}
     if not read.get("ok") or conversation.get("conversation_id") != cid:
-        return False
+        return None
     # The Codex normalized reader does not set source_content_complete. Its
     # response_sha256 is the hash of the selected assistant text; verify that
     # exact text is present in the central read before installing the name.
@@ -141,12 +142,17 @@ def verified_employee_job(job: dict[str, Any], candidate: dict[str, Any], post) 
                and isinstance(e.get("content"), str) and e["content"].strip()
                and hashlib.sha256(e["content"].encode()).hexdigest() == response_sha
                for e in events):
-        return False
+        return None
     # The installed route must be backed by the user's actual Codex executable.
     executable = Path.home() / ".local/bin/codex"
     if not executable.is_file() or not os.access(executable, os.X_OK):
-        return False
-    return True
+        return None
+    effect = next(e for e in evidence if e.get("kind") == effect_kind and e.get("ref"))
+    return {"provider": str(job["provider"]), "job_id": str(job["id"]),
+            "employee": name, "conversation_id": cid,
+            "response_sha256": response_sha, "effect_kind": effect_kind,
+            "effect_ref": str(effect["ref"]),
+            "completed_at": str(job.get("completed_at") or "")}
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -165,6 +171,7 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
 
 def reconcile(snapshot_dirs: list[Path], *, activate: bool = True,
               installed_path: Path = INSTALLED, candidates_path: Path = CANDIDATES,
+              activations_path: Path = ACTIVATIONS,
               post=None) -> dict[str, Any]:
     facts = discover(snapshot_dirs)
     installed = json.loads(installed_path.read_text(encoding="utf-8"))
@@ -174,7 +181,12 @@ def reconcile(snapshot_dirs: list[Path], *, activate: bool = True,
     # Candidate file may be read by TaskFlow for a one-turn onboarding job;
     # root planning reads only installed employees.
     _atomic_json(candidates_path, facts)
+    proofs = json.loads(activations_path.read_text(encoding="utf-8")) if activations_path.is_file() else {"schema": "cognilode.employee_route_activations.v1", "employees": {}}
+    route_proofs = proofs.get("employees") or {}
+    if not isinstance(route_proofs, dict):
+        raise ValueError("employee activation proofs invalid")
     added: list[str] = []
+    proven: list[str] = []
     if activate:
         if post is None:
             post = _sender().operator_memory_post
@@ -191,12 +203,17 @@ def reconcile(snapshot_dirs: list[Path], *, activate: bool = True,
                 for job in result.get("jobs") or []:
                     name = str(job.get("assigned_employee") or "")
                     candidate = facts["candidates"].get(name)
-                    if not candidate or name in employees:
+                    if not candidate or name in route_proofs:
                         continue
-                    if verified_employee_job(job, candidate, post):
-                        employees[name] = {k: candidate[k] for k in
-                                           ("role", "org", "slack_message")}
-                        added.append(name)
+                    proof = verified_employee_job(job, post)
+                    if proof:
+                        proof["slack_message"] = candidate["slack_message"]
+                        route_proofs[name] = proof
+                        proven.append(name)
+                        if name not in employees:
+                            employees[name] = {k: candidate[k] for k in
+                                               ("role", "org", "slack_message")}
+                            added.append(name)
                 cursor = result.get("next_cursor")
                 if not cursor:
                     break
@@ -206,8 +223,12 @@ def reconcile(snapshot_dirs: list[Path], *, activate: bool = True,
         installed["employees"] = dict(sorted(employees.items()))
         installed["captured_at"] = datetime.now(timezone.utc).date().isoformat()
         _atomic_json(installed_path, installed)
+    if proven:
+        proofs["employees"] = dict(sorted(route_proofs.items()))
+        _atomic_json(activations_path, proofs)
     return {"candidates": len(facts["candidates"]), "installed": len(employees),
-            "activated": sorted(added), "channels": len(facts["channels"])}
+            "activated": sorted(added), "route_proven": sorted(proven),
+            "channels": len(facts["channels"])}
 
 
 def main() -> int:

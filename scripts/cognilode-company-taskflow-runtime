@@ -23,6 +23,7 @@ def run_once() -> None:
     env["PYTHONPATH"] = os.pathsep.join((str(runtime), str(taskflow), env.get("PYTHONPATH", "")))
     env["COGNILODE_TASKFLOW_DISPATCH_BIN"] = "/company/codex-backend-sdk/scripts/cognilode-taskflow-dispatch"
     env["COGNILODE_REPOSITORIES_ROOT"] = str(SOURCE)
+    env["COGNILODE_AWS_CLI"] = "/usr/bin/aws"
     subprocess.run([sys.executable, "-m", "modified_codex.taskflow_secretary", "reconcile"],
                    env=env, check=False, timeout=240)
     for plan in sorted(PLAN_ROOT.glob("**/project.dispatch.plan")):

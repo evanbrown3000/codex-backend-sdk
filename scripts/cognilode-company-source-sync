@@ -24,7 +24,7 @@ SECRET = "/cognilode/agent-credentials/github/owner"
 
 
 def credential() -> str:
-    record = subprocess.run(["aws", "secretsmanager", "get-secret-value", "--region",
+    record = subprocess.run(["/usr/bin/aws", "secretsmanager", "get-secret-value", "--region",
                              "us-west-2", "--secret-id", SECRET, "--query", "SecretString",
                              "--output", "text"], check=True, capture_output=True,
                             text=True, timeout=30)

@@ -81,12 +81,31 @@ def retired_units() -> list[str]:
                   and name != SELF and "evan-recorder" not in name and "@." not in name)
 
 
+def compose_service_hashes(project: str, compose: Path, env: dict[str, str]) -> dict[str, str]:
+    """Hash resolved service definitions so unrelated edits do not restart workers."""
+    rendered = subprocess.run(
+        ["docker", "compose", "--project-name", project, "-f", str(compose),
+         "config", "--format", "json"], env=env, capture_output=True, text=True,
+        check=True, timeout=60)
+    services = json.loads(rendered.stdout)["services"]
+    return {name: hashlib.sha256(json.dumps(value, sort_keys=True,
+            separators=(",", ":")).encode()).hexdigest()
+            for name, value in services.items()}
+
+
+def save_service_hashes(path: Path, hashes: dict[str, str]) -> None:
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(hashes, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
 def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
     """Apply new synchronized Compose configuration from the sole host starter."""
     applied_digest = hashlib.sha256(COMPOSE.read_bytes()).hexdigest()
     applied_compose = COMPOSE
     synced = runtime / "shared/source/current/codex-backend-sdk"
     memory_applied = runtime / "shared/memory-source-applied"
+    service_hash_path = runtime / "shared/compose-service-digests.json"
     while True:
         candidate = synced / "deploy/compose/company-chatmode.yml"
         if candidate.is_file():
@@ -109,10 +128,23 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
                 digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
                 if digest != applied_digest:
                     try:
-                        subprocess.run(["docker", "compose", "--project-name", project,
-                                        "-f", str(candidate), "up", "-d"],
-                                       env=env, check=True, timeout=300)
-                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                        current_hashes = compose_service_hashes(project, candidate, env)
+                        try:
+                            previous_hashes = json.loads(service_hash_path.read_text(encoding="utf-8"))
+                        except (OSError, ValueError):
+                            previous_hashes = {}
+                        changed = sorted(name for name, value in current_hashes.items()
+                                         if previous_hashes.get(name) != value)
+                        if changed:
+                            # Each selected service is reconciled against its own
+                            # resolved config. Do not cascade through dependencies:
+                            # their unchanged long-running work must keep its lease.
+                            subprocess.run(["docker", "compose", "--project-name", project,
+                                            "-f", str(candidate), "up", "-d", "--no-deps",
+                                            *changed], env=env, check=True, timeout=300)
+                        save_service_hashes(service_hash_path, current_hashes)
+                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                            KeyError, ValueError) as exc:
                         print(f"company Compose reconciliation pending: {exc}", flush=True)
                     else:
                         applied_digest = digest
@@ -198,6 +230,8 @@ def main() -> int:
                    stdout=subprocess.DEVNULL, check=True, timeout=60)
     command = ["docker", "compose", "--project-name", project, "-f", str(COMPOSE), "up", "-d"]
     subprocess.run(command, env=env, check=True, timeout=180)
+    save_service_hashes(runtime / "shared/compose-service-digests.json",
+                        compose_service_hashes(project, COMPOSE, env))
     memory_source = runtime / "shared/source/current/memory-stock-canonical"
     memory_minimum = "b4a4878d47abe142b75ab23c74f9b6dc1ce67cba"
     memory_shallow_accepted = "cdbe5de43b57e23e10f915185e533b02a4aba636"

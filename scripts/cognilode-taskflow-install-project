@@ -62,6 +62,7 @@ def prepare(args: argparse.Namespace) -> dict[str, str]:
         "COGNILODE_AWS_CLI": str(args.aws_cli),
         "COGNILODE_CODEX_BIN": str(args.codex_bin),
         "COGNILODE_TASKFLOW_INTERVAL_SECONDS": str(args.interval),
+        "COGNILODE_TASKFLOW_CODEX_CAPACITY_GATE": "1" if getattr(args, "codex_capacity_gate", False) else "0",
     }
     if any("\n" in value or "\r" in value for value in values.values()):
         raise ValueError("service value contains a newline")
@@ -102,6 +103,8 @@ def main() -> int:
     parser.add_argument("--aws-cli", type=Path, default=Path(shutil.which("aws") or "/usr/bin/aws"))
     parser.add_argument("--codex-bin", type=Path, default=Path(shutil.which("codex") or "/home/evan/.local/bin/codex"))
     parser.add_argument("--interval", type=int, default=60)
+    parser.add_argument("--codex-capacity-gate", action="store_true",
+                        help="defer new Codex phases by fresh quota and global D1 occupancy")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if not 10 <= args.interval <= 3600:

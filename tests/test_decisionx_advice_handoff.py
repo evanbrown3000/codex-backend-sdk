@@ -36,15 +36,22 @@ class AdviceHandoffTests(unittest.TestCase):
                               "source_response_complete": True, "source_sha256": "c" * 64,
                               "drive_source_sha256": "c" * 64, "drive_object_sha256": "d" * 64,
                               "drive_verified_at": at, "drive_conversation_id": "old-1"},
-                  "events": [{"role": "user", "content": "Historic human intent", "created_at": at},
-                             {"role": "assistant", "content": "Historic agent action", "created_at": at}]}
+                  "events": [{"id": "u1", "role": "user", "content": "Historic human intent", "created_at": at},
+                             {"id": "a1", "role": "assistant", "content": "Historic agent action", "created_at": at},
+                             {"id": "u2", "role": "user", "content": "Historic human evaluation", "created_at": at}]}
         ref = {"provider": "openai-codex", "conversation_id": "old-1",
                "prompt_sha256": "a" * 64, "response_sha256": "b" * 64,
                "source_sha256": "c" * 64, "source_at_utc": at}
         candidate = {"segment_id": "decisionx.iae.abc", **{k: ref[k] for k in
                      ("provider", "conversation_id", "prompt_sha256", "response_sha256", "source_sha256")}}
+        candidate["descriptor"] = {"i": "Historic human intent", "a": "Historic agent action",
+            "source_locator": {"provider": "openai-codex", "conversation_id": "old-1",
+                               "intent_turn_id": "u1", "action_turn_ids": ["a1"],
+                               "evaluation_turn_id": "u2", "following_action_turn_ids": [],
+                               "following_evaluation_turn_id": None}}
         segment = {"segment_id": "decisionx.iae.abc", "kind": "IAE",
                    "source_key": "openai-codex:old-1",
+                   "content": json.dumps(candidate["descriptor"]),
                    "metadata": {"drive_verified_source": True,
                                 "full_source_prompt_sha256": "a" * 64,
                                 "full_source_response_sha256": "b" * 64}}
@@ -70,6 +77,7 @@ class AdviceHandoffTests(unittest.TestCase):
             first_sha = write_zip(first, {
                 "MANIFEST.json": handoff.canonical(
                     {"schema": "cognilode.decisionx.successor_input.v1",
+                     "evidence_contract_version": 2,
                      "target_job_id": "target-1", "target_provider": "chatgpt.com",
                      "target_conversation_id": "current-1",
                      "target_prompt_sha256": "e" * 64,
@@ -91,7 +99,8 @@ class AdviceHandoffTests(unittest.TestCase):
             job = {"attachment_refs": [{"ref": str(first), "sha256": first_sha},
                                        {"ref": str(full), "sha256": full_sha}]}
             central = {"provider_structured_uploads": [{"sha256": first_sha}, {"sha256": full_sha}]}
-            hashes, sources, candidates, source_sha, historical_sha = handoff.verify_inputs(post, job, central)
+            hashes, sources, candidates, source_sha, historical_sha, episode_sha = handoff.verify_inputs(post, job, central)
+            self.assertEqual(len(episode_sha), 64)
             self.assertEqual(hashes, [first_sha, full_sha])
             self.assertEqual(sources[0]["conversation_id"], "old-1")
             self.assertEqual(candidates[0]["segment_id"], "decisionx.iae.abc")
@@ -100,6 +109,7 @@ class AdviceHandoffTests(unittest.TestCase):
             work = Path(directory) / "work"
             computed = native.run(first, [full], work)
             self.assertEqual(computed["input_zip_sha256s"], [first_sha, full_sha])
+            self.assertEqual(computed["source_episodes_sha256"], episode_sha)
             instruction = ("Read the changed target state and implement the highest-value next "
                            "action, then independently verify its external effect and record uncertainty.")
             advice = {"schema": "cognilode.decisionx.successor_advice.v1",
@@ -129,8 +139,15 @@ class AdviceHandoffTests(unittest.TestCase):
             validated = handoff.verify_output(post, {"decisionx": {"target_job_id": "target-1"}},
                                               evidence, hashes, sources, candidates, source_sha,
                                               historical_sha,
+                                              source_episodes_sha=episode_sha,
                                               stage_remote=lambda _url, _sha: output)
             self.assertEqual(validated[2], sealed["sha256"])
+            with self.assertRaisesRegex(handoff.InvalidProviderDeliverable,
+                                        "source episodes differ"):
+                handoff.verify_output(post, {"decisionx": {"target_job_id": "target-1"}},
+                                      evidence, hashes, sources, candidates, source_sha,
+                                      historical_sha, source_episodes_sha="0" * 64,
+                                      stage_remote=lambda _url, _sha: output)
             central["provider_structured_uploads"].pop()
             with self.assertRaisesRegex(ValueError, "physical provider upload"):
                 handoff.verify_inputs(post, job, central)

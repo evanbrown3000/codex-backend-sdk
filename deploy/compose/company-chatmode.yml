@@ -293,12 +293,18 @@ services:
     restart: unless-stopped
     network_mode: bridge
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
-    entrypoint: [python3, /codex/bin/central-rollouts, daemon]
+    entrypoint: [sh, -c]
+    command:
+      - >-
+        python3 /company/codex-backend-sdk/scripts/cognilode-central-rollout-acceptance --daemon &
+        exec python3 /codex/bin/central-rollouts daemon
     environment:
       HOME: /home/worker
       CODEX_HOME: /home/worker/.codex
       COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
     volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
       - company_codex_release:/codex:ro
       - company_auth:/home/worker/.codex
       - company_operator:/home/worker/.config/cognilode:ro

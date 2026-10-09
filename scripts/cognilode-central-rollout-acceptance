@@ -20,7 +20,7 @@ from urllib.request import Request, urlopen
 
 BASE = os.environ.get('COGNILODE_OPERATOR_URL', 'https://cognilode.com').rstrip('/')
 CODEX = Path(os.environ.get('COGNILODE_CODEX_BIN', '/codex/bin/codex'))
-HOME = Path(os.environ.get('CODEX_HOME', '/home/worker/.codex'))
+AUTH_HOME = Path(os.environ.get('CODEX_HOME', '/home/worker/.codex'))
 TOKEN_FILE = Path(os.environ.get('COGNILODE_OPERATOR_TOKEN_FILE',
     '/home/worker/.config/cognilode/operator-bearer'))
 MARKER_ROOT = Path(os.environ.get('COGNILODE_ACCEPTANCE_ROOT', '/runtime/acceptance'))
@@ -99,9 +99,19 @@ def run() -> dict:
     if marker.is_file():
         return json.loads(marker.read_text())
     conversation_id, stock_thread_id = candidate(pin)
+    # Keep imported ChatGPT rollouts outside the Codex-origin publisher's
+    # session tree. This prevents a read-only acceptance from republishing an
+    # external conversation as though it were a new Codex-authored thread.
+    home = MARKER_ROOT / 'codex-home' / pin
+    home.mkdir(parents=True, exist_ok=True)
+    for name in ('auth.json', 'config.toml'):
+        source = AUTH_HOME / name
+        target = home / name
+        if source.is_file() and not target.exists():
+            target.symlink_to(source)
     environment = {**os.environ,
         'COGNILODE_CENTRAL_ROLLOUT_HELPER': str(CODEX.parent / 'central-rollouts'),
-        'CODEX_HOME': str(HOME)}
+        'CODEX_HOME': str(home)}
     process = subprocess.Popen([str(CODEX), 'app-server', '--stdio'],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         text=True, bufsize=1, env=environment)
@@ -127,7 +137,7 @@ def run() -> dict:
     turns = read.get('thread', {}).get('turns') or []
     if not turns:
         raise RuntimeError('native read did not render imported conversation turns')
-    files = list((HOME / 'sessions').rglob('*-' + conversation_id + '.jsonl'))
+    files = list((home / 'sessions').rglob('*-' + conversation_id + '.jsonl'))
     if len(files) != 1:
         raise RuntimeError('central reduced rollout was not materialized exactly once')
     digest = hashlib.sha256(files[0].read_bytes()).hexdigest()
@@ -143,9 +153,23 @@ def run() -> dict:
 
 
 if __name__ == '__main__':
-    try:
-        print(json.dumps(run(), separators=(',', ':')))
-    except Exception as error:
-        print(json.dumps({'ok': False, 'error': type(error).__name__,
-            'detail': str(error)[:220]}, separators=(',', ':')))
-        sys.exit(1)
+    daemon = '--daemon' in sys.argv[1:]
+    delay = 60
+    while True:
+        try:
+            print(json.dumps(run(), separators=(',', ':')), flush=True)
+            break
+        except Exception as error:
+            detail = str(error)[:220]
+            print(json.dumps({'ok': False, 'state': 'pending' if daemon else 'failed',
+                'error': type(error).__name__, 'detail': detail},
+                separators=(',', ':')), flush=True)
+            if not daemon:
+                sys.exit(1)
+            # A pinned native semantic mismatch needs a new build, not repeated
+            # provider/Drive operations against unchanged bytes.
+            if 'did not render imported conversation turns' in detail or \
+                'thread identity mismatch' in detail:
+                sys.exit(1)
+            time.sleep(delay)
+            delay = min(900, delay * 2)

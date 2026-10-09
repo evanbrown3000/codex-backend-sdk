@@ -419,6 +419,42 @@ class ConversationDeltaTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Drive join is incomplete"):
                 reader.read_conversation("chatgpt-export-format", cid)
 
+    def test_authenticated_privacy_export_read_is_text_only_and_requires_drive_cas(self):
+        cid = "6ac433a8-63b0-83ea-984a-56198e709e4e"
+        capture = {"source_kind": "chatgpt_privacy_export_zip_http_range",
+                   "source_provenance": "authenticated_openai_export_email",
+                   "source_complete": False, "source_text_projection_complete": True,
+                   "source_response_complete": True,
+                   "source_conversation_sha256": "a" * 64,
+                   "branch_graph_sha256": "b" * 64,
+                   "source_text_messages": 2, "normalized_events": 2,
+                   "source_event_count": 2, "source_nontext_messages": 3,
+                   "drive_verified": True, "drive_conversation_id": cid,
+                   "drive_source_sha256": "a" * 64,
+                   "drive_object_sha256": "c" * 64,
+                   "drive_readback_rows_sha256": "d" * 64,
+                   "drive_verified_at": "2026-10-09T14:52:00Z"}
+        conversation = {"provider": "chatgpt-export-format", "conversation_id": cid,
+                        "capture": capture, "events": [
+                            {"id": "u1", "role": "user", "content": "question"},
+                            {"id": "a1", "role": "assistant", "content": "answer"}]}
+        sender = mock.Mock()
+        sender.operator_memory_post.return_value = {"conversation": conversation}
+        with mock.patch.object(reader, "_load_script", return_value=sender):
+            full = reader.read_conversation("chatgpt-export-format", cid)
+            self.assertEqual(full["source"], "authenticated_privacy_export_text_d1_drive_verified")
+            self.assertIn("media_omitted", full["coverage"])
+            self.assertFalse(full["all_provider_events_known"])
+            self.assertEqual([event["text"] for event in full["events"]], ["question", "answer"])
+            for mutation in ({"drive_verified": False},
+                             {"drive_source_sha256": "e" * 64},
+                             {"source_text_projection_complete": False},
+                             {"source_complete": True},
+                             {"source_text_messages": 1}):
+                conversation["capture"] = {**capture, **mutation}
+                with self.assertRaisesRegex(ValueError, "Drive join is incomplete"):
+                    reader.read_conversation("chatgpt-export-format", cid)
+
     def test_codex_d1_interim_is_explicitly_drive_unverified(self):
         conversation = {"provider": "openai-codex", "conversation_id": "c-1",
                         "capture": {"source_kind": "codex_rollout", "source_sha256": "a" * 64,

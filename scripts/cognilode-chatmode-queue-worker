@@ -540,6 +540,9 @@ def complete_from_result(job: dict, value: dict) -> bool:
 
 def recover(job: dict) -> None:
     value = result_for_job(job["id"])
+    if value and definitive_rejection(value):
+        requeue_definitive_rejection(job, value)
+        return
     if value and complete_from_result(job, value):
         return
     receipt = sender.DEFAULT_OUTPUT_ROOT / (job_stem(job["id"]) + ".sse.receipt.json")
@@ -595,14 +598,71 @@ def record_send_receipt(job: dict, value: dict, device_id: str) -> None:
         "terminal_assistant_message_id": value.get("terminal_assistant_message_id"),
         "provider_acceptance_observed": bool(value.get("provider_acceptance_observed") or value.get("conversation_id"))})
 
+
+def definitive_rejection(value: dict | None) -> bool:
+    if not isinstance(value, dict) or value.get("provider_acceptance_observed") or value.get("conversation_id"):
+        return False
+    if (value.get("recovery") or {}).get("ambiguous_replay_suppressed"):
+        return False
+    status = value.get("http_status")
+    state = value.get("state")
+    return ((status in (401, 403) and state == "authentication_failed")
+            or (status == 429 and state == "rate_limited")
+            or (status == 404 and state == "provider_rejected"))
+
+
+def requeue_definitive_rejection(job: dict, value: dict) -> bool:
+    if not definitive_rejection(value):
+        return False
+    delays = [float(event.get("delay_seconds") or 0) for event in
+              (value.get("recovery") or {}).get("events") or []
+              if isinstance(event, dict) and event.get("classification") == "rate_limit"]
+    reply = sender.operator_memory_post({"operation": "requeue_definitive_chatmode_rejection", **fence(job),
+        "user_message_id": stable_user_message_id(str(job["id"])),
+        "http_status": value["http_status"], "provider_state": value["state"],
+        "retry_after_ms": int(max(delays, default=0) * 1000)})
+    if not reply.get("ok"):
+        event("definitive_rejection_requeue_failed", job_id=job["id"], error=reply.get("error"))
+        return False
+    atomic_json(job_state_path(job["id"]), {"state": "queued_after_definitive_rejection",
+                                             "job_id": job["id"], "http_status": value["http_status"]})
+    event("definitive_rejection_requeued", job_id=job["id"], http_status=value["http_status"])
+    return True
+
+
+def prior_rejected_result(job_id: str) -> dict | None:
+    value = result_for_job(job_id)
+    if value is None:
+        receipt = sender.DEFAULT_OUTPUT_ROOT / (job_stem(job_id) + ".sse.receipt.json")
+        if receipt.is_file():
+            try:
+                value = json.loads(receipt.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                value = None
+    return value if definitive_rejection(value) else None
+
+
+def archive_prior_rejected_attempt(job: dict, value: dict) -> None:
+    job_id = str(job["id"])
+    stem = job_stem(job_id)
+    target = ROOT / "rejected-attempts" / job_id / str(job.get("lease_generation") or 0)
+    target.mkdir(parents=True, exist_ok=True)
+    atomic_json(target / "result.json", value)
+    for source in sender.DEFAULT_OUTPUT_ROOT.glob(stem + "*"):
+        if source.is_file():
+            source.replace(target / source.name)
+
 def execute(job: dict, device_id: str = DEVICE_ID) -> None:
     job_id = str(job["id"])
     try:
-        if result_for_job(job_id):
+        rejected = prior_rejected_result(job_id)
+        if rejected:
+            archive_prior_rejected_attempt(job, rejected)
+        if not rejected and result_for_job(job_id):
             recover(job)
             return
         receipt = sender.DEFAULT_OUTPUT_ROOT / (job_stem(job_id) + ".sse.receipt.json")
-        if receipt.exists():
+        if receipt.exists() and not rejected:
             recover(job)
             return
         prompt = str(job.get("prompt") or "")
@@ -633,6 +693,8 @@ def execute(job: dict, device_id: str = DEVICE_ID) -> None:
                 record_send_receipt(job, value, device_id)
             except Exception as exc:
                 event("send_receipt_record_failed", job_id=job_id, error=type(exc).__name__+":"+str(exc)[:180])
+        if value and requeue_definitive_rejection(job, value):
+            return
         if value and complete_from_result(job, value):
             return
         atomic_json(job_state_path(job_id), {"state": "reconcile_required", "job_id": job_id,

@@ -80,6 +80,45 @@ def test_sender_receives_queue_selected_model_and_effort(tmp_path):
     assert command[command.index('--attach') + 1] == str(attachment)
 
 
+def test_only_explicit_preaccept_rejections_can_reenter_rhythm(monkeypatch, tmp_path):
+    module = worker()
+    module.ROOT = tmp_path
+    job = {'id': 'retry-job', 'claimed_by': 'rhythm:evanpc', 'lease_token': 'fenced', 'lease_generation': 3}
+    calls = []
+    monkeypatch.setattr(module.sender, 'operator_memory_post', lambda body: calls.append(body) or {'ok': True})
+    rejected = {'http_status': 403, 'state': 'authentication_failed', 'provider_acceptance_observed': False,
+                'conversation_id': None, 'recovery': {'ambiguous_replay_suppressed': False, 'events': []}}
+    assert module.requeue_definitive_rejection(job, rejected)
+    assert calls[0]['operation'] == 'requeue_definitive_chatmode_rejection'
+    assert calls[0]['user_message_id'] == module.stable_user_message_id(job['id'])
+    assert json.loads(module.job_state_path(job['id']).read_text())['state'] == 'queued_after_definitive_rejection'
+    for status, state in [(502, 'ambiguous_acceptance'), (200, 'provider_accepted_unfinished')]:
+        assert not module.requeue_definitive_rejection(job, {**rejected, 'http_status': status, 'state': state})
+    assert not module.requeue_definitive_rejection(job, {**rejected, 'conversation_id': 'provider-conversation'})
+    assert len(calls) == 1
+
+
+def test_later_slot_preserves_rejected_receipt_and_unblocks_sender(monkeypatch, tmp_path):
+    module = worker()
+    module.ROOT = tmp_path / 'worker'
+    output = tmp_path / 'sender'
+    output.mkdir()
+    monkeypatch.setattr(module.sender, 'DEFAULT_OUTPUT_ROOT', output)
+    job = {'id': 'retry-job', 'lease_generation': 4}
+    stem = module.job_stem(job['id'])
+    rejected = {'http_status': 429, 'state': 'rate_limited', 'provider_acceptance_observed': False,
+                'recovery': {'ambiguous_replay_suppressed': False}}
+    for suffix in ('.json', '.sse.receipt.json', '.attempt-01.sse'):
+        (output / (stem + suffix)).write_text(json.dumps(rejected))
+    assert module.prior_rejected_result(job['id']) == rejected
+    module.archive_prior_rejected_attempt(job, rejected)
+    archived = module.ROOT / 'rejected-attempts' / job['id'] / '4'
+    assert (archived / 'result.json').is_file()
+    for suffix in ('.json', '.sse.receipt.json', '.attempt-01.sse'):
+        assert (archived / (stem + suffix)).is_file()
+        assert not (output / (stem + suffix)).exists()
+
+
 def test_remote_attachment_requires_hash_and_https(monkeypatch, tmp_path):
     module = worker()
     module.STAGE_ROOT = tmp_path / 'stage'

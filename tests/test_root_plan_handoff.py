@@ -208,7 +208,7 @@ class RootPlanHandoffTests(unittest.TestCase):
         def probe(step_id):
             return {"command": "/usr/bin/python3 -I " + str(
                 Path.home() / ".local/share/cognilode/taskflow-probes/living-company"
-                / (step_id + ".py")), "expected": "live"}
+                / (step_id + ".py")), "expected": ""}
         plan = {"schema": "cognilode.root_taskflow_portfolio.v1",
                 "project_id": "living-company", "project_name": "Living Company",
                 "research_employee": "Nadia Brooks", "external_employee": "Rina Hale",

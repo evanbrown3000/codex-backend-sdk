@@ -21,6 +21,7 @@ import fcntl
 import hashlib
 import importlib.machinery
 import importlib.util
+import ipaddress
 import json
 import os
 import re
@@ -32,6 +33,9 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
+import urllib.request
+import socket
 import zipfile
 
 HERE = Path(__file__).resolve().parent
@@ -764,6 +768,8 @@ def verify_effect_receipt(path: Path, *, plan: Plan, step: Step, work_sha256: st
 
 def validate_probe_observation(step: Step, observed: str) -> str:
     expected = str(step.fields.get("effect_probe_expected") or "").strip()
+    if step.fields.get("hierarchy_scope") and expected:
+        raise ValueError("root portfolio probe must provide structured beneficiary evidence")
     if expected:
         if observed != expected:
             raise ValueError(f"independent effect probe failed: output mismatch {observed[:200]!r}")
@@ -787,7 +793,52 @@ def validate_probe_observation(step: Step, observed: str) -> str:
         or len({str(row["ref"]) for row in evidence}) < declared_sources
     ):
         raise ValueError("independent effect probe distinct source count is unsupported by its evidence")
+    if step.fields.get("hierarchy_scope"):
+        for row in evidence:
+            verify_root_beneficiary_ref(row)
     return "cognilode.effect_probe.v1 verified"
+
+
+def verify_root_beneficiary_ref(row: Mapping[str, Any]) -> None:
+    """Re-fetch the state outside the agent-authored probe and compare raw bytes."""
+    kind = str(row.get("kind") or "")
+    ref = str(row.get("ref") or "")
+    expected_sha = str(row.get("sha256") or "")
+    if not HEX64.fullmatch(expected_sha):
+        raise ValueError("root beneficiary ref lacks SHA-256")
+    if kind == "file":
+        if not ref.startswith("file:/"):
+            raise ValueError("root beneficiary file ref must be absolute")
+        path = Path(ref[5:])
+        if (not path.is_file() or path.stat().st_size > 2_000_000
+            or path.name in {"EXTERNAL_EFFECT_RESULT.json", "MANIFEST.json"}
+            or path.suffix.lower() in {".zip", ".plan", ".py"}):
+            raise ValueError("root beneficiary file ref is missing, oversized, or only an artifact")
+        raw = path.read_bytes()
+    elif kind == "https":
+        parsed = urllib.parse.urlparse(ref)
+        host = parsed.hostname or ""
+        if (parsed.scheme != "https" or not host or parsed.username or parsed.password
+            or host.lower() == "localhost" or host.lower().endswith((".local", ".internal"))):
+            raise ValueError("root beneficiary HTTPS ref is invalid")
+        try:
+            addresses = {info[4][0] for info in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)}
+        except OSError as exc:
+            raise ValueError("root beneficiary HTTPS host did not resolve") from exc
+        if not addresses or any(not ipaddress.ip_address(ip).is_global for ip in addresses):
+            raise ValueError("root beneficiary HTTPS ref resolves outside the public network")
+        request = urllib.request.Request(ref, headers={"User-Agent": "Cognilode-Effect-Readback/1"}, method="GET")
+        with urllib.request.urlopen(request, timeout=20) as response:
+            final = urllib.parse.urlparse(response.geturl())
+            if final.scheme != "https":
+                raise ValueError("root beneficiary HTTPS ref redirected off HTTPS")
+            raw = response.read(2_000_001)
+        if len(raw) > 2_000_000:
+            raise ValueError("root beneficiary HTTPS response is oversized")
+    else:
+        raise ValueError("root beneficiary evidence kind must be file or https")
+    if sha256_bytes(raw) != expected_sha:
+        raise ValueError("root beneficiary ref changed since independent probe read")
 
 
 def verify_effect_probe(step: Step) -> dict[str, Any]:
@@ -800,6 +851,10 @@ def verify_effect_probe(step: Step) -> dict[str, Any]:
         raise ValueError("TaskFlow step needs an absolute read-only effect_probe_command")
     if not 5 <= timeout_seconds <= 1800:
         raise ValueError("effect_probe_timeout_seconds must be between 5 and 1800")
+    if step.fields.get("hierarchy_scope"):
+        argv = ["/usr/bin/bwrap", "--die-with-parent", "--ro-bind", "/", "/",
+                "--tmpfs", "/tmp", "--dev-bind", "/dev", "/dev", "--proc", "/proc",
+                "--", *argv]
     result = subprocess.run(argv, text=True, capture_output=True, timeout=timeout_seconds, check=False)
     observed = result.stdout.strip()
     if result.returncode != 0:

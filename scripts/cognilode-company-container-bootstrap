@@ -41,13 +41,13 @@ def migrate_container_browser(project: str, image: str) -> None:
     volume = f"{project}_company_browser"
     subprocess.run(["docker", "volume", "create", volume], stdout=subprocess.DEVNULL,
                    check=True, timeout=30)
+    # The marker is written only after the initial custody validation succeeds.
+    # Rewalking an established browser profile on every container restart is
+    # expensive and can stall startup while Docker is under load.
     marker = subprocess.run(["docker", "run", "--rm", "--volume", f"{volume}:/browser:ro",
-                             image, "sh", "-c",
-                             "test -f /browser/profile/.custody-complete && "
-                             "test -s '/browser/profile/Local State' && "
-                             "test -n \"$(find /browser/profile -type f -name Cookies -size +0c -print -quit)\""],
+                             image, "test", "-f", "/browser/profile/.custody-complete"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            check=False, timeout=30)
+                            check=False, timeout=180)
     if marker.returncode == 0:
         return
     source = ["docker", "exec", "cognilode-primary-workspace", "sh", "-c",

@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Run release custody from synchronized SDK source, adopting new generations."""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+
+SCRIPTS = Path(os.environ.get('COGNILODE_COMPANY_SOURCE_ROOT', '/runtime/source')) / 'current/codex-backend-sdk/scripts'
+BOOT_WRAPPER = Path(__file__).resolve()
+STOP = False
+
+
+def stop(_signum, _frame):
+    global STOP
+    STOP = True
+
+
+def main() -> None:
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    while not STOP:
+        selected = (SCRIPTS / 'cognilode-company-codex-release-custody').resolve()
+        if not selected.is_file():
+            time.sleep(5)
+            continue
+        print(f'Codex release custody source generation {selected}', flush=True)
+        child = subprocess.Popen([sys.executable, str(selected)], env=os.environ.copy())
+        while not STOP and child.poll() is None and selected == (SCRIPTS / 'cognilode-company-codex-release-custody').resolve():
+            time.sleep(5)
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=10)
+        if STOP:
+            return
+        wrapper = (SCRIPTS / 'cognilode-company-codex-release-custody-runtime').resolve()
+        if wrapper.is_file() and wrapper != BOOT_WRAPPER:
+            os.execv(sys.executable, [sys.executable, str(wrapper)])
+        time.sleep(2)
+
+
+if __name__ == '__main__':
+    main()

@@ -65,6 +65,20 @@ def marker(state: str) -> None:
     temporary.replace(LOOKUP)
 
 
+def aws_failure(result: subprocess.CompletedProcess) -> str:
+    """Keep credential and bucket error text out of recurring service logs."""
+    detail = (result.stderr or '').lower()
+    if 'expiredtoken' in detail or 'token has expired' in detail:
+        return 'session_expired'
+    if 'unable to locate credentials' in detail or 'nocredentialproviders' in detail:
+        return 'credentials_missing'
+    if 'accessdenied' in detail or 'forbidden' in detail or '403' in detail:
+        return 'access_denied'
+    if 'could not connect' in detail or 'endpointconnectionerror' in detail:
+        return 'endpoint_unreachable'
+    return f'aws_cli_exit_{result.returncode}'
+
+
 def remote_manifest() -> dict | None:
     # Missing releases are normal before the first capable builder publishes.
     # A GET for an absent private key can be reported as AccessDenied by S3;
@@ -74,7 +88,21 @@ def remote_manifest() -> dict | None:
     if probe.returncode:
         if "404" in probe.stderr or "Not Found" in probe.stderr or "NoSuchKey" in probe.stderr:
             return None
-        raise RuntimeError("private Codex release manifest lookup failed")
+        if aws_failure(probe) == 'access_denied':
+            # S3 can answer HEAD for a missing key with 403 when ListBucket is
+            # absent. Ask the bucket for this one exact key before concluding
+            # that a new build is safe; a denied LIST keeps the build fenced.
+            listing = aws('list-objects-v2', '--bucket', BUCKET,
+                          '--prefix', PREFIX + '/manifest.json', '--max-keys', '1',
+                          '--output', 'json')
+            if listing.returncode:
+                raise RuntimeError('private Codex release manifest lookup ' + aws_failure(listing))
+            keys = [str(item.get('Key') or '') for item in
+                    json.loads(listing.stdout or '{}').get('Contents', [])]
+            if PREFIX + '/manifest.json' not in keys:
+                return None
+            raise RuntimeError('private Codex release manifest exists but read is denied')
+        raise RuntimeError('private Codex release manifest lookup ' + aws_failure(probe))
     with tempfile.TemporaryDirectory(prefix="codex-release-manifest-") as temporary:
         path = Path(temporary) / "manifest.json"
         result = aws("get-object", "--bucket", BUCKET, "--key", PREFIX + "/manifest.json",
@@ -82,7 +110,7 @@ def remote_manifest() -> dict | None:
         if result.returncode:
             if "NoSuchKey" in result.stderr or "404" in result.stderr:
                 return None
-            raise RuntimeError("private Codex release manifest lookup failed")
+            raise RuntimeError('private Codex release manifest download ' + aws_failure(result))
         value = json.loads(path.read_text(encoding="utf-8"))
     if (value.get("schema") != "cognilode.codex-release.v1" or
             value.get("source_commit") != PIN or value.get("target") != TARGET):

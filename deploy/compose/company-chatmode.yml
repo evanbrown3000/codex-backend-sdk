@@ -187,9 +187,10 @@ services:
     network_mode: bridge
     user: "0:0"
     working_dir: /company/codex-backend-sdk
-    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-company-codex-release-custody]
+    entrypoint: [python3, /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-codex-release-custody-runtime]
     environment:
       HOME: /root
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
       COGNILODE_CODEX_SOURCE_COMMIT: e81a4be948fd2b86140c628aa70127f7d6a93aaa
       COGNILODE_CODEX_INSTALL_ROOT: /codex
       COGNILODE_CODEX_RELEASE_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2

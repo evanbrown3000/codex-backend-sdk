@@ -34,7 +34,11 @@ LOCK = ROOT / "metadata" / f"release-{PIN}-{TARGET}.lock"
 
 
 def aws(*args: str, timeout: int = 120) -> subprocess.CompletedProcess:
-    binary = shutil.which("aws")
+    # The standard workspace puts a brokered shim ahead of the real CLI on
+    # PATH. This credential-custody container has its own mounted AWS profile.
+    binary = os.environ.get("COGNILODE_AWS_CLI", "/usr/bin/aws")
+    if not Path(binary).is_file():
+        binary = shutil.which("aws")
     if not binary:
         raise RuntimeError("AWS CLI is unavailable in company container")
     return subprocess.run([binary, "s3api", *args], capture_output=True,

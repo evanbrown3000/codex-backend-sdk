@@ -6,6 +6,7 @@ import base64
 import copy
 import datetime as dt
 import email.utils
+import fcntl
 import hashlib
 import json
 import os
@@ -305,6 +306,22 @@ def new_session(profile: Path, impersonate: str):
 
 
 def codex_device_id() -> str:
+    if os.environ.get("COGNILODE_CHATMODE_PORTABLE") == "1":
+        path = Path.home() / ".config/cognilode/chatmode-provider-device-id"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = path.with_name(path.name + ".lock")
+        with lock_path.open("a+", encoding="ascii") as lock:
+            os.chmod(lock_path, 0o600)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            if path.exists():
+                return str(uuid.UUID(path.read_text(encoding="ascii").strip()))
+            value = str(uuid.uuid4())
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="ascii") as stream:
+                stream.write(value + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            return value
     local_storage = Path.home() / ".config/Codex/Default/Local Storage/leveldb"
     if not local_storage.exists():
         return ""
@@ -336,15 +353,70 @@ def codex_identity() -> tuple[object, dict, str]:
         raise CapabilityError("codex_auth_incomplete", "Codex auth omitted access token or account ID")
     device_id = codex_device_id()
     if not device_id:
-        raise CapabilityError("codex_device_missing", "Codex Desktop device ID not found")
+        raise CapabilityError("codex_device_missing", "local Codex provider device ID not found")
     session = requests.Session(impersonate=DEFAULT_IMPERSONATE, timeout=120)
     return session, {
         "access_token": token,
         "account_id": account_id,
         "plan_type": None,
         "user_email": None,
-        "source": "codex_desktop_auth",
+        "source": "codex_portable_auth" if os.environ.get("COGNILODE_CHATMODE_PORTABLE") == "1" else "codex_desktop_auth",
     }, device_id
+
+
+def _refresh_portable_codex_auth(expected_account: str, stale_token: str) -> None:
+    """Refresh phone-local Codex OAuth only after a proven auth rejection.
+
+    The queue owns send ambiguity. This changes credentials, not conversation
+    state, and callers may invoke it only from their existing 401/403 recovery.
+    """
+    from codex_backend_sdk.oauth import refresh_access_token
+    from codex_backend_sdk.storage import _extract_openai_claims
+
+    auth_path = Path.home() / ".codex/auth.json"
+    lock_path = auth_path.with_name("auth.json.refresh.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="ascii") as lock:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        document = json.loads(auth_path.read_text(encoding="utf-8"))
+        tokens = document.get("tokens") or {}
+        account_id = str(tokens.get("account_id") or "")
+        if not account_id or (expected_account and account_id != expected_account):
+            raise CapabilityError("auth_account_mismatch", "local Codex account changed during refresh")
+        if str(tokens.get("access_token") or "") != stale_token:
+            return  # Another local refresher already replaced the rejected token.
+        refresh_token = str(tokens.get("refresh_token") or "")
+        if not refresh_token:
+            raise CapabilityError("auth_refresh_unavailable", "local Codex refresh token is absent")
+        renewed = refresh_access_token(refresh_token)
+        new_access = str(renewed.get("access_token") or "")
+        new_account = str(_extract_openai_claims(new_access).get("chatgpt_account_id") or "")
+        if not new_access or new_access == stale_token or new_account != account_id:
+            raise CapabilityError("auth_account_mismatch", "refreshed token did not preserve local account")
+        tokens["access_token"] = new_access
+        if renewed.get("refresh_token"):
+            tokens["refresh_token"] = str(renewed["refresh_token"])
+        if renewed.get("id_token"):
+            tokens["id_token"] = str(renewed["id_token"])
+        document["last_refresh"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        fd, name = tempfile.mkstemp(prefix=".auth-refresh-", dir=auth_path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as out:
+                os.fchmod(out.fileno(), 0o600)
+                json.dump(document, out)
+                out.write("\n")
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(name, auth_path)
+            directory = os.open(auth_path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
 
 
 def request_json(response, operation: str) -> dict:
@@ -1061,6 +1133,12 @@ def _refresh_auth_context(args: argparse.Namespace, session, previous_auth: dict
         try:
             if source == "codex":
                 candidate, auth, device_id = codex_identity()
+                if (os.environ.get("COGNILODE_CHATMODE_PORTABLE") == "1" and stale_token
+                        and auth["access_token"] == stale_token):
+                    candidate.close()
+                    candidate = None
+                    _refresh_portable_codex_auth(expected_account, stale_token)
+                    candidate, auth, device_id = codex_identity()
             else:
                 candidate = new_session(Path(args.chrome_profile).expanduser(), args.impersonate)
                 auth = identity(candidate)
@@ -1505,7 +1583,7 @@ def app_headers(auth: dict, *, stream: bool = False, device_id: str = "") -> dic
         "Origin": "https://chatgpt.com",
         "Referer": "https://chatgpt.com/",
     }
-    if auth.get("source") == "codex_desktop_auth":
+    if auth.get("source") in {"codex_desktop_auth", "codex_portable_auth"}:
         headers.update({
             "User-Agent": "Codex Desktop/42.3.0",
             "OAI-Language": "en",
@@ -1796,7 +1874,8 @@ def health(args: argparse.Namespace) -> dict:
     return {
         "ok": True,
         "state": "ready",
-        "transport": "codex_desktop_auth_http" if auth.get("source") == "codex_desktop_auth" else "host_chrome_state_http",
+        "transport": "codex_portable_auth_http" if auth.get("source") == "codex_portable_auth" else
+                     "codex_desktop_auth_http" if auth.get("source") == "codex_desktop_auth" else "host_chrome_state_http",
         "account_id_present": bool(auth["account_id"]),
         "token_present": bool(auth["access_token"]),
         "device_id_present": bool(device_id),
@@ -1825,7 +1904,7 @@ def send(args: argparse.Namespace) -> dict:
 
     if args.auth_source == "codex":
         session, auth, device_id = codex_identity()
-        transport = "codex_desktop_auth_http"
+        transport = "codex_portable_auth_http" if auth.get("source") == "codex_portable_auth" else "codex_desktop_auth_http"
     else:
         session = new_session(Path(args.chrome_profile).expanduser(), args.impersonate)
         auth = identity(session)
@@ -2221,7 +2300,8 @@ def send(args: argparse.Namespace) -> dict:
         state = "provider_accepted_recovered" if summary.get("assistant_end_turn") else "provider_accepted_unfinished"
     result = {
         **receipt,
-        "transport": "codex_desktop_auth_http" if auth.get("source") == "codex_desktop_auth" else "host_chrome_state_http",
+        "transport": "codex_portable_auth_http" if auth.get("source") == "codex_portable_auth" else
+                     "codex_desktop_auth_http" if auth.get("source") == "codex_desktop_auth" else "host_chrome_state_http",
         "conversation_id": conversation_id or None,
         "ok": accepted,
         "state": state,
@@ -2358,7 +2438,7 @@ def reconcile_queue_job(args: argparse.Namespace) -> dict:
         raise CapabilityError("recovery_prompt_mismatch", "local record prompt differs from queue prompt")
     if args.auth_source == "codex":
         session, auth, device_id = codex_identity()
-        transport = "codex_desktop_auth_http"
+        transport = "codex_portable_auth_http" if auth.get("source") == "codex_portable_auth" else "codex_desktop_auth_http"
     else:
         session = new_session(Path(args.chrome_profile).expanduser(), args.impersonate)
         auth = identity(session)

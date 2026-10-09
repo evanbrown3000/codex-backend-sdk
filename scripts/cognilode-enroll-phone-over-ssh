@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""Stage a separate Termux phone for the Chat-mode queue; never activates it."""
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import re
+import subprocess
+
+
+def run(argv: list[str], *, payload: bytes | None = None, timeout: int = 30) -> str:
+    result = subprocess.run(argv, input=payload, capture_output=True, timeout=timeout, check=False)
+    if result.returncode:
+        raise RuntimeError(f"{Path(argv[0]).name} failed ({result.returncode}): "
+                           f"{result.stderr.decode(errors='replace')[-400:]}")
+    return result.stdout.decode(errors="replace")
+
+
+def enroll(host: str, user: str, port: int, probe_sha256: str, *, prepare: bool) -> dict:
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,100}", host):
+        raise ValueError("host must be a DNS name or IPv4 address")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,100}", user) or not 1 <= port <= 65535:
+        raise ValueError("invalid Termux SSH identity")
+    if not re.fullmatch(r"[0-9a-f]{64}", probe_sha256):
+        raise ValueError("private ZIP SHA-256 is invalid")
+    target = f"{user}@{host}"
+    base = ["ssh", "-p", str(port), "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+            "-o", "StrictHostKeyChecking=accept-new", target]
+    fingerprint = run(base + ["/system/bin/getprop ro.build.fingerprint"], timeout=15).strip()
+    if not fingerprint:
+        raise RuntimeError("remote target did not prove an Android system image")
+    prefix = run(base + ["printf '%s' \"$PREFIX\""], timeout=15).strip()
+    if not prefix.endswith("/com.termux/files/usr"):
+        raise RuntimeError("remote target is not the Termux environment")
+    run(base + ["mkdir -p ~/.aws ~/.config/cognilode && chmod 700 ~/.aws ~/.config/cognilode"])
+    sources = [
+        (Path.home() / ".config/cognilode/operator-bearer", ".config/cognilode/operator-bearer"),
+        (Path.home() / ".aws/credentials", ".aws/credentials"),
+        (Path.home() / ".aws/config", ".aws/config"),
+    ]
+    for source, destination in sources:
+        if not source.is_file() or source.stat().st_mode & 0o077:
+            raise RuntimeError(f"local credential source missing or not private: {source}")
+        run(base + [f"umask 077; cat > ~/{destination}; chmod 600 ~/{destination}"],
+            payload=source.read_bytes(), timeout=30)
+    run(base + ["printf '%s\\n' 'COGNILODE_PHONE_PROBE_SHA256='" + probe_sha256 +
+                " > ~/.config/cognilode/phone-probe.env; chmod 600 ~/.config/cognilode/phone-probe.env"])
+    if prepare:
+        run(base + ["git clone --filter=blob:none https://github.com/evanbrown3000/codex-backend-sdk.git "
+                    "~/codex-backend-sdk 2>/dev/null || git -C ~/codex-backend-sdk fetch origin main; "
+                    "COGNILODE_PHONE_PROBE_SHA256=" + probe_sha256 +
+                    " nice -n 15 bash ~/codex-backend-sdk/scripts/cognilode-install-chatmode-termux prepare"],
+            timeout=1800)
+    return {"android_fingerprint_present": True, "termux_prefix_verified": True,
+            "credentials_staged_over_ssh": True, "private_zip_probe_sha256": probe_sha256,
+            "prepared": prepare, "d1_eligible": False, "chatgpt_send_performed": False}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", required=True)
+    parser.add_argument("--user", required=True)
+    parser.add_argument("--port", type=int, default=8022)
+    parser.add_argument("--probe-sha256", required=True)
+    parser.add_argument("--prepare", action="store_true")
+    args = parser.parse_args()
+    import json
+    print(json.dumps(enroll(args.host, args.user, args.port, args.probe_sha256,
+                            prepare=args.prepare), sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

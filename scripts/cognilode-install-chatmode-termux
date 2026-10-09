@@ -1,0 +1,126 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Phone setup runs only inside Termux. The ChatGPT transport runs in proot Ubuntu
+# so its Python dependencies use tested Linux/aarch64 wheels. This script does
+# not make the phone queue-eligible until the explicit `activate` command.
+set -Eeuo pipefail
+umask 077
+
+if [[ "${PREFIX:-}" != */com.termux/* ]]; then
+  echo 'Run this inside the physical Android Termux app.' >&2
+  exit 2
+fi
+
+ACTION="${1:-}"
+DEVICE_ID="${COGNILODE_PHONE_DEVICE_ID:-home-android-phone}"
+SDK_URL='https://github.com/evanbrown3000/codex-backend-sdk.git'
+SDK_DIR='/root/codex-backend-sdk'
+SDK_VENV='/root/cognilode-chatmode-venv'
+BUCKET='cognilode-conversation-visibility-362928919715-us-west-2'
+SERVICE_DIR="$PREFIX/var/service/cognilode-chatmode-phone"
+RUNNER="$HOME/.local/bin/cognilode-chatmode-phone-run"
+PROBE_SHA="${COGNILODE_PHONE_PROBE_SHA256:-}"
+export SVDIR="$PREFIX/var/service" LOGDIR="$PREFIX/var/log"
+
+case "$DEVICE_ID" in
+  *[!a-zA-Z0-9._-]*|'') echo 'Invalid phone device ID' >&2; exit 2;;
+esac
+
+proot_run() {
+  mkdir -p "$HOME/.aws" "$HOME/.config/cognilode"
+  proot-distro login ubuntu \
+    --bind "$HOME/.aws:/root/.aws" \
+    --bind "$HOME/.config/cognilode:/root/.config/cognilode" \
+    -- "$@"
+}
+
+check_private_prerequisites() {
+  [[ -s "$HOME/.config/cognilode/operator-bearer" ]] || {
+    echo 'Missing phone-local operator-bearer; copy it over encrypted Termux SSH.' >&2; exit 3;
+  }
+  [[ "$(stat -c %a "$HOME/.config/cognilode/operator-bearer")" == 600 ]] || {
+    echo 'operator-bearer must have mode 0600.' >&2; exit 3;
+  }
+  [[ -s "$HOME/.aws/credentials" ]] || {
+    echo 'Missing phone-local AWS credentials for private ZIP staging.' >&2; exit 3;
+  }
+  [[ "$(stat -c %a "$HOME/.aws/credentials")" == 600 ]] || {
+    echo 'AWS credentials must have mode 0600.' >&2; exit 3;
+  }
+  [[ "$PROBE_SHA" =~ ^[0-9a-f]{64}$ ]] || {
+    echo 'Set COGNILODE_PHONE_PROBE_SHA256 to an existing private research ZIP SHA-256.' >&2; exit 3;
+  }
+}
+
+phone_health() {
+  check_private_prerequisites
+  proot_run /usr/bin/env COGNILODE_CHATMODE_PORTABLE=1 \
+    "$SDK_VENV/bin/python" "$SDK_DIR/scripts/cognilode-b4pt0r-chatmode" --auth-source codex health
+  proot_run /usr/bin/env COGNILODE_CHATMODE_PORTABLE=1 COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET="$BUCKET" \
+    "$SDK_VENV/bin/python" "$SDK_DIR/scripts/cognilode-phone-verify" "$PROBE_SHA"
+}
+
+case "$ACTION" in
+  prepare)
+    pkg update -y
+    pkg install -y proot-distro termux-services openssh git curl
+    if ! proot-distro login ubuntu -- /bin/true >/dev/null 2>&1; then
+      proot-distro install ubuntu:24.04
+    fi
+    proot_run /bin/bash -lc 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 python3-venv python3-pip git curl ca-certificates awscli'
+    proot_run /bin/bash -lc "if [ ! -d '$SDK_DIR/.git' ]; then git clone --filter=blob:none '$SDK_URL' '$SDK_DIR'; fi"
+    proot_run /bin/bash -lc "cd '$SDK_DIR' && git fetch --quiet origin main && git checkout --detach origin/main && python3 -m venv '$SDK_VENV' && '$SDK_VENV/bin/pip' install -q -e . curl_cffi cryptography secretstorage"
+    mkdir -p "$HOME/.local/bin" "$SERVICE_DIR"
+    if [[ ! -e "$SERVICE_DIR/run" ]]; then touch "$SERVICE_DIR/down"; fi
+    cat > "$RUNNER" <<EOF
+#!/data/data/com.termux/files/usr/bin/bash
+set -Eeuo pipefail
+export COGNILODE_CHATMODE_PORTABLE=1
+export COGNILODE_CHATMODE_AUTH_SOURCE=codex
+export COGNILODE_CHATMODE_NETWORK_ROUTE=home
+export COGNILODE_CHATMODE_DEVICE_PRIORITY=45
+exec nice -n 15 proot-distro login ubuntu --bind "$HOME/.aws:/root/.aws" --bind "$HOME/.config/cognilode:/root/.config/cognilode" -- /usr/bin/env COGNILODE_CHATMODE_PORTABLE=1 COGNILODE_CHATMODE_AUTH_SOURCE=codex COGNILODE_CHATMODE_NETWORK_ROUTE=home COGNILODE_CHATMODE_DEVICE_PRIORITY=45 COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET="$BUCKET" "$SDK_VENV/bin/python" "$SDK_DIR/scripts/cognilode-chatmode-queue-worker" --device-id "$DEVICE_ID" --interval 60
+EOF
+    chmod 700 "$RUNNER"
+    cat > "$SERVICE_DIR/run" <<EOF
+#!/data/data/com.termux/files/usr/bin/bash
+exec "$RUNNER"
+EOF
+    chmod 700 "$SERVICE_DIR/run"
+    # runit honours `down` across app restarts; a prepared phone is never
+    # eligible merely because its package installation completed.
+    mkdir -p "$HOME/.termux/boot"
+    cat > "$HOME/.termux/boot/20-cognilode-chatmode" <<EOF
+#!/data/data/com.termux/files/usr/bin/bash
+export PREFIX="$PREFIX" SVDIR="$PREFIX/var/service" LOGDIR="$PREFIX/var/log"
+command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock || true
+service-daemon start >/dev/null 2>&1 || true
+if [ ! -f "$SERVICE_DIR/down" ]; then sv up cognilode-chatmode-phone || true; fi
+EOF
+    chmod 700 "$HOME/.termux/boot/20-cognilode-chatmode"
+    echo 'prepared; service remains disabled until activate succeeds'
+    ;;
+  authorize)
+    proot_run "$SDK_VENV/bin/python" "$SDK_DIR/scripts/cognilode-phone-oauth"
+    ;;
+  verify)
+    phone_health
+    ;;
+  activate)
+    phone_health
+    sv-enable cognilode-chatmode-phone
+    sv up cognilode-chatmode-phone
+    echo 'activated; verify a due-slot terminal Chat-mode turn and central readback before claiming physical failover'
+    ;;
+  deactivate)
+    sv-disable cognilode-chatmode-phone || true
+    sv down cognilode-chatmode-phone || true
+    echo 'phone queue worker disabled'
+    ;;
+  status)
+    sv status cognilode-chatmode-phone || true
+    ;;
+  *)
+    echo 'Usage: cognilode-install-chatmode-termux {prepare|authorize|verify|activate|deactivate|status}' >&2
+    exit 2
+    ;;
+esac

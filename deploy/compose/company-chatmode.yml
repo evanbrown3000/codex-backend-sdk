@@ -288,7 +288,7 @@ services:
     entrypoint: [sh, -c]
     command:
       - >-
-        python3 /company/codex-backend-sdk/scripts/cognilode-central-rollout-acceptance --daemon &
+        python3 /runtime/source/current/codex-backend-sdk/scripts/cognilode-central-rollout-acceptance --daemon &
         exec python3 /codex/bin/central-rollouts daemon
     environment:
       HOME: /home/worker
@@ -301,6 +301,7 @@ services:
       - company_auth:/home/worker/.codex
       - company_operator:/home/worker/.config/cognilode:ro
     depends_on:
+      - source-sync
       - codex-builder
       - credential-sync
 

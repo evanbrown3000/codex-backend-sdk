@@ -409,6 +409,133 @@ def root_portfolio_plan(plan: Plan) -> bool:
         step.fields.get("hierarchy_scope") for step in plan.steps)
 
 
+RPE_PROBE_FILES = (
+    "scripts/probe-recursive-rpe-native-effect",
+    "scripts/_rpe_native_behavior_fixture.py",
+)
+
+
+def _rpe_probe_lock_path(state_root: Path, plan: Plan, step: Step) -> Path:
+    return (state_root / plan.project_id / step.step_id /
+            f"pre_native_probe_lock_{plan.sha256[:16]}.json")
+
+
+def _rpe_probe_member(archive: zipfile.ZipFile, relative: str) -> str | None:
+    matches = [name for name in archive.namelist()
+               if name == relative or name.endswith("/" + relative)]
+    if len(matches) > 1:
+        raise ValueError(f"ambiguous RPE probe source member: {relative}")
+    return matches[0] if matches else None
+
+
+def _rpe_probe_attachment(ref: Mapping[str, Any]) -> tuple[Path, str]:
+    expected = str(ref.get("sha256") or "")
+    if not HEX64.fullmatch(expected):
+        raise ValueError("RPE probe attachment lacks SHA-256")
+    path = Path(str(ref.get("ref") or "").removeprefix("file:"))
+    if not path.is_file() or sha256_file(path) != expected:
+        path = stage_external_work_zip(ref, expected)
+    if sha256_file(path) != expected:
+        raise ValueError("RPE probe attachment bytes changed")
+    safe_zip_members(path)
+    return path, expected
+
+
+def freeze_rpe_probe_before_native(queue: QueueClient, plan: Plan, step: Step,
+                                   state_root: Path) -> dict[str, Any] | None:
+    """Bind the read-only behavioral probe to a pre-ChatGPT D1 ZIP source.
+
+    The original BookWriter/RPE acceptance supplement and the later complete
+    source snapshot are physically attached before native work. We choose the
+    last matching pre-native source, so a later corrected fixture supersedes an
+    obsolete one without relying on an agent-authored 'canonical' label.
+    """
+    if plan.project_id != "recursive-rpe-native-sandbox":
+        return None
+    lock_path = _rpe_probe_lock_path(state_root, plan, step)
+    chat_id = phase_job_id(plan, step.step_id, "chatgpt_sandbox")
+    job = queue.get(chat_id)
+    if not job:
+        return None
+    if lock_path.is_file():
+        if job.get("state") == "queued":
+            return verify_rpe_probe_custody(queue, plan, step, state_root)
+        # After the native turn, let the external Codex employee restore any
+        # accidentally overwritten probe bytes. Full byte verification occurs
+        # immediately before and after the independent effect probe.
+        return {"lock_path": str(lock_path), "state": "frozen_pre_native"}
+    if (job.get("state") != "queued" or job.get("conversation_id")
+        or job.get("claimed_at") or job.get("lease_generation")):
+        raise ValueError("RPE probe cannot first be frozen after native claim")
+    repo = execution_repo(Path(plan.source_ref.removeprefix("file:")))
+    current = {relative: sha256_file(repo / relative) for relative in RPE_PROBE_FILES}
+    matched: dict[str, Any] | None = None
+    for ref in job.get("attachment_refs") or []:
+        if not isinstance(ref, dict):
+            continue
+        path, digest = _rpe_probe_attachment(ref)
+        with zipfile.ZipFile(path) as archive:
+            members = {relative: _rpe_probe_member(archive, relative)
+                       for relative in RPE_PROBE_FILES}
+            if not all(members.values()):
+                continue
+            if all(sha256_bytes(archive.read(members[relative])) == current[relative]
+                   for relative in RPE_PROBE_FILES):
+                matched = {"attachment_sha256": digest, "members": members}
+    if matched is None:
+        raise ValueError("queued RPE job has no source ZIP matching the independent probe and fixture")
+    lock = {
+        "schema": "cognilode.taskflow.pre-native-probe-lock.v1",
+        "plan_sha256": plan.sha256, "step_id": step.step_id,
+        "chat_job_id": chat_id, "chat_job_state_at_freeze": "queued",
+        "frozen_at": utc(), "attachment_sha256": matched["attachment_sha256"],
+        "files": {relative: {"sha256": current[relative],
+                             "zip_member": matched["members"][relative]}
+                  for relative in RPE_PROBE_FILES},
+    }
+    atomic_json(lock_path, lock)
+    return verify_rpe_probe_custody(queue, plan, step, state_root)
+
+
+def verify_rpe_probe_custody(queue: QueueClient, plan: Plan, step: Step,
+                             state_root: Path) -> dict[str, Any] | None:
+    if plan.project_id != "recursive-rpe-native-sandbox":
+        return None
+    lock_path = _rpe_probe_lock_path(state_root, plan, step)
+    if not lock_path.is_file():
+        raise ValueError("RPE independent probe was not frozen before native work")
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    chat_id = phase_job_id(plan, step.step_id, "chatgpt_sandbox")
+    if (lock.get("schema") != "cognilode.taskflow.pre-native-probe-lock.v1"
+        or lock.get("plan_sha256") != plan.sha256
+        or lock.get("step_id") != step.step_id
+        or lock.get("chat_job_id") != chat_id
+        or lock.get("chat_job_state_at_freeze") != "queued"
+        or set(lock.get("files") or {}) != set(RPE_PROBE_FILES)):
+        raise ValueError("RPE pre-native probe lock identity mismatch")
+    job = queue.get(chat_id)
+    if not job:
+        raise ValueError("RPE original ChatGPT job missing from D1")
+    anchors = [ref for ref in job.get("attachment_refs") or []
+               if isinstance(ref, dict) and ref.get("sha256") == lock.get("attachment_sha256")]
+    if len(anchors) != 1:
+        raise ValueError("RPE probe lock source no longer matches original D1 attachment")
+    path, _ = _rpe_probe_attachment(anchors[0])
+    repo = execution_repo(Path(plan.source_ref.removeprefix("file:")))
+    with zipfile.ZipFile(path) as archive:
+        for relative in RPE_PROBE_FILES:
+            row = lock["files"][relative]
+            member = _rpe_probe_member(archive, relative)
+            expected = str(row.get("sha256") or "")
+            if (not member or member != row.get("zip_member") or not HEX64.fullmatch(expected)
+                or sha256_bytes(archive.read(member)) != expected
+                or sha256_file(repo / relative) != expected):
+                raise ValueError(f"RPE independent probe or fixture changed: {relative}")
+    return {"lock_path": str(lock_path), "attachment_sha256": lock["attachment_sha256"],
+            "file_sha256s": {relative: lock["files"][relative]["sha256"]
+                             for relative in RPE_PROBE_FILES}}
+
+
 def verify_independent_probe_packet(path: Path, plan: Plan, step: Step) -> dict[str, str]:
     """Freeze a named research employee's probe before the sandbox worker sees it."""
     command = str(step.fields.get("effect_probe_command") or "")
@@ -571,6 +698,15 @@ def external_prompt(plan: Plan, step: Step, work_zip: Path, effect_receipt: Path
              "target_path with exactly its declared SHA-256. Do not rewrite its logic. TaskFlow "
              "will independently compare the installed bytes and execute it after your deployment.\n"
              if root_portfolio_plan(plan) else "")
+    if plan.project_id == "recursive-rpe-native-sandbox":
+        probe += ("The read-only RPE effect probe and its behavior fixture were frozen from a "
+                  "pre-native source ZIP. Do not edit or replace "
+                  "scripts/probe-recursive-rpe-native-effect or "
+                  "scripts/_rpe_native_behavior_fixture.py. If either differs, restore its "
+                  "exact frozen bytes from the pre-native D1 source attachment before deployment. "
+                  "Apply the returned implementation to the package and installed venv; "
+                  "TaskFlow checks those frozen probe bytes "
+                  "before and after independently running them.\n")
     return f"""You are the Codex external-effect employee assigned to apply this TaskFlow sandbox output.\n{slack_role_context(employee)}\nProject: {plan.project_id}\nPlan SHA-256: {plan.sha256}\nStep: {step.step_id} {step.title}\nWork ZIP: {work_zip}\nWork ZIP SHA-256: {sha256_file(work_zip)}\n\nRead EXTERNAL_EFFECT_INSTRUCTIONS.md inside the ZIP, reconcile with current source/deployment, apply or deploy the work, and verify the real effect. {probe}Do not mark success for code/artifact production alone. On success, atomically write JSON to exactly {effect_receipt} with schema='cognilode.taskflow.external_effect.v1', status='applied', project_id, plan_sha256, step_id, work_zip_sha256, effect_kind, non-empty effect_ref, environment, checks (non-empty list of objects with command, exit_code, and observed result), and defects (list). If the effect is failed or uncertain, write status='failed' or 'uncertain'; that MUST NOT release dependents.\n\n--- FULL PLAN ---\n{plan.text}\n"""
 
 
@@ -1718,6 +1854,11 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
     def active(step: Step) -> bool:
         return ((active_step_ids is None or step.step_id in active_step_ids) and not step.checked
                 and completed_prerequisites(queue,plan,step))
+    if plan.project_id == "recursive-rpe-native-sandbox":
+        for candidate in plan.steps:
+            if active(candidate):
+                freeze_rpe_probe_before_native(queue, step_execution_plan(plan, candidate.step_id),
+                                               candidate, state_root)
     def phase_jobs(phase: str, provider: str, state: str) -> Iterable[dict[str, Any]]:
         # The D1 queue is global. A limited list page can omit this project
         # indefinitely when other projects have more than one page of work.
@@ -1958,7 +2099,9 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
             if root_portfolio_plan(execution_plan):
                 verify_installed_independent_probe(Path(work["path"]),execution_plan,step)
             effect=verify_effect_receipt(receipt_path,plan=execution_plan,step=step,work_sha256=work["sha256"])
+            verify_rpe_probe_custody(queue, execution_plan, step, state_root)
             probe=verify_effect_probe(step)
+            verify_rpe_probe_custody(queue, execution_plan, step, state_root)
             identity=codex_session_identity_evidence(invocation_path,str(pending["id"]))
         except Exception:
             action["actions"].append({"step":step.step_id,"phase":"external_effect_reconcile","ok":False,"state":"awaiting_readback"}); continue
@@ -1992,7 +2135,9 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
                     if root_portfolio_plan(execution_plan):
                         verify_installed_independent_probe(Path(work["path"]),execution_plan,step)
                     effect=verify_effect_receipt(effect_receipt,plan=execution_plan,step=step,work_sha256=work["sha256"])
+                    verify_rpe_probe_custody(queue, execution_plan, step, state_root)
                     probe=verify_effect_probe(step)
+                    verify_rpe_probe_custody(queue, execution_plan, step, state_root)
                     identity=codex_session_identity_evidence(run_dir/"secretary_receipt.json",str(ejob["id"]))
                     evidence=[{"kind":"external_effect","ref":effect["effect_ref"],"environment":effect["environment"]},{"kind":"external_effect_receipt","ref":effect["receipt_sha256"],"path":str(effect_receipt)},{"kind":"chatgpt_work_zip","ref":work["sha256"],"path":work["path"]},{"kind":"independent_effect_probe","ref":probe["sha256"],"observed":probe["observed"],"command":probe["command"]}]
                     if identity: evidence.append(identity)
@@ -2013,12 +2158,20 @@ def main(argv: Sequence[str] | None=None) -> int:
     p=argparse.ArgumentParser(); p.add_argument("--plan",required=True); p.add_argument("--role",default="")
     p.add_argument("--secretary",default=str(DEFAULT_SECRETARY)); p.add_argument("--state-root",default=""); p.add_argument("--worker-id",default="taskflow-phase-controller")
     p.add_argument("--manager",default="agent-memory-manager"); p.add_argument("--priority",type=int,default=50); p.add_argument("--external-employee",default=""); p.add_argument("--seed-step",default="")
-    p.add_argument("--checkoff-only",action="store_true"); p.add_argument("--expected-plan-sha",default=""); p.add_argument("--expected-effect-job-id",default=""); p.add_argument("--step-id",default="")
+    p.add_argument("--checkoff-only",action="store_true"); p.add_argument("--freeze-probes-only",action="store_true"); p.add_argument("--expected-plan-sha",default=""); p.add_argument("--expected-effect-job-id",default=""); p.add_argument("--step-id",default="")
     args=p.parse_args(argv); plan=parse_plan(Path(args.plan)); queue=QueueClient(load_sender())
     repo_path=plan_repo(Path(plan.source_ref.removeprefix("file:")))
     state_root=Path(args.state_root).resolve() if args.state_root else repo_path/".taskflow-state"
     state_root.mkdir(parents=True,exist_ok=True)
     lock_path=state_root/("plan-"+sha256_bytes(str(Path(args.plan).resolve()).encode())[:20]+".checkoff.lock")
+    if args.freeze_probes_only:
+        with lock_path.open("a+") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            rows = [freeze_rpe_probe_before_native(queue, step_execution_plan(plan, step.step_id),
+                                                   step, state_root)
+                    for step in plan.steps if not step.checked]
+        print(json.dumps({"project": plan.project_id, "probe_locks": rows}, indent=2, sort_keys=True))
+        return 0
     if args.checkoff_only:
         if not (args.external_employee and args.expected_plan_sha and args.expected_effect_job_id and args.step_id):
             p.error("checkoff requires external employee, expected plan SHA, effect job ID and step ID")

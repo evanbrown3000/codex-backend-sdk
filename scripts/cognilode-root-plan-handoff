@@ -528,6 +528,7 @@ def enqueue_outcome_gated_successor(
     output_root: Path, bucket: str = "cognilode-conversation-visibility-362928919715-us-west-2",
     publish: Callable[[Mapping[str, Any]], str] | None = None,
     controller: Any | None = None, cycle: Any | None = None,
+    attempt: int = 0,
 ) -> dict[str, Any]:
     """Repeat root planning only after every prior action has a verified real effect.
 
@@ -553,7 +554,9 @@ def enqueue_outcome_gated_successor(
         operator_memory_post = staticmethod(post)
     queue = controller.QueueClient(_Sender)
     controller.verify_completed_effects(queue, plan, step_ids=step_ids)
-    root_id = str(state.get("root_job_id") or "")
+    if not 0 <= attempt <= 99:
+        raise ValueError("root successor attempt must be between 0 and 99")
+    root_id = str(state.get("prior_root_job_id") or state.get("root_job_id") or "")
     previous = queue.get(root_id)
     if not previous or previous.get("state") != "complete" or previous.get("provider") != "chatgpt.com":
         raise ValueError("completed root provider job required for successor")
@@ -639,7 +642,7 @@ def enqueue_outcome_gated_successor(
     root_plan = controller.parse_plan(cycle.ROOT_PLAN)
     controller.verify_plan_revision(root_plan)
     root_step = root_plan.steps[0]
-    successor_id = "root-agent-successor-" + outcome_key[:32]
+    successor_id = "root-agent-successor-" + outcome_key[:32] + f"-a{attempt}"
     prompt = (
         "Carry out the attached long-horizon root-agent TaskFlow plan in ChatGPT.com Chat mode. "
         "Read the physically attached multi-year global/project/role memory ZIP and completed "
@@ -678,6 +681,7 @@ def enqueue_outcome_gated_successor(
             raise ValueError("root outcome successor was not durably enqueued in D1")
     return {"ok": True, "phase": "await_root", "root_job_id": successor_id,
             "prior_root_job_id": root_id, "outcome_zip_sha256": outcome_sha,
+            "root_job_kind": "outcome_successor", "root_attempt": attempt,
             "completed_effect_count": len(outcomes), "provider_requests_created": 0}
 
 

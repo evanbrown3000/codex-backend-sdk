@@ -313,7 +313,7 @@ services:
     entrypoint: [sh, -c]
     command:
       - >-
-        python3 /runtime/source/current/codex-backend-sdk/scripts/cognilode-central-rollout-acceptance --daemon &
+        python3 /runtime/source/current/codex-backend-sdk/scripts/cognilode-central-rollout-acceptance-runtime &
         exec python3 /codex/bin/central-rollouts daemon
     environment:
       HOME: /home/worker

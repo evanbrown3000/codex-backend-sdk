@@ -110,6 +110,27 @@ def test_intermediate_finished_successfully_is_not_terminal():
     assert found["state"] == "provider_accepted_unfinished"
 
 
+def test_hydrated_exact_terminal_preserves_provider_model_and_effort():
+    mod = load_script("cognilode-b4pt0r-chatmode")
+    hydrated = branch("stable-user")
+    hydrated["mapping"]["assistant"]["message"]["metadata"] = {
+        "resolved_model_slug": "gpt-5-6-thinking", "thinking_effort": "xhigh"}
+    session = GetOnlySession([Response(200, {"items": [{"id": "target"}]}),
+                              Response(200, hydrated)])
+    found, _, _, _ = mod.discover_recent_turn(
+        args(), session, {"access_token": "test", "account_id": "test"}, "device",
+        user_message_id="stable-user",
+    )
+    receipt = found["provider_model_receipt"]
+    assert found["terminal"] is True
+    assert receipt["source"] == "provider_hydrated_terminal_message"
+    assert receipt["terminal_assistant_message_id"] == "assistant-1"
+    assert receipt["resolved_model_slug"] == "gpt-5-6-thinking"
+    assert receipt["thinking_effort"] == "xhigh"
+    assert len(receipt["hydrated_message_sha256"]) == 64
+    assert session.posts == 0
+
+
 def test_exact_submission_does_not_claim_later_users_terminal_reply():
     mod = load_script("cognilode-b4pt0r-chatmode")
     conversation = {"current_node": "assistant-2", "mapping": {

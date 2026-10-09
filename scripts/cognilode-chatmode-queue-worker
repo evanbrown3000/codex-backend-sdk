@@ -1580,8 +1580,7 @@ def definitive_rejection(value: dict | None) -> bool:
     status = value.get("http_status")
     state = value.get("state")
     return ((status in (401, 403) and state == "authentication_failed")
-            or (status == 429 and state == "rate_limited")
-            or (status == 404 and state == "provider_rejected"))
+            or (status == 429 and state == "rate_limited"))
 
 
 def requeue_definitive_rejection(job: dict, value: dict) -> bool:
@@ -1670,7 +1669,9 @@ def execute(job: dict, device_id: str = DEVICE_ID) -> None:
             return
         if value and complete_from_result(job, value):
             return
+        provider_delay = max(0.0, float(value.get("retry_after_seconds") or 0))
         atomic_json(job_state_path(job_id), {"state": "reconcile_required", "job_id": job_id,
+                                            "reconcile_next_at": time.time() + provider_delay,
                                             "sender_exit": response.returncode,
                                             "sender_state": value.get("state"),
                                             "receipt": str(receipt)})

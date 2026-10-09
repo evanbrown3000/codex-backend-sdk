@@ -186,8 +186,9 @@ def test_auth_rejection_refreshes_once_then_safe_retry(monkeypatch, tmp_path, st
     install_common(monkeypatch, mod, tmp_path, first)
     refreshes = []
 
-    def refresh(args, old_session):
+    def refresh(args, old_session, old_auth):
         refreshes.append(old_session)
+        assert old_auth["account_id"] == "acct"
         return second, {"access_token": "fresh", "account_id": "acct", "source": "codex_desktop_auth"}, "device"
 
     monkeypatch.setattr(mod, "_refresh_auth_context", refresh)
@@ -216,7 +217,119 @@ def test_404_missing_conversation_is_distinct_and_not_replayed(monkeypatch, tmp_
     assert result["ok"] is False
     assert result["state"] == "missing_conversation"
     assert result["recovery"]["mutation_attempts"] == 1
+    assert result["recovery"]["ambiguous_replay_suppressed"] is True
     assert len(session.posts) == 1
+
+
+def test_404_existing_conversation_does_not_authorize_duplicate_post(monkeypatch, tmp_path):
+    mod = load_transport()
+    session = SequenceSession([FakeResponse(404, content=b"gateway not found")])
+    install_common(monkeypatch, mod, tmp_path, session)
+    monkeypatch.setattr(mod, "_reconcile_turn", lambda *a, **k: ({
+        "accepted": False, "terminal": False, "state": "ambiguous_acceptance", "events": [],
+    }, session, a[2], a[3]))
+
+    result = mod.send(args_for(tmp_path))
+
+    assert len(session.posts) == 1
+    assert result["state"] == "ambiguous_acceptance"
+    assert result["recovery"]["ambiguous_replay_suppressed"] is True
+
+
+def test_new_conversation_404_stays_ambiguous_for_exact_id_recent_read(monkeypatch, tmp_path):
+    mod = load_transport()
+    session = SequenceSession([FakeResponse(404, content=b"edge miss")])
+    install_common(monkeypatch, mod, tmp_path, session)
+
+    result = mod.send(args_for(tmp_path, conversation_id=None))
+
+    assert len(session.posts) == 1
+    assert result["state"] == "ambiguous_acceptance"
+    assert result["recovery"]["ambiguous_replay_suppressed"] is True
+
+
+def test_504_retry_after_defers_readback_without_duplicate_post(monkeypatch, tmp_path):
+    mod = load_transport()
+    session = SequenceSession([FakeResponse(504, content=b"gateway timeout", headers={"Retry-After": "120"})])
+    install_common(monkeypatch, mod, tmp_path, session)
+    monkeypatch.setattr(mod, "_reconcile_turn", lambda *a, **k: pytest.fail("read before Retry-After"))
+
+    result = mod.send(args_for(tmp_path))
+
+    assert len(session.posts) == 1
+    assert result["state"] == "ambiguous_acceptance"
+    assert result["retry_after_seconds"] == 120
+    assert result["recovery"]["ambiguous_replay_suppressed"] is True
+
+
+def test_codex_stale_token_refresh_uses_same_account_browser_session(monkeypatch):
+    mod = load_transport()
+    old = SequenceSession([])
+    codex = SequenceSession([])
+    browser = SequenceSession([])
+    monkeypatch.setattr(mod, "codex_identity", lambda: (codex, {
+        "access_token": "stale", "account_id": "acct", "source": "codex_desktop_auth"}, "codex-device"))
+    monkeypatch.setattr(mod, "new_session", lambda *a: browser)
+    monkeypatch.setattr(mod, "identity", lambda session: {
+        "access_token": "fresh", "account_id": "acct", "source": "browser_auth_session"})
+    monkeypatch.setattr(mod, "device_id_from_cookies", lambda session: "browser-device")
+    args = argparse.Namespace(auth_source="codex", chrome_profile="/unused", impersonate="chrome")
+
+    session, auth, device = mod._refresh_auth_context(args, old, {
+        "access_token": "stale", "account_id": "acct"})
+
+    assert old.closed and codex.closed
+    assert session is browser
+    assert auth["access_token"] == "fresh"
+    assert device == "browser-device"
+
+
+def test_health_uses_historical_browser_session_when_codex_token_gets_403(monkeypatch):
+    mod = load_transport()
+    codex = SequenceSession([])
+    browser = SequenceSession([])
+    monkeypatch.setattr(mod, "codex_identity", lambda: (codex, {
+        "access_token": "stale", "account_id": "acct", "source": "codex_desktop_auth"}, "codex-device"))
+    monkeypatch.setattr(mod, "new_session", lambda *a: browser)
+    monkeypatch.setattr(mod, "identity", lambda session: {
+        "access_token": "fresh", "account_id": "acct"})
+    monkeypatch.setattr(mod, "device_id_from_cookies", lambda session: "browser-device")
+    probes = []
+
+    def sentinel(session, auth, *, device_id):
+        probes.append((session, auth["access_token"], device_id))
+        if session is codex:
+            raise mod.ProviderHTTPError("sentinel", FakeResponse(403, content=b"expired"))
+        return {}
+
+    monkeypatch.setattr(mod, "sentinel_headers", sentinel)
+    args = argparse.Namespace(auth_source="codex", chrome_profile="/unused", impersonate="chrome")
+    value = mod.health(args)
+
+    assert value["ok"] is True
+    assert value["transport"] == "host_chrome_state_http"
+    assert [(token, device) for _, token, device in probes] == [
+        ("stale", "codex-device"), ("fresh", "browser-device")]
+
+
+def test_refresh_never_crosses_provider_accounts(monkeypatch):
+    mod = load_transport()
+    old = SequenceSession([])
+    codex = SequenceSession([])
+    browser = SequenceSession([])
+    monkeypatch.setattr(mod, "codex_identity", lambda: (codex, {
+        "access_token": "stale", "account_id": "acct", "source": "codex_desktop_auth"}, "device"))
+    monkeypatch.setattr(mod, "new_session", lambda *a: browser)
+    monkeypatch.setattr(mod, "identity", lambda session: {
+        "access_token": "other-token", "account_id": "other-acct"})
+    args = argparse.Namespace(auth_source="codex", chrome_profile="/unused", impersonate="chrome")
+
+    session, auth, _ = mod._refresh_auth_context(args, old, {
+        "access_token": "stale", "account_id": "acct"})
+
+    assert session is codex
+    assert auth["account_id"] == "acct"
+    assert browser.closed is True
 
 
 def test_stream_break_after_2xx_never_replays_and_uses_readback(monkeypatch, tmp_path):
@@ -237,6 +350,11 @@ def test_stream_break_after_2xx_never_replays_and_uses_readback(monkeypatch, tmp
             "state": "provider_accepted_recovered",
             "assistant_message_id": "assistant-3",
             "assistant_text": "terminal after reconnect",
+            "provider_model_receipt": {"source": "provider_hydrated_terminal_message",
+                                       "terminal_assistant_message_id": "assistant-3",
+                                       "resolved_model_slug": "gpt-5-6-thinking",
+                                       "thinking_effort": "xhigh",
+                                       "hydrated_message_sha256": "a" * 64},
             "events": [],
         }, session, args[2], args[3])
 
@@ -246,6 +364,7 @@ def test_stream_break_after_2xx_never_replays_and_uses_readback(monkeypatch, tmp
     assert len(session.posts) == 1
     assert result["ok"] is True
     assert result["terminal_assistant_text"] == "terminal after reconnect"
+    assert result["provider_model_receipt"]["thinking_effort"] == "xhigh"
     assert result["recovery"]["ambiguous_replay_suppressed"] is True
     assert any(event.get("classification") == "websocket_failure" for event in result["recovery"]["events"])
     attempt = Path(result["raw_path_host"])

@@ -96,7 +96,7 @@ def _classify_http_status(status: int, *, has_conversation: bool) -> str:
         return "missing_conversation" if has_conversation else "not_found_transient"
     if status == 429:
         return "rate_limit"
-    if status in (502, 503):
+    if status == 408 or 500 <= status <= 599:
         return "server_transient_ambiguous"
     return "provider_rejected"
 
@@ -717,6 +717,10 @@ def admit_central_conversation(*, result_id: str, prompt: str, result: dict, att
         tool_history = {"raw_stream_sha256": "", "tool_events": [],
                         "finished_container_exec_results": 0, "provider_model_receipt": None}
         raw_source = None
+    if tool_history["provider_model_receipt"] is None:
+        # A broken SSE can still leave a complete provider terminal in the
+        # exact-turn hydration. Preserve its observed model/effort provenance.
+        tool_history["provider_model_receipt"] = result.get("provider_model_receipt")
     user_event = {"role": "user", "provider_message_id": "b4pt0r-user:" + result_id,
                   "source_index": -1, "content": prompt, "authorship": "operator-authored",
                   "source_content_complete": True}
@@ -929,17 +933,50 @@ def atomic_json(path: Path, value: dict) -> None:
             os.unlink(temporary)
 
 
-def _refresh_auth_context(args: argparse.Namespace, session):
-    """Reload provider credentials without ever replaying a conversation mutation."""
+def _refresh_auth_context(args: argparse.Namespace, session, previous_auth: dict | None = None):
+    """Reload local credentials, then try the historical browser-session source.
+
+    A stale Codex token may remain unchanged on disk even after a provider 403.
+    The old chat rotor obtained a fresh access token from the authenticated
+    ChatGPT browser's /api/auth/session. Keep the same account when switching
+    sources, and only use this while reads or a proven pre-accept rejection can
+    be retried. An ambiguous conversation POST is never replayed here.
+    """
     try:
         session.close()
     except Exception:
         pass
-    if args.auth_source == "codex":
-        return codex_identity()
-    refreshed = new_session(Path(args.chrome_profile).expanduser(), args.impersonate)
-    auth = identity(refreshed)
-    return refreshed, auth, device_id_from_cookies(refreshed)
+    sources = ("codex", "chrome") if args.auth_source == "codex" else ("chrome", "codex")
+    stale_token = str((previous_auth or {}).get("access_token") or "")
+    expected_account = str((previous_auth or {}).get("account_id") or "")
+    unchanged = None
+    failures = []
+    for source in sources:
+        candidate = None
+        try:
+            if source == "codex":
+                candidate, auth, device_id = codex_identity()
+            else:
+                candidate = new_session(Path(args.chrome_profile).expanduser(), args.impersonate)
+                auth = identity(candidate)
+                device_id = device_id_from_cookies(candidate)
+                auth["source"] = "browser_auth_session"
+            if expected_account and auth["account_id"] != expected_account:
+                raise CapabilityError("auth_account_mismatch", "refreshed provider account differs from original account")
+            if stale_token and auth["access_token"] == stale_token and source == sources[0]:
+                unchanged = (candidate, auth, device_id)
+                candidate = None
+                continue
+            if unchanged is not None:
+                unchanged[0].close()
+            return candidate, auth, device_id
+        except Exception as exc:
+            failures.append(f"{source}:{type(exc).__name__}")
+            if candidate is not None:
+                candidate.close()
+    if unchanged is not None:
+        return unchanged
+    raise CapabilityError("auth_refresh_unavailable", "local provider auth sources unavailable: " + ",".join(failures))
 
 
 def _hydrate_with_recovery(
@@ -969,7 +1006,7 @@ def _hydrate_with_recovery(
             }
             if exc.status in (401, 403) and auth_refreshes < SAFE_AUTH_REFRESHES:
                 auth_refreshes += 1
-                session, auth, device_id = _refresh_auth_context(args, session)
+                session, auth, device_id = _refresh_auth_context(args, session, auth)
                 event["action"] = "authentication_refreshed"
                 events.append(event)
                 continue
@@ -986,8 +1023,9 @@ def _hydrate_with_recovery(
                 events.append(event)
                 time.sleep(delay)
                 continue
-            if exc.status in (502, 503) and attempt < max_attempts:
-                delay = min(float(attempt), 2.0)
+            if (exc.status == 408 or 500 <= exc.status <= 599) and attempt < max_attempts:
+                delay = (_retry_after_seconds(exc.headers) if any(
+                    str(key).lower() == "retry-after" for key in exc.headers) else min(float(attempt), 2.0))
                 event.update({"action": "retry_safe_read", "delay_seconds": delay})
                 events.append(event)
                 time.sleep(delay)
@@ -1029,8 +1067,9 @@ def _reconcile_turn(
         last_state = read_state
         if conversation is not None:
             messages = branch_messages(conversation)
-            saw_user = any(str(message.get("id") or "") == user_message_id for message in messages)
-            if saw_user:
+            present = any(str(message.get("id") or "") == user_message_id for message in messages)
+            saw_user = saw_user or present
+            if present:
                 try:
                     terminal = terminal_response_from_hydration(conversation, user_message_id)
                 except CapabilityError as exc:
@@ -1048,6 +1087,7 @@ def _reconcile_turn(
                         "conversation_id": conversation_id,
                         "assistant_message_id": terminal.get("assistant_message_id"),
                         "assistant_text": terminal.get("assistant_text") or "",
+                        "provider_model_receipt": terminal.get("provider_model_receipt"),
                         "events": events,
                         "state": "provider_accepted_recovered",
                     }, session, auth, device_id
@@ -1098,7 +1138,7 @@ def discover_recent_turn(
                 event = {"phase": operation, "attempt": attempt, "http_status": exc.status}
                 if exc.status in (401, 403) and attempt == 1:
                     try:
-                        session, auth, device_id = _refresh_auth_context(args, session)
+                        session, auth, device_id = _refresh_auth_context(args, session, auth)
                     except Exception as refresh_error:
                         event["refresh_error"] = type(refresh_error).__name__
                     else:
@@ -1110,6 +1150,12 @@ def discover_recent_turn(
                     event.update({"action": "defer_get", "retry_after_seconds": delay})
                     events.append(event)
                     return None, {"state": "rate_limited", "retry_after_seconds": delay}
+                if exc.status == 408 or 500 <= exc.status <= 599:
+                    delay = (_retry_after_seconds(exc.headers) if any(
+                        str(key).lower() == "retry-after" for key in exc.headers) else 60)
+                    event.update({"action": "defer_get", "retry_after_seconds": delay})
+                    events.append(event)
+                    return None, {"state": "read_transient", "retry_after_seconds": delay}
                 event["action"] = "retry_get_later"
                 events.append(event)
                 return None, {"state": "read_transient", "retry_after_seconds": 60}
@@ -1138,7 +1184,7 @@ def discover_recent_turn(
         conversation, issue = read("hydrate", lambda cid=conversation_id: hydrate_conversation(
             session, auth, cid, device_id=device_id, timeout=12))
         if issue:
-            if issue["state"] == "rate_limited":
+            if issue["state"] in {"rate_limited", "read_transient"}:
                 return {**issue, "events": events, "next_offset": offset}, session, auth, device_id
             continue
         messages = branch_messages(conversation)
@@ -1158,6 +1204,7 @@ def discover_recent_turn(
                 "terminal": True, "conversation_id": conversation_id,
                 "assistant_message_id": terminal.get("assistant_message_id"),
                 "assistant_text": terminal.get("assistant_text") or "",
+                "provider_model_receipt": terminal.get("provider_model_receipt"),
                 "events": events, "next_offset": offset}, session, auth, device_id
     return {"state": "not_found_in_recent", "accepted": False, "terminal": False,
             "events": events, "next_offset": next_offset,
@@ -1219,7 +1266,21 @@ def terminal_response_from_hydration(conversation: dict, user_message_id: str) -
         "assistant_message": terminal,
         "assistant_message_id": terminal.get("id"),
         "assistant_text": message_text(terminal),
+        "provider_model_receipt": _hydrated_model_receipt(terminal),
     }
+
+
+def _hydrated_model_receipt(message: dict) -> dict | None:
+    metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+    fields = {key: str(metadata[key]) for key in
+              ("model_slug", "resolved_model_slug", "default_model_slug", "thinking_effort")
+              if isinstance(metadata.get(key), str) and metadata[key]}
+    if not fields:
+        return None
+    raw = json.dumps(message, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {"source": "provider_hydrated_terminal_message",
+            "hydrated_message_sha256": hashlib.sha256(raw).hexdigest(),
+            "terminal_assistant_message_id": str(message.get("id") or ""), **fields}
 
 
 def download_interpreter_artifacts(
@@ -1608,16 +1669,29 @@ def summarize_sse(raw: bytes, expected_user_message_id: str) -> dict:
 
 def health(args: argparse.Namespace) -> dict:
     if args.auth_source == "codex":
-        session, auth, device_id = codex_identity()
-        sentinel_headers(session, auth, device_id=device_id)
+        try:
+            session, auth, device_id = codex_identity()
+        except CapabilityError:
+            session = new_session(Path(args.chrome_profile).expanduser(), args.impersonate)
+            auth = identity(session)
+            auth["source"] = "browser_auth_session"
+            device_id = device_id_from_cookies(session)
+        try:
+            sentinel_headers(session, auth, device_id=device_id)
+        except ProviderHTTPError as exc:
+            if exc.status not in (401, 403):
+                raise
+            session, auth, device_id = _refresh_auth_context(args, session, auth)
+            sentinel_headers(session, auth, device_id=device_id)
     else:
         session = new_session(Path(args.chrome_profile).expanduser(), args.impersonate)
         auth = identity(session)
+        auth["source"] = "browser_auth_session"
         device_id = device_id_from_cookies(session)
     return {
         "ok": True,
         "state": "ready",
-        "transport": "codex_desktop_auth_http" if args.auth_source == "codex" else "host_chrome_state_http",
+        "transport": "codex_desktop_auth_http" if auth.get("source") == "codex_desktop_auth" else "host_chrome_state_http",
         "account_id_present": bool(auth["account_id"]),
         "token_present": bool(auth["access_token"]),
         "device_id_present": bool(device_id),
@@ -1649,6 +1723,7 @@ def send(args: argparse.Namespace) -> dict:
     else:
         session = new_session(Path(args.chrome_profile).expanduser(), args.impersonate)
         auth = identity(session)
+        auth["source"] = "browser_auth_session"
         device_id = device_id_from_cookies(session)
         transport = "host_chrome_state_http"
 
@@ -1700,6 +1775,7 @@ def send(args: argparse.Namespace) -> dict:
     state = "provider_rejected"
     ambiguous_replay_suppressed = False
     terminal_from_hydration: dict | None = None
+    provider_retry_after_seconds = 0.0
 
     while True:
         # Prepare/sentinel calls do not submit the user message, so bounded retries are safe here.
@@ -1714,7 +1790,7 @@ def send(args: argparse.Namespace) -> dict:
             }
             if exc.status in (401, 403) and auth_refreshes < SAFE_AUTH_REFRESHES:
                 auth_refreshes += 1
-                session, auth, device_id = _refresh_auth_context(args, session)
+                session, auth, device_id = _refresh_auth_context(args, session, auth)
                 event["action"] = "authentication_refreshed"
                 recovery_events.append(event)
                 continue
@@ -1725,9 +1801,11 @@ def send(args: argparse.Namespace) -> dict:
                 recovery_events.append(event)
                 time.sleep(delay)
                 continue
-            if exc.status in (502, 503) and prepare_server_retries < SAFE_PREPARE_SERVER_RETRIES:
+            if (exc.status == 408 or 500 <= exc.status <= 599) and prepare_server_retries < SAFE_PREPARE_SERVER_RETRIES:
                 prepare_server_retries += 1
-                delay = min(float(prepare_server_retries), 2.0)
+                delay = (_retry_after_seconds(exc.headers) if any(
+                    str(key).lower() == "retry-after" for key in exc.headers)
+                    else min(float(prepare_server_retries), 2.0))
                 event.update({"action": "retry_prepare", "delay_seconds": delay})
                 recovery_events.append(event)
                 time.sleep(delay)
@@ -1842,7 +1920,7 @@ def send(args: argparse.Namespace) -> dict:
             if http_status in (401, 403) and auth_refreshes < SAFE_AUTH_REFRESHES:
                 # Explicit auth rejection means the mutation was not accepted; replay after refresh is safe.
                 auth_refreshes += 1
-                session, auth, device_id = _refresh_auth_context(args, session)
+                session, auth, device_id = _refresh_auth_context(args, session, auth)
                 event["action"] = "authentication_refreshed_then_safe_retry"
                 recovery_events.append(event)
                 continue
@@ -1854,38 +1932,20 @@ def send(args: argparse.Namespace) -> dict:
                 recovery_events.append(event)
                 time.sleep(delay)
                 continue
-            if http_status == 404:
-                if args.conversation_id:
-                    conversation, session, auth, device_id, read_events, read_state = _hydrate_with_recovery(
-                        args, session, auth, device_id, args.conversation_id, max_attempts=2
-                    )
-                    recovery_events.extend(read_events)
-                    if read_state == "missing_conversation":
-                        event["action"] = "missing_conversation_confirmed_no_replay"
-                        recovery_events.append(event)
-                        state = "missing_conversation"
-                        break
-                    if conversation is not None and not_found_retries < SAFE_404_RETRIES:
-                        not_found_retries += 1
-                        event["action"] = "conversation_exists_safe_retry"
-                        recovery_events.append(event)
-                        continue
-                elif not_found_retries < SAFE_404_RETRIES:
-                    not_found_retries += 1
-                    event["action"] = "endpoint_not_found_safe_retry"
-                    recovery_events.append(event)
-                    continue
-                recovery_events.append(event)
-                state = "missing_conversation" if args.conversation_id else "provider_rejected"
-                break
-            if http_status in (502, 503):
-                # Gateway/server errors can be emitted after upstream acceptance. Never replay the mutation.
+            if http_status == 404 or http_status == 408 or 500 <= http_status <= 599:
+                # An intermediary can emit 404/408/5xx after upstream acceptance.
+                # Even an existing conversation is insufficient proof that this
+                # *turn* was rejected. Reconcile the exact user ID before any
+                # future mutation; a negative read cannot authorize a replay.
                 ambiguous_replay_suppressed = True
                 event["action"] = "mutation_replay_suppressed_reconcile_only"
+                if any(str(key).lower() == "retry-after" for key in (getattr(response, "headers", {}) or {})):
+                    provider_retry_after_seconds = _retry_after_seconds(response.headers)
+                    event["retry_after_seconds"] = provider_retry_after_seconds
                 recovery_events.append(event)
                 state = "ambiguous_acceptance"
                 conversation_id = args.conversation_id or _extract_conversation_id(raw)
-                if conversation_id:
+                if conversation_id and provider_retry_after_seconds <= 0:
                     reconciliation, session, auth, device_id = _reconcile_turn(
                         args,
                         session,
@@ -1906,6 +1966,8 @@ def send(args: argparse.Namespace) -> dict:
                             "terminal_assistant_text": reconciliation.get("assistant_text") or "",
                             "terminal_assistant_message_id": reconciliation.get("assistant_message_id"),
                         })
+                    elif http_status == 404 and reconciliation.get("state") == "missing_conversation":
+                        state = "missing_conversation"
                 break
             recovery_events.append(event)
             state = "authentication_failed" if http_status in (401, 403) else (
@@ -2051,11 +2113,13 @@ def send(args: argparse.Namespace) -> dict:
         state = "provider_accepted_recovered" if summary.get("assistant_end_turn") else "provider_accepted_unfinished"
     result = {
         **receipt,
+        "transport": "codex_desktop_auth_http" if auth.get("source") == "codex_desktop_auth" else "host_chrome_state_http",
         "conversation_id": conversation_id or None,
         "ok": accepted,
         "state": state,
         "http_status": http_status,
         "provider_request_id": provider_request_id,
+        "retry_after_seconds": provider_retry_after_seconds,
         "completed_at": time.time(),
         "raw_path_host": str(raw_path),
         "receipt_path_host": str(receipt_path),
@@ -2067,6 +2131,7 @@ def send(args: argparse.Namespace) -> dict:
         "assistant_terminal": bool(summary.get("assistant_end_turn")),
         "terminal_assistant_text": terminal_text,
         "terminal_assistant_message_id": summary.get("terminal_assistant_message_id"),
+        "provider_model_receipt": (terminal_from_hydration or {}).get("provider_model_receipt"),
         "hydrated_branch_reconciled": bool(summary.get("hydrated_branch_reconciled")),
         "hydration_error": None,
         "downloaded_files": downloaded_files,
@@ -2228,6 +2293,7 @@ def reconcile_queue_job(args: argparse.Namespace) -> dict:
             "assistant_terminal": terminal,
             "terminal_assistant_text": found.get("assistant_text") or "",
             "terminal_assistant_message_id": found.get("assistant_message_id"),
+            "provider_model_receipt": found.get("provider_model_receipt") or result.get("provider_model_receipt"),
             "completed_at": time.time(),
             "recovery": {"ambiguous_replay_suppressed": True,
                          "method": "exact_user_message_recent_get", "events": found.get("events") or []},

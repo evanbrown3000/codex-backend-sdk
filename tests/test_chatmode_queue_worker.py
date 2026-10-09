@@ -70,6 +70,43 @@ def test_stable_send_identity_is_device_independent():
     assert module.stable_user_message_id('job-1') != module.stable_user_message_id('job-2')
 
 
+def test_provider_stream_requires_paired_builtin_tool_result(tmp_path):
+    module = worker()
+    messages = [
+        {'id': 'call-native', 'author': {'role': 'assistant'}, 'recipient': 'functions.exec'},
+        {'id': 'result-native', 'author': {'role': 'tool', 'name': 'functions.exec'},
+         'metadata': {'parent_id': 'call-native'}},
+        {'id': 'call-plugin', 'author': {'role': 'assistant'}, 'recipient': 'api_tool.call_tool'},
+        {'id': 'result-plugin', 'author': {'role': 'tool', 'name': 'api_tool.call_tool'},
+         'metadata': {'parent_id': 'call-plugin'}},
+        {'id': 'assistant-claim', 'author': {'role': 'assistant'}, 'recipient': 'all',
+         'content': {'parts': ['I ran code in my sandbox.']}},
+    ]
+    raw = '\n'.join('data: ' + json.dumps({'message': row}) for row in messages).encode()
+    digest = hashlib.sha256(raw).hexdigest()
+    path = tmp_path / 'stream.sse'
+    path.write_bytes(raw)
+    assert module.provider_tool_evidence(raw, expected_sha256=digest) == [
+        {'kind': 'provider_observed_functions_exec', 'ref': 'result-native',
+         'call_ref': 'call-native', 'raw_stream_sha256': digest}]
+    assert module.tool_evidence_from_result({'raw_path_host': str(path), 'raw_sha256': digest})[0]['ref'] == 'result-native'
+    assert module.tool_evidence_from_result({'raw_path_host': str(path), 'raw_sha256': '0' * 64}) == []
+
+
+def test_provider_stream_reconstructs_tool_messages_from_patches():
+    module = worker()
+    frames = [
+        {'c': 0, 'p': '', 'o': 'add', 'v': {'message': {
+            'id': 'call', 'author': {'role': 'assistant'}, 'recipient': 'all'}}},
+        {'c': 1, 'p': '/message/recipient', 'o': 'replace', 'v': 'functions.exec'},
+        {'c': 2, 'p': '', 'o': 'add', 'v': {'message': {
+            'id': 'result', 'author': {'role': 'tool', 'name': 'functions.exec'},
+            'metadata': {'parent_id': 'call'}}}},
+    ]
+    raw = '\n'.join('data: ' + json.dumps(frame) for frame in frames).encode()
+    assert [row['ref'] for row in module.provider_tool_evidence(raw)] == ['result']
+
+
 def test_sender_receives_queue_selected_model_and_effort(tmp_path):
     module = worker()
     job = {'id': 'job-1', 'model': 'gpt-route-selected', 'reasoning_effort': 'xhigh'}

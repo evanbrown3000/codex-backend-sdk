@@ -8,6 +8,7 @@ An ambiguous send is never replayed; the exact receipt is recovered instead.
 from __future__ import annotations
 
 import argparse
+import copy
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -58,6 +59,106 @@ DEVICE_ID = os.environ.get("COGNILODE_CHATMODE_DEVICE_ID", "evanpc")
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 DEVICE_PRIORITY = int(os.environ.get("COGNILODE_CHATMODE_DEVICE_PRIORITY", "100"))
 STAGE_ROOT = ROOT / "staged-attachments"
+
+
+def provider_tool_evidence(raw: bytes, *, expected_sha256: str = "") -> list[dict]:
+    """Identify completed provider tool calls from the actual ChatGPT stream.
+
+    ChatGPT streams message snapshots and JSON-pointer patches. This only emits
+    metadata for an assistant tool call with a matching provider tool result;
+    it does not treat a model's textual claim of sandbox work as execution.
+    An opaque or changed provider format yields no evidence, not a fabricated
+    native-compute claim. The raw stream hash lets a reviewer recheck it later.
+    """
+    raw_sha = hashlib.sha256(raw).hexdigest()
+    if expected_sha256 and raw_sha != expected_sha256:
+        raise ValueError("provider stream SHA-256 mismatch")
+    state = None
+    inherited_path = ""
+    inherited_operation = "add"
+    messages: dict[str, dict] = {}
+
+    def patch(target, change):
+        path = str(change.get("p", change.get("path", "")))
+        operation = str(change.get("o", change.get("op", "replace")))
+        value = change.get("v", change.get("value"))
+        if not path:
+            return copy.deepcopy(value) if operation in {"add", "replace"} else target
+        parts = [p.replace("~1", "/").replace("~0", "~") for p in path.split("/")[1:]]
+        parent = target
+        try:
+            for part in parts[:-1]:
+                parent = parent[int(part)] if isinstance(parent, list) else parent[part]
+            leaf = parts[-1]
+            if isinstance(parent, list):
+                if operation == "remove": parent.pop(int(leaf))
+                elif operation == "add" and leaf == "-": parent.append(copy.deepcopy(value))
+                elif operation == "append": parent[int(leaf)] += value
+                else:
+                    index = int(leaf)
+                    if operation == "add" and index == len(parent): parent.append(copy.deepcopy(value))
+                    else: parent[index] = copy.deepcopy(value)
+            elif isinstance(parent, dict):
+                if operation == "remove": parent.pop(leaf, None)
+                elif operation == "append" and isinstance(parent.get(leaf), (str, list)):
+                    parent[leaf] += value
+                else: parent[leaf] = copy.deepcopy(value)
+        except (IndexError, KeyError, TypeError, ValueError):
+            return target
+        return target
+
+    def observe(value):
+        if isinstance(value, dict):
+            msg = value.get("message") if isinstance(value.get("message"), dict) else value
+            if isinstance(msg, dict) and isinstance(msg.get("author"), dict):
+                mid = msg.get("id")
+                if isinstance(mid, str) and mid:
+                    author = msg["author"]
+                    metadata = msg.get("metadata") or {}
+                    messages[mid] = {"role": author.get("role"),
+                                     "name": author.get("name"),
+                                     "recipient": msg.get("recipient"),
+                                     "parent_id": metadata.get("parent_id") if isinstance(metadata, dict) else None}
+                    return
+            for key, child in value.items():
+                if key not in {"content", "metadata"}: observe(child)
+        elif isinstance(value, list):
+            for child in value: observe(child)
+
+    for line in raw.decode("utf-8", "replace").splitlines():
+        if line.startswith("data:"): line = line[5:].strip()
+        if not line.startswith("{"): continue
+        try: event = json.loads(line)
+        except json.JSONDecodeError: continue
+        if not isinstance(event, dict): continue
+        if "v" in event and any(k in event for k in ("c", "o", "p")):
+            inherited_path = str(event.get("p", inherited_path))
+            inherited_operation = str(event.get("o", inherited_operation))
+            if inherited_operation == "patch" and isinstance(event["v"], list):
+                for change in event["v"]:
+                    if isinstance(change, dict): state = patch(state, change)
+            else: state = patch(state, {"p": inherited_path, "o": inherited_operation, "v": event["v"]})
+        observe(event)
+        if state is not None: observe(state)
+
+    calls = {}
+    results = {}
+    for mid, msg in messages.items():
+        role = msg.get("role")
+        recipient = msg.get("recipient")
+        if role == "assistant" and isinstance(recipient, str) and recipient not in {"", "all"}:
+            calls[mid] = recipient
+        if role == "tool" and isinstance(msg.get("name"), str):
+            results[mid] = (msg["name"], str(msg.get("parent_id") or ""))
+    evidence = []
+    for result_id, (name, parent_id) in results.items():
+        if not parent_id or calls.get(parent_id) != name: continue
+        # api_tool.call_tool invokes an external plugin, so do not label it as
+        # provider-native execution. The built-in functions.exec is distinct.
+        if name != "functions.exec": continue
+        evidence.append({"kind": "provider_observed_functions_exec", "ref": result_id,
+                         "call_ref": parent_id, "raw_stream_sha256": raw_sha})
+    return sorted(evidence, key=lambda row: row["ref"])
 
 
 def atomic_json(path: Path, value: dict) -> None:
@@ -536,6 +637,20 @@ def result_for_job(job_id: str) -> dict | None:
     return max(candidates, key=lambda row: row[0])[1]
 
 
+def tool_evidence_from_result(value: dict) -> list[dict]:
+    path_text = value.get("raw_path_host") or value.get("raw_path")
+    digest = value.get("raw_sha256")
+    if not isinstance(path_text, str) or not isinstance(digest, str):
+        return []
+    path = Path(path_text)
+    try:
+        if not path.is_file() or path.stat().st_size > 50 * 1024 * 1024:
+            return []
+        return provider_tool_evidence(path.read_bytes(), expected_sha256=digest)
+    except (OSError, ValueError):
+        return []
+
+
 def fence(job: dict) -> dict:
     return {"job_id": job["id"], "worker_id": job["claimed_by"],
             "lease_token": job["lease_token"], "lease_generation": job["lease_generation"]}
@@ -554,6 +669,7 @@ def complete_from_result(job: dict, value: dict) -> bool:
     evidence = [{"kind": "provider_conversation", "ref": conversation_id},
                 {"kind": "central_conversation_readback", "ref": conversation_id}]
     evidence.extend({"kind": "chatgpt_sandbox_artifact", "ref": row["sha256"], "path": row["path"]} for row in files)
+    evidence.extend(tool_evidence_from_result(value))
     if decisionx_result is not None:
         evidence.append({"kind":"decisionx_label_admission",**decisionx_result})
 

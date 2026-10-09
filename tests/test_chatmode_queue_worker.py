@@ -185,6 +185,61 @@ def test_decisionx_scan_migrates_text_spool_to_source_refs(tmp_path):
     assert 'private source text' not in (tmp_path / 'scan.json').read_text()
 
 
+def test_decisionx_batch_waits_for_500_drive_verified_multi_year_sources(tmp_path):
+    module = worker()
+    module.DX_HOME = tmp_path
+    class Bridge:
+        @staticmethod
+        def shared_stock_census(_post, minimum):
+            assert minimum == 500
+            return {'multi_year_ready': False, 'distinct_complete': 42, 'span_days': 36}
+    class Sender:
+        @staticmethod
+        def operator_memory_post(_body):
+            raise AssertionError('a sub-500 population must not scan or enqueue')
+    module._dx_bridge = lambda: Bridge()
+    module.sender = Sender()
+    module.decisionx_batch_pump()
+    assert not (tmp_path / 'progress.sqlite3').exists()
+    assert json.loads((tmp_path / 'scan.json').read_text())['spool'] == []
+
+
+def test_decisionx_native_batch_verifies_source_and_binds_returned_compute(tmp_path):
+    module = worker()
+    module.DX_HOME = tmp_path
+    source = {'provider': 'openai-codex', 'conversation_id': 'conversation-1',
+              'events': [{'id': 'u1', 'role': 'user', 'content': 'Research the actual requirements in the source history.'},
+                         {'id': 'a1', 'role': 'assistant', 'content': 'I found the source commits and compared their behavior.'}]}
+    episode = module._dx_extract(source)[0]
+    input_zip = module._dx_input_zip([episode], 'a' * 32)
+    with zipfile.ZipFile(input_zip) as archive:
+        assert archive.read('RUN_ME.py')
+        assert json.loads(archive.read('manifest.json'))['schema'] == 'decisionx.iae.batch.v3'
+    script = SCRIPT.parent / 'decisionx_native_batch.py'
+    loader = importlib.machinery.SourceFileLoader('decisionx_native_batch_test', str(script))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    native = importlib.util.module_from_spec(spec)
+    loader.exec_module(native)
+    computed = native.run(input_zip, tmp_path / 'native')
+    assert computed['episode_count'] == 1
+    output = tmp_path / 'labels.zip'
+    with zipfile.ZipFile(output, 'w') as archive:
+        archive.write(tmp_path / 'native' / 'NATIVE_COMPUTE.json', 'NATIVE_COMPUTE.json')
+        archive.write(tmp_path / 'native' / 'neighbors.json', 'neighbors.json')
+        archive.writestr('decisionx_iae_labels.jsonl', '{}\n')
+        archive.writestr('EXTERNAL_EFFECT_INSTRUCTIONS.md', 'Admit verified labels into shared search.\n')
+    input_sha = hashlib.sha256(input_zip.read_bytes()).hexdigest()
+    output_sha = hashlib.sha256(output.read_bytes()).hexdigest()
+    job = {'id': 'decisionx-iae-' + 'a' * 32, 'phase': 'iae_label_batch',
+           'attachment_refs': [{'ref': str(input_zip), 'sha256': input_sha}]}
+    value = {'central_conversation_store': {'provider_structured_uploads': [{'sha256': input_sha}]}}
+    files = [{'path': str(output), 'name': 'labels.zip', 'sha256': output_sha}]
+    native_proof = [{'kind': 'provider_observed_native_exec'}]
+    assert module._dx_native_preflight(job, files, value, native_proof) is None
+    assert module._dx_native_preflight(job, files, value, []) == 'missing_provider_observed_native_exec'
+    assert module._dx_native_preflight(job, files, {'central_conversation_store': {}}, native_proof) == 'provider_upload_proof_missing'
+
+
 def test_decisionx_batch_resolves_exact_source_and_drops_changed_episode():
     module = worker()
     source = {'provider': 'chatgpt.com', 'conversation_id': 'conversation-1',
@@ -200,6 +255,10 @@ def test_decisionx_batch_resolves_exact_source_and_drops_changed_episode():
         {**module._dx_ref(episode), 'source_sha256': '0' * 64}])
     assert selected == [episode]
     assert len(stale) == 1
+    selected, stale = module._dx_resolve([module._dx_ref(episode)],
+        complete_source=lambda _index, _read: False)
+    assert selected == []
+    assert stale == [module._dx_ref(episode)]
 
 
 def test_decisionx_transport_input_retired_only_after_central_admission(tmp_path):

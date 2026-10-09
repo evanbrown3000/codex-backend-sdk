@@ -344,11 +344,20 @@ from contextlib import contextmanager
 
 DX_HOME = ROOT / "decisionx-label-batches"
 DX_TARGET = 128
-DX_MIN = 64
-DX_LOWEST_PRIORITY = -1000000
+DX_MIN = 16
+DX_TAIL_MIN = 8
+DX_INPUT_CHAR_BUDGET = 70_000  # about 20K tokens, before ZIP compression
+DX_SCAN_INTERVAL_SECONDS = 600
+DX_PRIORITY = 20
 DX_PROMPT = """You are a ChatGPT.com Chat-mode DecisionX labeling employee. Read the attached
 episodes.jsonl completely. It contains MANY source-linked candidate IAE episodes
 from the existing conversation memory, never a replacement memory database.
+
+Run the attached RUN_ME.py against the attached input ZIP in YOUR native
+ChatGPT.com sandbox. It verifies every episode and computes lexical neighbors.
+Use its neighbors.json as supporting evidence while YOU reason semantically.
+Do not move this computation to a remote machine. Include NATIVE_COMPUTE.json
+and neighbors.json unchanged in your single returned ZIP, alongside your labels.
 
 For EVERY episode, infer the user's Intent/Instruction (I), the assistant's
 actual Action (A), and subsequent Evidence/Evaluation (E); unknowns must stay
@@ -407,12 +416,23 @@ def _dx_load():
     return {"offset": 0, "spool": [], "last_scan": 0.0}
 
 
+def _dx_bridge():
+    import importlib.machinery
+    import importlib.util
+    bridge_path = Path(__file__).resolve().parent / "cognilode-root-plan-handoff"
+    loader = importlib.machinery.SourceFileLoader("decisionx_shared_stock_gate", str(bridge_path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    bridge = importlib.util.module_from_spec(spec)
+    loader.exec_module(bridge)
+    return bridge
+
+
 def _dx_ref(episode):
     return {key: episode[key] for key in
             ("episode_id", "source_sha256", "provider", "conversation_id")}
 
 
-def _dx_resolve(refs):
+def _dx_resolve(refs, *, complete_source=None):
     """Rehydrate exact episodes from the shared store only for a due batch."""
     by_conversation = {}
     selected = []
@@ -424,8 +444,12 @@ def _dx_resolve(refs):
                                                   "conversation_id": key[1]})
             if not result.get("ok"):
                 raise RuntimeError("DecisionX source conversation unavailable for batch")
-            by_conversation[key] = {e["episode_id"]: e for e in
-                                    _dx_extract(result.get("conversation") or {})}
+            if complete_source is not None and not complete_source(
+                    {"provider": key[0], "conversation_id": key[1]}, result):
+                by_conversation[key] = {}
+            else:
+                by_conversation[key] = {e["episode_id"]: e for e in
+                                        _dx_extract(result.get("conversation") or {})}
         episode = by_conversation[key].get(ref["episode_id"])
         if episode is None or episode["source_sha256"] != ref["source_sha256"]:
             stale.append(ref)
@@ -470,13 +494,17 @@ def _dx_input_zip(episodes, batch):
     folder.mkdir(parents=True,exist_ok=True)
     path = folder / (batch + ".zip")
     if not path.is_file():
-        manifest = {"schema":"decisionx.iae.batch.v2","batch_id":batch,
+        runner = Path(__file__).resolve().parent / "decisionx_native_batch.py"
+        runner_raw = runner.read_bytes()
+        manifest = {"schema":"decisionx.iae.batch.v3","batch_id":batch,
                     "episode_count":len(episodes),
+                    "runner_sha256":hashlib.sha256(runner_raw).hexdigest(),
                     "episodes":[{"episode_id":e["episode_id"],"source_sha256":e["source_sha256"]}
                                 for e in episodes]}
         with zipfile.ZipFile(path,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=7) as archive:
             archive.writestr("manifest.json",json.dumps(manifest,ensure_ascii=False))
             archive.writestr("episodes.jsonl","".join(json.dumps(e,ensure_ascii=False)+"\n" for e in episodes))
+            archive.writestr("RUN_ME.py",runner_raw)
     if path.stat().st_size > MAX_ATTACHMENT_BYTES:
         raise ValueError("DecisionX batch exceeds attachment limit")
     return path
@@ -507,14 +535,49 @@ def _dx_retire_completed_inputs(limit=20):
             continue
     return retired
 
+
+def _dx_reconcile_queued(db):
+    """A cancelled/failed old batch must not pin local source refs forever."""
+    batches = [row[0] for row in db.execute(
+        "SELECT DISTINCT batch FROM episodes WHERE state='queued' AND batch IS NOT NULL LIMIT 100")]
+    released = 0
+    for batch in batches:
+        result = sender.operator_memory_post({"operation": "get_job", "job_id": "decisionx-iae-" + batch})
+        job = result.get("job") or {}
+        if job.get("state") not in {"cancelled", "failed", "complete"}:
+            continue
+        evidence = job.get("effect_evidence") or []
+        if job.get("state") == "complete" and any(
+                isinstance(row, dict) and row.get("kind") == "decisionx_label_admission"
+                for row in evidence):
+            continue
+        cursor = db.execute("UPDATE episodes SET state='retry',retry_after=0,updated=? "
+                            "WHERE state='queued' AND batch=?", (time.time(), batch))
+        released += cursor.rowcount
+    return released
+
 def decisionx_batch_pump():
     """Incrementally create MULTI-episode Chat-mode jobs in the ONE hosted D1 queue."""
     state = _dx_load()
-    if time.time() - float(state.get("last_scan") or 0) < 240: return
+    if time.time() - float(state.get("last_scan") or 0) < DX_SCAN_INTERVAL_SECONDS: return
     state["last_scan"] = time.time()
+    # Do not build a private micro-corpus from whatever happens to have been
+    # ingested on this device. A descriptor batch is a slice of the already
+    # substantial, independently Drive-verified shared conversation stock.
+    bridge = _dx_bridge()
+    stock = bridge.shared_stock_census(sender.operator_memory_post, minimum=500)
+    if not stock.get("multi_year_ready"):
+        atomic_json(DX_HOME / "scan.json", state)
+        event("decisionx_batch_deferred_shared_stock", distinct_complete=stock.get("distinct_complete"),
+              span_days=stock.get("span_days"))
+        return
+    verified = {(row["provider"], row["conversation_id"])
+                for row in stock.get("verified_source_refs") or []}
     retired = _dx_retire_completed_inputs()
     if retired: event("decisionx_transport_inputs_retired", count=retired)
     with _dx_connection() as db:
+        released = _dx_reconcile_queued(db)
+        if released: event("decisionx_cancelled_batch_refs_released", episodes=released)
         pending = list(state.get("spool") or [])
         known = {e["episode_id"] for e in pending}
         cursor = int(state.get("offset") or 0)
@@ -532,9 +595,10 @@ def decisionx_batch_pump():
             for index in rows:
                 if len(pending) >= DX_TARGET: break
                 provider, cid = index.get("provider"), index.get("conversation_id")
-                if not provider or not cid: continue
+                if (provider, cid) not in verified: continue
                 result = sender.operator_memory_post({"operation":"read","provider":provider,"conversation_id":cid})
                 if not result.get("ok"): continue
+                if bridge._complete_source(index, result) is None: continue
                 for episode in _dx_extract(result.get("conversation") or {}):
                     eid, sha = episode["episode_id"], episode["source_sha256"]
                     old = db.execute("SELECT source_sha,state,retry_after FROM episodes WHERE id=?",(eid,)).fetchone()
@@ -550,21 +614,33 @@ def decisionx_batch_pump():
         state["offset"] = cursor
         state["spool"] = pending
         # Defer tail work until there are enough candidates; avoid micro-labeling calls.
-        if len(pending) < DX_MIN and not (end_of_corpus and len(pending)>=16):
+        if len(pending) < DX_MIN and not (end_of_corpus and len(pending) >= DX_TAIL_MIN):
             atomic_json(DX_HOME/"scan.json",state)
             event("decisionx_batch_deferred",episodes=len(pending),cursor=cursor)
             return
-        selected, stale = _dx_resolve(pending[:DX_TARGET])
+        selected, stale = _dx_resolve(pending[:DX_TARGET],
+            complete_source=lambda index, result: bridge._complete_source(index, result) is not None)
+        selected = [episode for episode in selected
+                    if (episode["provider"], episode["conversation_id"]) in verified]
         if stale:
             stale_ids = {(e["episode_id"], e["source_sha256"]) for e in stale}
             pending = [e for e in pending if (e["episode_id"],e["source_sha256"]) not in stale_ids]
             state["spool"] = pending
-        if len(selected) < DX_MIN and not (end_of_corpus and len(selected) >= 16):
+        if len(selected) < DX_MIN and not (end_of_corpus and len(selected) >= DX_TAIL_MIN):
             atomic_json(DX_HOME/"scan.json",state)
             event("decisionx_batch_deferred_after_source_change", episodes=len(selected), stale=len(stale))
             return
-        batch = hashlib.sha256("".join(e["episode_id"]+e["source_sha256"]
-                                   for e in selected).encode()).hexdigest()[:32]
+        bounded = []
+        char_count = 0
+        for episode in selected:
+            size = len(json.dumps(episode, ensure_ascii=False))
+            if bounded and char_count + size > DX_INPUT_CHAR_BUDGET: break
+            bounded.append(episode)
+            char_count += size
+        selected = bounded
+        batch_source = "drive-verified-v3:" + "".join(
+            e["episode_id"] + e["source_sha256"] for e in selected)
+        batch = hashlib.sha256(batch_source.encode()).hexdigest()[:32]
         srczip = _dx_input_zip(selected,batch)
         prompt = DX_PROMPT + "\nBatch identity: " + batch + "\nEpisode count: " + str(len(selected))
         digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
@@ -574,17 +650,20 @@ def decisionx_batch_pump():
             "provider":"chatgpt.com","prompt":prompt,
             "decisionx":{"authored_by":"DecisionX","decision_key":id_value,
                          "prompt_sha256":digest,"source_kind":"agent_memory_iae_batch"},
-            "priority":DX_LOWEST_PRIORITY,"project":"DecisionX",
+            "priority":DX_PRIORITY,"project":"DecisionX",
             "role":"historical-decision-labeler","phase":"iae_label_batch",
+            "reasoning_effort":"xhigh","model":"gpt-5-6-thinking",
             "taskflow_step":"iae-label-batch-"+batch,
             "assigned_employee":"DecisionX Chat-mode labeler",
             "attachment_refs":[{"ref":str(srczip),
                                 "sha256":hashlib.sha256(srczip.read_bytes()).hexdigest(),
                                 "kind":"iae_episode_batch"}],
             "reason":"low_priority_large_batch_semantic_descriptors"})
-        if not reply.get("ok"):
+        if not reply.get("ok") or (reply.get("job") or {}).get("state") not in {
+                "queued", "claimed", "effect_pending_read_recovery", "complete"}:
             atomic_json(DX_HOME/"scan.json",state)
-            raise RuntimeError("DecisionX enqueue failed: "+str(reply.get("error")))
+            raise RuntimeError("DecisionX enqueue was not retained as an actionable D1 job: "
+                               + str(reply.get("error") or (reply.get("job") or {}).get("state")))
         now = time.time()
         for e in selected:
             db.execute("""INSERT INTO episodes(id,source_sha,state,attempts,retry_after,batch,updated)
@@ -598,9 +677,9 @@ def decisionx_batch_pump():
         state["spool"] = [e for e in pending if (e["episode_id"],e["source_sha256"]) not in selected_ids]
         atomic_json(DX_HOME/"scan.json",state)
         event("decisionx_batch_queued",job_id=id_value,episodes=len(selected),
-              priority=DX_LOWEST_PRIORITY,idempotent=reply.get("idempotent",False))
+              priority=DX_PRIORITY,idempotent=reply.get("idempotent",False))
 
-def decisionx_admit_labels(job, files, conversation_id):
+def decisionx_admit_labels(job, files, conversation_id, *, preflight_error=None):
     """Admit actual returned semantic records into existing Agent Memory segments."""
     if job.get("phase") != "iae_label_batch": return None
     batch = str(job["id"]).removeprefix("decisionx-iae-")
@@ -611,9 +690,10 @@ def decisionx_admit_labels(job, files, conversation_id):
         sources = {r["episode_id"]:r for r in (json.loads(line) for line in archive.read("episodes.jsonl").decode("utf-8").splitlines() if line.strip())}
     expected = {r["episode_id"]:r["source_sha256"] for r in input_manifest["episodes"]}
     output = next((Path(r["path"]) for r in files if str(r["name"] or "").lower().endswith(".zip")),None)
-    label_error = None
+    label_error = preflight_error
     records = []
     try:
+        if preflight_error: raise ValueError(preflight_error)
         if output is None:
             raise ValueError("missing_label_output")
         with zipfile.ZipFile(output) as archive:
@@ -625,14 +705,26 @@ def decisionx_admit_labels(job, files, conversation_id):
         # A provider terminal result is real even if the labeling artifact was
         # malformed. Track failed semantic work and automatically requeue it.
         label_error = type(exc).__name__ + ":" + str(exc)[:140]
+    current_ids = set()
+    if records:
+        bridge = _dx_bridge()
+        current, _ = _dx_resolve([_dx_ref(src) for src in sources.values()],
+            complete_source=lambda index, result: bridge._complete_source(index, result) is not None)
+        current_ids = {(row["episode_id"], row["source_sha256"]) for row in current}
     selected, seen = [], set()
     for row in records:
         if not isinstance(row,dict): continue
         eid = str(row.get("episode_id") or "")
-        if eid in seen or expected.get(eid)!=row.get("source_sha256"): continue
+        if (eid in seen or expected.get(eid)!=row.get("source_sha256")
+                or (eid, expected.get(eid)) not in current_ids): continue
         i,a = row.get("i"),row.get("a")
-        if not isinstance(i,str) or not isinstance(a,str) or not i.strip() or not a.strip():continue
-        seen.add(eid)
+        if (not isinstance(i,str) or not isinstance(a,str) or len(i.strip()) < 20
+                or len(a.strip()) < 20 or not isinstance(row.get("embedding_text"),str)
+                or len(row["embedding_text"].strip()) < 30
+                or not isinstance(row.get("tags"),list)
+                or not isinstance(row.get("human_authorship_assessment"),str)
+                or not isinstance(row.get("uncertainty"),str)):
+            continue
         segment_id = "decisionx.iae." + hashlib.sha256((eid+expected[eid]).encode()).hexdigest()
         content = json.dumps(row,sort_keys=True,ensure_ascii=False)
         if len(content)>180000: continue
@@ -642,6 +734,7 @@ def decisionx_admit_labels(job, files, conversation_id):
                                   "action_turn_ids":[r.get("id") for r in src.get("action_turns") or []],
                                   "evaluation_turn_id":(src.get("next_user_turn") or {}).get("id")}
         content = json.dumps(row,sort_keys=True,ensure_ascii=False)
+        seen.add(eid)
         selected.append({"segment_id":segment_id,"kind":"IAE",
                          "source_key":str(src.get("provider"))+":"+str(src.get("conversation_id")),"author_class":"agent_derived",
                          "origin":"chatgpt.com:decisionx_iae_label",
@@ -672,7 +765,61 @@ def decisionx_admit_labels(job, files, conversation_id):
                        (now+cooldown,now,eid))
     event("decisionx_label_admitted",job_id=job["id"],label_error=label_error,requested=len(expected),
           accepted=len(seen),missing=len(missing),conversation_id=conversation_id)
-    return {"requested":len(expected),"admitted":len(seen),"retry_pending":len(missing),"label_error":label_error}
+    return {"requested":len(expected),"admitted":len(seen),"retry_pending":len(missing),
+            "label_error":label_error,
+            "input_zip_sha256":hashlib.sha256(input_zip.read_bytes()).hexdigest(),
+            "output_zip_sha256":hashlib.sha256(output.read_bytes()).hexdigest() if output and output.is_file() else None}
+
+
+def _dx_native_preflight(job, files, value, evidence):
+    if job.get("phase") != "iae_label_batch": return None
+    if not any(row.get("kind") == "provider_observed_native_exec" for row in evidence):
+        return "missing_provider_observed_native_exec"
+    refs = job.get("attachment_refs") or []
+    if len(refs) != 1 or not isinstance(refs[0], dict): return "missing_exact_input_zip"
+    expected = str(refs[0].get("sha256") or "")
+    input_ref = str(refs[0].get("ref") or "")
+    input_path = Path(input_ref[5:] if input_ref.startswith("file:") else input_ref)
+    if input_path.resolve(strict=False) != (DX_HOME / "input" / (str(job["id"]).removeprefix("decisionx-iae-") + ".zip")).resolve(strict=False):
+        return "input_zip_path_mismatch"
+    if (not re.fullmatch(r"[0-9a-f]{64}", expected) or not input_path.is_file()
+            or hashlib.sha256(input_path.read_bytes()).hexdigest() != expected):
+        return "input_zip_sha_mismatch"
+    central = value.get("central_conversation_store") or {}
+    uploads = central.get("provider_structured_uploads") or []
+    if expected not in {str(row.get("sha256") or "") for row in uploads if isinstance(row,dict)}:
+        return "provider_upload_proof_missing"
+    output = [row for row in files if str(row.get("name") or "").lower().endswith(".zip")]
+    if len(output) != 1: return "output_zip_count_invalid"
+    result = output[0]
+    path = Path(str(result.get("path") or ""))
+    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != result.get("sha256"):
+        return "output_zip_sha_mismatch"
+    try:
+        with zipfile.ZipFile(path) as archive:
+            if archive.testzip() is not None: return "output_zip_crc_failed"
+            names = set(archive.namelist())
+            if not {"NATIVE_COMPUTE.json", "neighbors.json",
+                    "decisionx_iae_labels.jsonl", "EXTERNAL_EFFECT_INSTRUCTIONS.md"} <= names:
+                return "native_work_product_files_missing"
+            compute = json.loads(archive.read("NATIVE_COMPUTE.json"))
+            neighbors = archive.read("neighbors.json")
+            neighbor_rows = json.loads(neighbors)
+        with zipfile.ZipFile(input_path) as source_archive:
+            input_manifest = json.loads(source_archive.read("manifest.json"))
+        input_ids = {str(row.get("episode_id") or "") for row in input_manifest.get("episodes") or []}
+        if (compute.get("schema") != "decisionx.native_batch_compute.v1"
+                or compute.get("input_zip_sha256") != expected
+                or compute.get("neighbors_sha256") != hashlib.sha256(neighbors).hexdigest()
+                or compute.get("episode_count") != input_manifest.get("episode_count")
+                or compute.get("episode_count") != len(input_ids)
+                or compute.get("episode_count") != compute.get("distinct_episode_count")
+                or not isinstance(neighbor_rows,list)
+                or {str(row.get("episode_id") or "") for row in neighbor_rows} != input_ids):
+            return "native_compute_proof_mismatch"
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile, json.JSONDecodeError):
+        return "native_compute_proof_invalid"
+    return None
 
 
 def validated_result(value: dict) -> tuple[str, list[dict]] | None:
@@ -854,8 +1001,11 @@ def complete_from_result(job: dict, value: dict) -> bool:
             event("taskflow_work_zip_mirror_retry_required", job_id=job["id"],
                   error=type(exc).__name__ + ":" + str(exc)[:240])
             return False
+    native_evidence = tool_evidence_from_result(value)
+    preflight_error = _dx_native_preflight(job, files, value, native_evidence)
     try:
-        decisionx_result = decisionx_admit_labels(job, files, conversation_id)
+        decisionx_result = decisionx_admit_labels(job, files, conversation_id,
+                                                   preflight_error=preflight_error)
     except Exception as exc:
         event("decisionx_admission_retry_required",job_id=job["id"],error=type(exc).__name__+":"+str(exc)[:240])
         return False
@@ -863,7 +1013,7 @@ def complete_from_result(job: dict, value: dict) -> bool:
                 {"kind": "central_conversation_readback", "ref": conversation_id}]
     evidence.extend({"kind": "chatgpt_sandbox_artifact", "ref": row["sha256"], "path": row["path"],
                      **({"mirrors": row["mirrors"]} if row.get("mirrors") else {})} for row in files)
-    evidence.extend(tool_evidence_from_result(value))
+    evidence.extend(native_evidence)
     if decisionx_result is not None:
         evidence.append({"kind":"decisionx_label_admission",**decisionx_result})
 

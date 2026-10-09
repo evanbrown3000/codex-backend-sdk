@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Daily export URL discovery and exact legacy Chat-mode hold recovery.
+
+Only a new export candidate triggers reconciliation. The reconciler uses
+source prompt/user-message identities and provider GET; it never sends a Chat
+POST or bypasses the single historical prompt queue.
+"""
+from __future__ import annotations
+
+import argparse
+from hashlib import sha256
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+HERE = Path(__file__).resolve().parent
+
+
+def run(current: Path, candidate: Path):
+    discovered = subprocess.run([sys.executable, str(HERE / "cognilode-chatmode-export-url"),
+                                 "--url-file", str(current), "--candidate-file", str(candidate)],
+                                check=True, capture_output=True, text=True, timeout=120)
+    result = json.loads(discovered.stdout)
+    if result.get("state") not in {"new_export_candidate_held", "same_export_candidate_held"}:
+        return {"discovery": result.get("state"), "legacy_reconciliation": "not_new_export"}
+    fingerprint = sha256(candidate.read_bytes()).hexdigest()
+    checkpoint = candidate.with_name(candidate.name + ".reconciled.json")
+    if checkpoint.exists() and json.loads(checkpoint.read_text(encoding="utf-8")).get("url_sha256") == fingerprint:
+        return {"discovery": result["state"], "legacy_reconciliation": "already_checked_this_url"}
+    reconciled = subprocess.run([sys.executable, str(HERE / "cognilode-chatmode-export-reconcile"),
+                                 "--url-file", str(candidate)],
+                                check=True, capture_output=True, text=True, timeout=1500)
+    receipt = json.loads(reconciled.stdout)
+    temporary = checkpoint.with_name(checkpoint.name + f".{os.getpid()}.tmp")
+    with temporary.open("w", encoding="utf-8") as out:
+        json.dump({"url_sha256": fingerprint, "pending_legacy": receipt.get("pending_legacy"),
+                   "shards_scanned": receipt.get("shards_scanned")}, out, sort_keys=True)
+        out.write("\n")
+        out.flush()
+        os.fsync(out.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, checkpoint)
+    return {"discovery": result["state"], "legacy_reconciliation": receipt}
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--url-file", required=True, type=Path)
+    p.add_argument("--candidate-file", required=True, type=Path)
+    args = p.parse_args()
+    print(json.dumps(run(args.url_file, args.candidate_file), sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

@@ -5,7 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/home/evan/.local/share/cognilode/b4pt0r-chatmode/venv/bin/python /home/evan/Projects/codex-backend-sdk/scripts/cognilode-chatmode-export-url --url-file /home/evan/.local/share/cognilode/b4pt0r-chatmode/privacy-export-url.txt --candidate-file /home/evan/.local/share/cognilode/b4pt0r-chatmode/privacy-export-next-url.txt
+ExecStart=/home/evan/.local/share/cognilode/b4pt0r-chatmode/venv/bin/python /home/evan/Projects/codex-backend-sdk/scripts/cognilode-chatmode-export-discover-and-reconcile --url-file /home/evan/.local/share/cognilode/b4pt0r-chatmode/privacy-export-url.txt --candidate-file /home/evan/.local/share/cognilode/b4pt0r-chatmode/privacy-export-next-url.txt
 Nice=10
 CPUQuota=25%
-TimeoutStartSec=120
+MemoryMax=1500M
+TimeoutStartSec=1800

@@ -128,6 +128,9 @@ def main():
             return
         if args.candidate_file is None:
             raise RuntimeError("new export URL requires a separate candidate file")
+        if args.candidate_file.is_file() and args.candidate_file.read_text(encoding="utf-8").strip() == url:
+            print(json.dumps({"state": "same_export_candidate_held", "thread": thread}))
+            return
         write_private(args.candidate_file, url)
         print(json.dumps({"state": "new_export_candidate_held", "thread": thread}))
         return

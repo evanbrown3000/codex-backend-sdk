@@ -1,5 +1,8 @@
 The authenticated Gmail discovery timer runs daily and keeps a newly discovered
-OpenAI privacy-export URL as a separate private candidate. The bounded backfill
+OpenAI privacy-export URL as a separate private candidate. A genuinely new
+candidate automatically attempts exact identity recovery of held legacy
+Chat-mode jobs using the provider export and provider GET, without a Chat POST.
+The bounded backfill
 timer reads one ZIP shard per invocation by HTTP range, processes at most 100
 conversations, records text and branch provenance in shared D1, and relies on
 the existing single D1-to-Drive writer. It never sends a Chat-mode prompt.

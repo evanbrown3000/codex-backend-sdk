@@ -76,6 +76,9 @@ def test_provider_stream_requires_paired_builtin_tool_result(tmp_path):
         {'id': 'call-native', 'author': {'role': 'assistant'}, 'recipient': 'functions.exec'},
         {'id': 'result-native', 'author': {'role': 'tool', 'name': 'functions.exec'},
          'metadata': {'parent_id': 'call-native'}},
+        {'id': 'call-chatmode', 'author': {'role': 'assistant'}, 'recipient': 'container.exec'},
+        {'id': 'result-chatmode', 'author': {'role': 'tool', 'name': 'container.exec'},
+         'metadata': {'parent_id': 'call-chatmode'}},
         {'id': 'call-plugin', 'author': {'role': 'assistant'}, 'recipient': 'api_tool.call_tool'},
         {'id': 'result-plugin', 'author': {'role': 'tool', 'name': 'api_tool.call_tool'},
          'metadata': {'parent_id': 'call-plugin'}},
@@ -87,9 +90,11 @@ def test_provider_stream_requires_paired_builtin_tool_result(tmp_path):
     path = tmp_path / 'stream.sse'
     path.write_bytes(raw)
     assert module.provider_tool_evidence(raw, expected_sha256=digest) == [
-        {'kind': 'provider_observed_functions_exec', 'ref': 'result-native',
+        {'kind': 'provider_observed_native_exec', 'tool': 'container.exec', 'ref': 'result-chatmode',
+         'call_ref': 'call-chatmode', 'raw_stream_sha256': digest},
+        {'kind': 'provider_observed_functions_exec', 'tool': 'functions.exec', 'ref': 'result-native',
          'call_ref': 'call-native', 'raw_stream_sha256': digest}]
-    assert module.tool_evidence_from_result({'raw_path_host': str(path), 'raw_sha256': digest})[0]['ref'] == 'result-native'
+    assert {row['ref'] for row in module.tool_evidence_from_result({'raw_path_host': str(path), 'raw_sha256': digest})} == {'result-native', 'result-chatmode'}
     assert module.tool_evidence_from_result({'raw_path_host': str(path), 'raw_sha256': '0' * 64}) == []
 
 

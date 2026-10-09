@@ -95,6 +95,32 @@ class Gate:
         url = str(body.get("url") or "")
         request_purpose, host, path = purpose(method, url)
         source = str(body.get("source") or "unknown")[:256]
+        if host == "chatgpt.com" or host.endswith(".chatgpt.com"):
+            # The central service grants every credential-bearing provider
+            # request before it reaches ChatGPT. It also leases provider reads
+            # so ordinary agent polling stays on shared conversation deltas.
+            event_id = str(uuid.uuid4())
+            try:
+                decision = self.central("POST", {
+                    "operation": "authorize_request", "event_id": event_id,
+                    "environment": self.environment, "source": source,
+                    "purpose": request_purpose, "method": method,
+                    "host": host, "path": path,
+                })
+                if decision.get("ok") is not True or decision.get("purpose") != request_purpose:
+                    raise RuntimeError("central provider decision malformed")
+                allowed = decision.get("allowed") is True
+                outcome = str(decision.get("outcome") or "central_decision")
+                revision = int(decision.get("policy_revision") or 0)
+            except Exception as exc:
+                allowed = False
+                outcome = "central_unavailable:" + type(exc).__name__
+                revision = 0
+            self.record(source=source, request_purpose=request_purpose, method=method,
+                        host=host, path=path, allowed=allowed, outcome=outcome)
+            return {"ok": True, "allowed": allowed, "purpose": request_purpose,
+                    "event_id": event_id, "policy_revision": revision,
+                    "central_first": True}
         with self.lock:
             rule = self.policy.get("purposes", {}).get(request_purpose)
             allowed = bool(self.policy.get("default_allow", False) if rule is None else rule)

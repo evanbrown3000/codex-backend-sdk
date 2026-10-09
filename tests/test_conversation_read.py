@@ -1,7 +1,9 @@
 import importlib.machinery
 import importlib.util
 import hashlib
+import io
 import json
+from contextlib import redirect_stdout
 from pathlib import Path
 import subprocess
 import sys
@@ -47,6 +49,30 @@ class ConversationDeltaTests(unittest.TestCase):
         cursor = reader.delta_view(self.full)["next_cursor"]
         with self.assertRaisesRegex(ValueError, "another conversation"):
             reader.delta_view({**self.full, "conversation_id": "conversation-2"}, cursor)
+
+    def test_remembered_reader_sees_full_once_then_only_new_events(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source={**self.full}
+            def invoke(reader_id="employee-a"):
+                argv=["conversation-read", "--provider", "chatgpt.com", "--conversation-id",
+                      "conversation-1", "--remember", "--reader-id", reader_id,
+                      "--cursor-root", temporary]
+                output=io.StringIO()
+                with mock.patch.object(sys,"argv",argv), mock.patch.object(reader,"read_conversation",return_value=source), \
+                     redirect_stdout(output):
+                    self.assertEqual(reader.main(),0)
+                return json.loads(output.getvalue())
+            self.assertEqual(invoke()["new_events"],2)
+            self.assertEqual(invoke()["new_events"],0)
+            source={**self.full,"events":self.full["events"] + [
+                {"id":"u2","role":"user","text":"next","occurred_at_utc":""}]}
+            self.assertEqual([r["text"] for r in invoke()["events"]],["next"])
+            self.assertEqual(invoke("employee-b")["new_events"],3)
+            source={**source,"events":[{**source["events"][0],"text":"corrected"},
+                                        *source["events"][1:]]}
+            refreshed=invoke()
+            self.assertEqual(refreshed["cursor_reset_reason"],"source_prefix_changed")
+            self.assertEqual(refreshed["new_events"],3)
 
     def test_hosted_provider_read_preserves_provider_identity(self):
         response = {"conversation": {"provider": "gemini.com", "conversation_id": "g-1", "events": [

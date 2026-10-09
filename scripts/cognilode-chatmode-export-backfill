@@ -26,6 +26,8 @@ import zipfile
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from chatmode_export_range import AuthenticatedRangeFile
+from chatmode_export_rotation import (finish_promotion, is_expired_source_error,
+                                      promote, _atomic_bytes)
 
 sender = SourceFileLoader("chatmode_sender_bulk_export", str(HERE / "cognilode-b4pt0r-chatmode")).load_module()
 PROVIDER = "chatgpt-export-format"
@@ -348,20 +350,71 @@ def drive_lag(state_root: Path, archive_etag: str, state: dict,
             "pending_drive": len(rows) - verified + unreceipted}
 
 
+def archived_drive_lag(state_root: Path, drive_db: Path = DRIVE_DB) -> int:
+    """Old snapshots still consume the same single writer's capacity."""
+    total = 0
+    for snapshot in (state_root / "superseded-snapshots").glob("*/cursor.json"):
+        archived = json.loads(snapshot.read_text(encoding="utf-8"))
+        total += drive_lag(snapshot.parent, archived["archive_etag"], archived, drive_db)["pending_drive"]
+    return total
+
+
 def run(url_file: Path, *, maximum: int, state_root: Path = STATE_ROOT) -> dict:
     if url_file.stat().st_mode & 0o077:
         raise RuntimeError("signed export URL file must be private (0600)")
-    url = url_file.read_text(encoding="utf-8").strip()
-    if not url.startswith("https://chatgpt.com/backend-api/estuary/content?"):
-        raise RuntimeError("unexpected export URL origin or path")
     state_root.mkdir(parents=True, exist_ok=True)
     lock_path = state_root / "cursor.lock"
     with lock_path.open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        candidate_file = url_file.with_name("privacy-export-next-url.txt")
+        finish_promotion(state_root, url_file, candidate_file)
+        url = url_file.read_text(encoding="utf-8").strip()
+        if not url.startswith("https://chatgpt.com/backend-api/estuary/content?"):
+            raise RuntimeError("unexpected export URL origin or path")
         state_path = state_root / "cursor.json"
-        if state_path.is_file():
-            state = json.loads(state_path.read_text(encoding="utf-8"))
+        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else None
+        old_pending = archived_drive_lag(state_root)
+        if state is not None and not candidate_file.is_file():
+            early_lag = drive_lag(state_root, state["archive_etag"], state)
+            early_lag["archived_pending_drive"] = old_pending
+            early_lag["pending_drive"] += old_pending
+            early_paused = bool(state.get("backpressure_paused"))
+            if early_lag["pending_drive"] >= PENDING_HIGH_WATER or (
+                    early_paused and early_lag["pending_drive"] > PENDING_LOW_WATER):
+                if not early_paused:
+                    state["backpressure_paused"] = True
+                    write_state(state_path, state)
+                return {"state": "drive_lag_backpressure", **early_lag,
+                        "resume_pending_at_or_below": PENDING_LOW_WATER,
+                        "next_shard": state.get("next_shard"), "position": state.get("position")}
+        session = sender.new_session(sender.DEFAULT_PROFILE, sender.DEFAULT_IMPERSONATE)
+        try:
+            source = AuthenticatedRangeFile(session, url)
+        except Exception as exc:
+            if not is_expired_source_error(exc) or not candidate_file.is_file():
+                raise
+            candidate = candidate_file.read_text(encoding="utf-8").strip()
+            if not candidate.startswith("https://chatgpt.com/backend-api/estuary/content?"):
+                raise RuntimeError("unexpected replacement export URL origin or path") from exc
+            replacement = AuthenticatedRangeFile(session, candidate)
+            if state is not None and (state["archive_etag"], state["archive_bytes"]) != (replacement.etag, replacement.size):
+                promote(state_root, url_file, candidate_file, state, url, candidate, replacement, exc)
+                state = None
+            else:
+                # A renewed link to identical source bytes needs no new cursor.
+                _atomic_bytes(url_file, (candidate + "\n").encode())
+            source = replacement
+            url = candidate
+            old_pending = archived_drive_lag(state_root)
+        if state is None and old_pending >= PENDING_HIGH_WATER:
+            return {"state": "drive_lag_backpressure", "pending_drive": old_pending,
+                    "archived_pending_drive": old_pending,
+                    "resume_pending_at_or_below": PENDING_LOW_WATER,
+                    "next_shard": None, "position": 0}
+        if state is not None:
             lag = drive_lag(state_root, state["archive_etag"], state)
+            lag["archived_pending_drive"] = old_pending
+            lag["pending_drive"] += old_pending
             paused = bool(state.get("backpressure_paused"))
             if lag["pending_drive"] >= PENDING_HIGH_WATER or (
                     paused and lag["pending_drive"] > PENDING_LOW_WATER):
@@ -376,9 +429,7 @@ def run(url_file: Path, *, maximum: int, state_root: Path = STATE_ROOT) -> dict:
                 write_state(state_path, state)
             maximum = min(maximum, PENDING_HIGH_WATER - lag["pending_drive"])
         else:
-            state = None
-        session = sender.new_session(sender.DEFAULT_PROFILE, sender.DEFAULT_IMPERSONATE)
-        source = AuthenticatedRangeFile(session, url)
+            maximum = min(maximum, PENDING_HIGH_WATER - old_pending)
         if state is not None:
             if state.get("archive_etag") != source.etag or state.get("archive_bytes") != source.size:
                 raise RuntimeError("new archive identity requires prior cursor reconciliation")

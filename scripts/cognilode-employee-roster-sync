@@ -143,6 +143,22 @@ def verified_employee_job(job: dict[str, Any], post) -> dict[str, str] | None:
     conversation = read.get("conversation") or {}
     if not read.get("ok") or conversation.get("conversation_id") != cid:
         return None
+    capture = conversation.get("capture") or {}
+    source_sha = str(capture.get("source_sha256") or "")
+    drive_source_sha = str(capture.get("drive_source_sha256") or "")
+    drive_object_sha = str(capture.get("drive_object_sha256") or "")
+    if (capture.get("source_kind") != "codex_rollout"
+        or capture.get("source_response_complete") is not True
+        or capture.get("source_complete") is not True
+        or capture.get("drive_verified") is not True
+        or not re.fullmatch(r"[0-9a-f]{64}", source_sha)
+        or drive_source_sha != source_sha
+        or not re.fullmatch(r"[0-9a-f]{64}", drive_object_sha)
+        or not str(capture.get("drive_verified_at") or "")
+        or capture.get("drive_conversation_id") != cid):
+        # D1 interim admission can precede the singular Drive CAS/readback.
+        # Do not install a newly named employee until both are complete.
+        return None
     # The Codex normalized reader does not set source_content_complete. Its
     # response_sha256 is the hash of the selected assistant text; verify that
     # exact text is present in the central read before installing the name.
@@ -161,6 +177,8 @@ def verified_employee_job(job: dict[str, Any], post) -> dict[str, str] | None:
     return {"provider": str(job["provider"]), "job_id": str(job["id"]),
             "employee": name, "conversation_id": cid,
             "response_sha256": response_sha, "effect_kind": effect_kind,
+            "source_sha256": source_sha, "drive_object_sha256": drive_object_sha,
+            "drive_verified_at": str(capture["drive_verified_at"]),
             "effect_ref": str(effect["ref"]),
             "completed_at": str(job.get("completed_at") or "")}
 

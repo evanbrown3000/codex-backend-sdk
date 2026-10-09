@@ -56,8 +56,12 @@ def test_activation_requires_named_completed_job_and_central_readback(tmp_path, 
     monkeypatch.setattr(module.Path, "home", lambda: tmp_path)
 
     terminal = "Maya completed the research ZIP with a manifest."
+    source_sha = "a" * 64
     readback = {"ok": True, "conversation": {"conversation_id": cid,
                 "response_sha256": hashlib.sha256(terminal.encode()).hexdigest(),
+                "capture": {"source_kind": "codex_rollout", "source_sha256": source_sha,
+                            "source_response_complete": True, "source_complete": True,
+                            "drive_verified": False},
                 "events": [{"role": "assistant", "content": terminal}]}}
 
     def post(request):
@@ -81,9 +85,17 @@ def test_activation_requires_named_completed_job_and_central_readback(tmp_path, 
     readback["conversation"]["response_sha256"] = hashlib.sha256(terminal.encode()).hexdigest()
     result = module.reconcile([snapshots], installed_path=installed, candidates_path=candidates,
                               activations_path=activations, post=post)
+    assert result["activated"] == []
+    readback["conversation"]["capture"].update({
+        "drive_verified": True, "drive_source_sha256": source_sha,
+        "drive_object_sha256": "b" * 64, "drive_verified_at": "2026-10-09T13:00:00Z",
+        "drive_conversation_id": cid})
+    result = module.reconcile([snapshots], installed_path=installed, candidates_path=candidates,
+                              activations_path=activations, post=post)
     assert result["activated"] == ["Maya Chen"]
     assert json.loads(installed.read_text())["employees"]["Maya Chen"]["role"] == "Staff Systems Integration Engineer"
     assert json.loads(activations.read_text())["employees"]["Maya Chen"]["conversation_id"] == cid
+    assert json.loads(activations.read_text())["employees"]["Maya Chen"]["drive_object_sha256"] == "b" * 64
 
 
 def test_candidate_role_is_not_installed_role(tmp_path, monkeypatch):

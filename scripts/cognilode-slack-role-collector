@@ -86,8 +86,7 @@ def list_project_channels(cli: Path) -> list[dict[str, Any]]:
 
 
 def _read(cli: Path, cid: str, *, oldest: str = "", latest: str = "") -> dict[str, Any]:
-    args = ["conversations", "read", cid, "--limit", str(READ_LIMIT),
-            "--exclude-replies"]
+    args = ["conversations", "read", cid, "--limit", str(READ_LIMIT)]
     if oldest:
         args += ["--oldest", oldest]
     if latest:
@@ -106,8 +105,12 @@ def _role_rows(messages: list[dict[str, Any]], sync) -> dict[str, dict[str, str]
         ts = str(item.get("ts") or "")
         text = str(item.get("text") or "")
         if re.fullmatch(r"\d{10}\.\d{1,6}", ts) and sync.role_from_message(text):
-            rows[ts] = {"ts": ts, "user": str(item.get("user") or ""),
-                        "text": text[:4000]}
+            row = {"ts": ts, "user": str(item.get("user") or ""),
+                   "text": text[:4000]}
+            thread_ts = str(item.get("thread_ts") or "")
+            if re.fullmatch(r"\d{10}\.\d{1,6}", thread_ts):
+                row["thread_ts"] = thread_ts
+            rows[ts] = row
     return rows
 
 
@@ -133,13 +136,18 @@ def collect_channel(cli: Path, channel: dict[str, Any], landing: Path, sync) -> 
     newest = str(prior.get("newest_ts") or "")
     older = str(prior.get("backfill_before") or "")
     complete = bool(prior.get("history_complete"))
+    initial_scan = not prior or not prior.get("thread_replies_included")
+    if prior and initial_scan:
+        # Earlier snapshots explicitly excluded replies. Keep their role rows,
+        # but reread the full channel with replies before claiming coverage.
+        newest, older, complete = "", "", False
     pages = 0
     fetched = 0
 
     # New messages: a bounded forward cursor prevents rereading the whole channel.
     forward = newest
     for _ in range(MAX_READ_PAGES):
-        if not forward and prior:
+        if not forward and not initial_scan:
             break
         page = _read(cli, cid, oldest=forward) if forward else _read(cli, cid)
         pages += 1
@@ -149,7 +157,7 @@ def collect_channel(cli: Path, channel: dict[str, Any], landing: Path, sync) -> 
         if messages:
             oldest_on_page = str(messages[0]["ts"])
             latest_on_page = str(messages[-1]["ts"])
-            if not prior and not older:
+            if initial_scan and not older:
                 older = oldest_on_page if page.get("has_more") else ""
                 complete = not bool(page.get("has_more"))
             if latest_on_page <= forward:
@@ -158,7 +166,7 @@ def collect_channel(cli: Path, channel: dict[str, Any], landing: Path, sync) -> 
             forward = latest_on_page
         if not page.get("has_more") or not messages:
             break
-    if not prior and not newest:
+    if initial_scan and not newest:
         complete = True
 
     # Recover older declarations over successive cycles without an unbounded scan.
@@ -183,6 +191,7 @@ def collect_channel(cli: Path, channel: dict[str, Any], landing: Path, sync) -> 
                 "channel_name": name, "is_member": channel["is_member"],
                 "is_private": channel["is_private"], "newest_ts": newest,
                 "backfill_before": older, "history_complete": complete,
+                "thread_replies_included": True,
                 "last_scan_at": datetime.now(timezone.utc).isoformat(),
                 "message_count": len(roles),
                 "messages": [roles[k] for k in sorted(roles)]}

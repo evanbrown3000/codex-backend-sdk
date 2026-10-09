@@ -21,6 +21,7 @@ def test_live_channel_inventory_and_resumable_role_history(tmp_path, monkeypatch
     team = {"id": "C0C70S09ZPE", "name": "team-provider-integrations", "is_member": False}
     unrelated = {"id": "C0C4MMWNC14", "name": "general", "is_member": True}
     observed = []
+    include_reply = [False]
 
     def fake_call(cli, args):
         observed.append(args)
@@ -35,9 +36,13 @@ def test_live_channel_inventory_and_resumable_role_history(tmp_path, monkeypatch
                 "has_more": False}
         if "--oldest" in args:
             return {"channel_id": cid, "messages": [], "has_more": False}
-        return {"channel_id": cid, "messages": [
+        messages = [
             {"ts": "1791518136.857879", "text": "ordinary project update"},
-            {"ts": "1791518340.309089", "text": "Daniel Reyes — Staff Agent Runtime Engineer — Platform Engineering"}],
+            {"ts": "1791518340.309089", "text": "Daniel Reyes — Staff Agent Runtime Engineer — Platform Engineering"}]
+        if include_reply[0]:
+            messages.append({"ts": "1791518350.309089", "thread_ts": "1791518136.857879",
+                             "text": "Sofia Park — Principal Hosted-Agent Systems Engineer — Provider Integrations"})
+        return {"channel_id": cid, "messages": messages,
             "has_more": True}
 
     monkeypatch.setattr(module, "_call", fake_call)
@@ -48,6 +53,8 @@ def test_live_channel_inventory_and_resumable_role_history(tmp_path, monkeypatch
     assert first["channels_with_roles"] == 1
     snapshot = json.loads((tmp_path / "proj-agent-memory.json").read_text())
     assert snapshot["history_complete"] is True
+    assert snapshot["thread_replies_included"] is True
+    assert not any("--exclude-replies" in call for call in observed)
     assert [row["ts"] for row in snapshot["messages"]] == ["1791232623.547069", "1791518340.309089"]
 
     observed.clear()
@@ -55,3 +62,17 @@ def test_live_channel_inventory_and_resumable_role_history(tmp_path, monkeypatch
     assert second["channels_complete"] == 2
     assert not any("--latest" in call for call in observed)
     assert len(json.loads((tmp_path / "proj-agent-memory.json").read_text())["messages"]) == 2
+
+    # Upgrade a historical top-level-only snapshot by rereading it with
+    # replies. Existing top-level role rows stay deduplicated by timestamp.
+    snapshot.pop("thread_replies_included")
+    (tmp_path / "proj-agent-memory.json").write_text(json.dumps(snapshot))
+    include_reply[0] = True
+    observed.clear()
+    upgraded = module.collect(Path("/unused/slackcli"), tmp_path)
+    assert upgraded["channels_complete"] == 2
+    rows = json.loads((tmp_path / "proj-agent-memory.json").read_text())["messages"]
+    assert len(rows) == 3
+    assert rows[-1]["thread_ts"] == "1791518136.857879"
+    assert any(call[:3] == ["conversations", "read", project["id"]]
+               and "--oldest" not in call and "--latest" not in call for call in observed)

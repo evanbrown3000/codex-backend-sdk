@@ -1,4 +1,5 @@
 import hashlib
+from datetime import datetime, timedelta, timezone
 import importlib.machinery
 import importlib.util
 import json
@@ -145,3 +146,45 @@ def test_enqueue_requires_exact_shared_queue_readback(monkeypatch):
     with pytest.raises(ValueError, match="D1 readback mismatch"):
         upstream.enqueue(post, built)
     assert [row["operation"] for row in calls] == ["enqueue_decisionx_prompt", "get_job"]
+
+
+def test_failed_successor_is_deferred_then_reenqueued_with_new_fence(tmp_path, monkeypatch):
+    root_state = tmp_path / "root.json"
+    root_state.write_text(json.dumps({"phase": "complete", "root_job_id": "root-job"}))
+    output = tmp_path / "successor"
+    output.mkdir()
+    state_path = output / "state.json"
+    state_path.write_text(json.dumps({"schema": "cognilode.decisionx.successor_state.v1",
+                                      "target_job_id": "root-job",
+                                      "job_id": "decisionx-successor-old", "attempt": 0}))
+    def post(body):
+        if body["operation"] == "get_job":
+            return {"ok": True, "job": {"id": "decisionx-successor-old", "state": "failed",
+                                         "last_error": "provider artifact unusable"}}
+        if body["operation"] == "decisionx_candidates":
+            return {"ok": True, "ready": True, "distinct_sources": 500}
+        raise AssertionError(body)
+    deferred = upstream.tick(post, output_root=output, root_state_path=root_state)
+    assert deferred["phase"] == "retry_deferred"
+    saved = json.loads(state_path.read_text())
+    assert saved["failure_observed_job_id"] == "decisionx-successor-old"
+    saved["retry_after"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    state_path.write_text(json.dumps(saved))
+    class Bridge:
+        @staticmethod
+        def shared_stock_census(_post, minimum):
+            return {"multi_year_ready": True, "distinct_complete": 500,
+                    "span_days": 800}
+    monkeypatch.setattr(upstream, "load", lambda *_args: Bridge())
+    monkeypatch.setattr(upstream, "packet", lambda *_args, **_kwargs: {
+        "manifest": {"source_refs_sha256": "a" * 64}, "identity": "new"})
+    seen = []
+    def enqueue(_post, _built, **kwargs):
+        seen.append(kwargs)
+        return {"ok": True, "job_id": "decisionx-successor-new-retry-1", "state": "queued"}
+    monkeypatch.setattr(upstream, "enqueue", enqueue)
+    queued = upstream.tick(post, output_root=output, root_state_path=root_state)
+    assert queued["phase"] == "queued"
+    assert seen[0]["attempt"] == 1
+    assert seen[0]["predecessor_job_id"] == "decisionx-successor-old"
+    assert json.loads(state_path.read_text())["job_id"] == "decisionx-successor-new-retry-1"

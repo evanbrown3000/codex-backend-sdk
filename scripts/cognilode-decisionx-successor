@@ -7,7 +7,7 @@ judgment run in a ChatGPT.com Chat-mode agent's native sandbox.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -275,7 +275,9 @@ historical conversations changed your proposed next action.
 """
 
 
-def enqueue(post: Callable[[dict], Mapping], built: dict, *, priority: int = 45) -> dict:
+def enqueue(post: Callable[[dict], Mapping], built: dict, *, priority: int = 45,
+            attempt: int = 0, predecessor_job_id: str | None = None,
+            predecessor_failure: str = "") -> dict:
     builder = built["builder"]
     attachments = []
     for index, row in enumerate(built["packets"]):
@@ -284,12 +286,20 @@ def enqueue(post: Callable[[dict], Mapping], built: dict, *, priority: int = 45)
                             "mirrors": [mirror],
                             "kind": "decisionx_successor_target" if index == 0 else "decisionx_successor_source"})
     prompt = PROMPT + "\nTarget job: " + built["manifest"]["target_job_id"] + "\n"
+    if attempt:
+        prompt += ("A prior provider turn for this same target ended without a usable installed "
+                   "successor. Preserve the attached source evidence, repair the returned "
+                   "ZIP/plan, and explain the prior failure in your in-chat report.\n"
+                   "Prior D1 job: " + str(predecessor_job_id or "") + "\n"
+                   "Observed failure: " + predecessor_failure[:500] + "\n")
     digest = sha(prompt.encode())
-    job_id = "decisionx-successor-" + built["identity"]
+    job_id = "decisionx-successor-" + built["identity"] + (f"-retry-{attempt}" if attempt else "")
     decision = {"authored_by": "DecisionX", "decision_key": job_id,
                 "prompt_sha256": digest, "source_kind": "verified_iae_successor",
                 "target_job_id": built["manifest"]["target_job_id"],
                 "reasoning_effort": "xhigh",
+                "attempt": attempt,
+                "predecessor_job_id": predecessor_job_id,
                 "research_employee": "Nadia Brooks",
                 "external_employee": "Rina Hale"}
     reply = post({"operation": "enqueue_decisionx_prompt", "job_id": job_id,
@@ -326,10 +336,44 @@ def tick(post: Callable[[dict], Mapping], *, output_root: Path = DEFAULT_ROOT,
         return {"ok": False, "reason": "root_cycle_not_yet_complete"}
     target_id = str(root["root_job_id"])
     existing = output_root / "state.json"
+    attempt = 0
+    predecessor_job_id = None
+    predecessor_failure = ""
     if existing.is_file():
         state = json.loads(existing.read_text())
         if state.get("target_job_id") == target_id and state.get("job_id"):
-            return {"ok": True, "phase": "already_queued", **state}
+            prior_id = str(state["job_id"])
+            prior_result = post({"operation": "get_job", "job_id": prior_id})
+            prior = prior_result.get("job") or {}
+            require(prior_result.get("ok") and prior.get("id") == prior_id,
+                    "predecessor D1 job missing")
+            prior_state = str(prior.get("state") or "")
+            if prior_state not in {"failed", "cancelled"}:
+                return {"ok": True, "phase": "already_queued", "job_state": prior_state, **state}
+            attempt = int(state.get("attempt") or 0) + 1
+            if not 1 <= attempt <= 1000:
+                raise ValueError("invalid DecisionX successor retry attempt")
+            now = datetime.now(timezone.utc)
+            observed = str(state.get("failure_observed_job_id") or "")
+            if observed != prior_id:
+                delay = min(86400, 3600 * (2 ** min(5, attempt - 1)))
+                after = now + timedelta(seconds=delay)
+                state["failure_observed_job_id"] = prior_id
+                state["retry_after"] = after.isoformat()
+                temp = existing.with_suffix(".tmp")
+                temp.write_bytes(canonical(state))
+                os.replace(temp, existing)
+                return {"ok": True, "phase": "retry_deferred", "job_state": prior_state,
+                        "retry_after": state["retry_after"], **state}
+            try:
+                after = datetime.fromisoformat(str(state["retry_after"]).replace("Z", "+00:00"))
+            except (KeyError, ValueError) as exc:
+                raise ValueError("invalid successor retry fence") from exc
+            if now < after:
+                return {"ok": True, "phase": "retry_deferred", "job_state": prior_state,
+                        "retry_after": state["retry_after"], **state}
+            predecessor_job_id = prior_id
+            predecessor_failure = str(prior.get("last_error") or prior.get("error") or prior_state)
     first = post({"operation": "decisionx_candidates", "q": "research", "limit": 1})
     if not first.get("ok") or first.get("ready") is not True or int(first.get("distinct_sources") or 0) < 500:
         return {"ok": False, "reason": "shared_descriptor_index_below_500",
@@ -340,10 +384,13 @@ def tick(post: Callable[[dict], Mapping], *, output_root: Path = DEFAULT_ROOT,
         return {"ok": False, "reason": "shared_multiyear_drive_stock_below_500",
                 "distinct_complete": stock.get("distinct_complete"), "span_days": stock.get("span_days")}
     built = packet(post, target_id, output_root=output_root, stock=stock)
-    result = enqueue(post, built)
+    result = enqueue(post, built, attempt=attempt,
+                     predecessor_job_id=predecessor_job_id,
+                     predecessor_failure=predecessor_failure)
     output_root.mkdir(parents=True, exist_ok=True)
     state = {"schema": "cognilode.decisionx.successor_state.v1",
              "target_job_id": target_id, "job_id": result["job_id"],
+             "attempt": attempt, "predecessor_job_id": predecessor_job_id,
              "created_at": datetime.now(timezone.utc).isoformat(),
              "source_refs_sha256": built["manifest"]["source_refs_sha256"]}
     temp = existing.with_suffix(".tmp")

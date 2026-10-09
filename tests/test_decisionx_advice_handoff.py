@@ -48,19 +48,32 @@ class AdviceHandoffTests(unittest.TestCase):
                    "metadata": {"drive_verified_source": True,
                                 "full_source_prompt_sha256": "a" * 64,
                                 "full_source_response_sha256": "b" * 64}}
+        target = {"provider": "chatgpt.com", "conversation_id": "current-1",
+                  "prompt_sha256": "e" * 64, "response_sha256": "f" * 64,
+                  "events": [{"role": "user", "content": "Choose a next action"},
+                             {"role": "assistant", "content": "The last action completed"}]}
         def post(body):
             if body["operation"] == "read":
+                if body["provider"] == "chatgpt.com":
+                    return {"ok": True, "conversation": target}
                 return {"ok": True, "conversation": source}
             if body["operation"] == "read_segment":
                 return {"ok": True, "segment": segment}
+            if body["operation"] == "get_job":
+                return {"ok": True, "job": {"id": "target-1", "state": "complete",
+                                            "provider": "chatgpt.com", "conversation_id": "current-1"}}
             raise AssertionError(body)
         with tempfile.TemporaryDirectory() as directory:
             first = Path(directory) / "candidates.zip"
-            target_raw = b'{}'
-            candidates_raw = b'[]'
+            target_raw = handoff.canonical(target)
+            candidates_raw = handoff.canonical([candidate])
             first_sha = write_zip(first, {
                 "MANIFEST.json": handoff.canonical(
                     {"schema": "cognilode.decisionx.successor_input.v1",
+                     "target_job_id": "target-1", "target_provider": "chatgpt.com",
+                     "target_conversation_id": "current-1",
+                     "target_prompt_sha256": "e" * 64,
+                     "target_response_sha256": "f" * 64,
                      "source_refs": [ref], "candidate_refs": [candidate],
                      "source_refs_sha256": handoff.digest(handoff.canonical([ref])),
                      "target_json_sha256": sha256(target_raw).hexdigest(),
@@ -78,11 +91,45 @@ class AdviceHandoffTests(unittest.TestCase):
             job = {"attachment_refs": [{"ref": str(first), "sha256": first_sha},
                                        {"ref": str(full), "sha256": full_sha}]}
             central = {"provider_structured_uploads": [{"sha256": first_sha}, {"sha256": full_sha}]}
-            hashes, sources, candidates, source_sha = handoff.verify_inputs(post, job, central)
+            hashes, sources, candidates, source_sha, historical_sha = handoff.verify_inputs(post, job, central)
             self.assertEqual(hashes, [first_sha, full_sha])
             self.assertEqual(sources[0]["conversation_id"], "old-1")
             self.assertEqual(candidates[0]["segment_id"], "decisionx.iae.abc")
             self.assertEqual(source_sha, handoff.digest(handoff.canonical([ref])))
+            native = handoff.load(SCRIPT.parent / "decisionx_successor_native.py", "dx_native_integration")
+            work = Path(directory) / "work"
+            computed = native.run(first, [full], work)
+            self.assertEqual(computed["input_zip_sha256s"], [first_sha, full_sha])
+            instruction = ("Read the changed target state and implement the highest-value next "
+                           "action, then independently verify its external effect and record uncertainty.")
+            advice = {"schema": "cognilode.decisionx.successor_advice.v1",
+                      "target_job_id": "target-1", "target_provider": "chatgpt.com",
+                      "target_conversation_id": "current-1", "target_prompt_sha256": "e" * 64,
+                      "target_response_sha256": "f" * 64, "candidate_refs": [candidate],
+                      "proposed_next_instruction": instruction,
+                      "changed_conditions": ["Target action completed"],
+                      "uncertainties": ["Next effect remains unobserved"]}
+            (work / "DECISIONX_ADVICE.json").write_bytes(handoff.canonical(advice))
+            (work / "successor.plan").write_text(
+                "project DecisionX Successor\nid decisionx-successor\n\n"
+                "[ ] DX-1 Complete grounded next action\n"
+                "    owner: Nadia Brooks\n    role: Research engineer\n"
+                f"    do: {instruction}\n"
+                "    effect_probe_command: /usr/bin/python3 -I /opt/cognilode/check.py read\n"
+                "    effect_probe_expected: verified\n")
+            (work / "EXTERNAL_EFFECT_INSTRUCTIONS.md").write_text(
+                "Install the TaskFlow plan through the named Codex employee, perform the external action, "
+                "then independently reread the resulting state and check off only with effect evidence.")
+            output = Path(directory) / "decisionx-successor-work-product.zip"
+            sealed = native.finish(work, output)
+            evidence = [{"kind": "chatgpt_sandbox_artifact", "ref": sealed["sha256"],
+                         "path": str(output), "sha256": sealed["sha256"],
+                         "mirrors": ["s3://private-test/" + sealed["sha256"]]}]
+            validated = handoff.verify_output(post, {"decisionx": {"target_job_id": "target-1"}},
+                                              evidence, hashes, sources, candidates, source_sha,
+                                              historical_sha,
+                                              stage_remote=lambda _url, _sha: output)
+            self.assertEqual(validated[2], sealed["sha256"])
             central["provider_structured_uploads"].pop()
             with self.assertRaisesRegex(ValueError, "physical provider upload"):
                 handoff.verify_inputs(post, job, central)
@@ -135,7 +182,10 @@ class AdviceHandoffTests(unittest.TestCase):
         native = {"schema": "cognilode.decisionx.successor_native_compute.v1",
                   "input_zip_sha256s": input_hashes, "target_job_id": "target-1",
                   "candidate_count": 1, "source_count": 1,
-                  "source_refs_sha256": source_ref_hash}
+                  "source_refs_sha256": source_ref_hash,
+                  "historical_rendered_sha256": "1" * 64,
+                  "target_rendered_sha256": handoff.digest(
+                      ("# openai-codex / current-1").encode("utf-8"))}
         members = {"DECISIONX_ADVICE.json": handoff.canonical(advice),
                    "successor.plan": plan,
                    "EXTERNAL_EFFECT_INSTRUCTIONS.md": b"Deploy this work through the named Codex employee and independently reread the external effect. " * 2,
@@ -155,10 +205,12 @@ class AdviceHandoffTests(unittest.TestCase):
             path = Path(directory) / "decisionx-successor-work-product.zip"
             archive_sha = write_zip(path, {"MANIFEST.json": handoff.canonical(manifest), **members})
             evidence = [{"kind": "chatgpt_sandbox_artifact", "ref": archive_sha,
-                         "path": str(path), "sha256": archive_sha}]
+                         "path": str(path), "sha256": archive_sha,
+                         "mirrors": ["s3://private-test/" + archive_sha]}]
             job = {"id": "dx-1", "decisionx": {"target_job_id": "target-1"}}
             result = handoff.verify_output(post, job, evidence, input_hashes, [source],
-                                           [candidate], source_ref_hash)
+                                           [candidate], source_ref_hash, "1" * 64,
+                                           stage_remote=lambda _url, _sha: path)
             self.assertEqual(result[2], archive_sha)
             native["source_refs_sha256"] = "0" * 64
             members["NATIVE_COMPUTE.json"] = handoff.canonical(native)
@@ -168,7 +220,8 @@ class AdviceHandoffTests(unittest.TestCase):
             evidence[0]["ref"] = archive_sha
             with self.assertRaisesRegex(ValueError, "native compute proof"):
                 handoff.verify_output(post, job, evidence, input_hashes, [source],
-                                      [candidate], source_ref_hash)
+                                      [candidate], source_ref_hash, "1" * 64,
+                                      stage_remote=lambda _url, _sha: path)
 
     def test_gate_rejects_index_below_500_even_when_stock_is_large(self):
         original = handoff.load

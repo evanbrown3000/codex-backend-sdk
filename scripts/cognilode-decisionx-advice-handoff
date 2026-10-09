@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 from typing import Any, Callable, Mapping
@@ -139,7 +140,7 @@ def verify_shared_gates(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, 
 
 
 def verify_inputs(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapping[str, Any],
-                  central: Mapping[str, Any], *, stage_remote=None) -> tuple[list[str], list[dict], list[dict], str]:
+                  central: Mapping[str, Any], *, stage_remote=None) -> tuple[list[str], list[dict], list[dict], str, str]:
     refs = job.get("attachment_refs") or []
     if not isinstance(refs, list) or len(refs) < 2 or len(refs) > 64:
         raise ValueError("bounded target/candidate and full-source attachments required")
@@ -205,17 +206,41 @@ def verify_inputs(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapp
             or source.get("response_sha256") != ref["response_sha256"]
             or (source.get("capture") or {}).get("source_sha256") != ref["source_sha256"]):
             raise ValueError("uploaded full-source contents differ from shared readback")
-    return hashes, source_refs, candidate_refs, source_refs_sha
+    native = load(HERE / "decisionx_successor_native.py", "dx_advice_render_verifier")
+    historical_rendered = "".join(native.render(full[(ref["provider"], ref["conversation_id"])]) + "\n\n"
+                                  for ref in packet["source_refs"])
+    return hashes, source_refs, candidate_refs, source_refs_sha, digest(historical_rendered.encode("utf-8"))
 
 
 def verify_output(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapping[str, Any],
                   evidence: list, input_hashes: list[str],
                   source_refs: list[dict], candidate_refs: list[dict], source_refs_sha: str,
+                  historical_rendered_sha: str,
                   *, stage_remote=None) -> tuple[dict, bytes, str]:
     artifacts = [row for row in evidence if isinstance(row, Mapping)
                  and row.get("kind") == "chatgpt_sandbox_artifact"]
     if len(artifacts) != 1:
         raise ValueError("exactly one returned Chat-mode ZIP required")
+    artifact = artifacts[0]
+    mirror_urls = artifact.get("mirrors") or []
+    if not isinstance(mirror_urls, list) or not mirror_urls:
+        raise ValueError("returned ZIP lacks shared content-addressed mirror")
+    if stage_remote is None:
+        worker = load(HERE / "cognilode-chatmode-queue-worker", "dx_advice_output_mirror")
+        stage_remote = worker._stage_remote_attachment
+    mirrored = False
+    for mirror in mirror_urls:
+        if not str(mirror).startswith("s3://"):
+            continue
+        try:
+            remote = stage_remote(str(mirror), str(artifact.get("sha256") or ""))
+            if remote.is_file() and digest(remote.read_bytes()) == artifact.get("sha256"):
+                mirrored = True
+                break
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            continue
+    if not mirrored:
+        raise ValueError("returned ZIP shared mirror failed independent SHA readback")
     path = stage_zip(artifacts[0], stage_remote=stage_remote)
     with zipfile.ZipFile(path) as archive:
         names = archive.namelist()
@@ -238,7 +263,8 @@ def verify_output(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapp
         or native.get("target_job_id") != (job.get("decisionx") or {}).get("target_job_id")
         or native.get("source_count") != len(source_refs)
         or native.get("candidate_count") != len(candidate_refs)
-        or native.get("source_refs_sha256") != source_refs_sha):
+        or native.get("source_refs_sha256") != source_refs_sha
+        or native.get("historical_rendered_sha256") != historical_rendered_sha):
         raise ValueError("provider-native compute proof does not bind uploaded inputs")
     if (not isinstance(advice, Mapping) or advice.get("schema") != "cognilode.decisionx.successor_advice.v1"
         or advice.get("target_job_id") != (job.get("decisionx") or {}).get("target_job_id")
@@ -263,6 +289,12 @@ def verify_output(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapp
                 ("target_prompt_sha256", "prompt_sha256"),
                 ("target_response_sha256", "response_sha256")))):
         raise ValueError("advice target does not match completed central target conversation")
+    native_render = load(HERE / "decisionx_successor_native.py", "dx_advice_target_render_verifier")
+    target_rendered = native_render.render({"provider": target["provider"],
+                                            "conversation_id": target["conversation_id"],
+                                            "events": target.get("events") or []})
+    if native.get("target_rendered_sha256") != digest(target_rendered.encode("utf-8")):
+        raise ValueError("native target render proof differs from shared conversation")
     cited = exact_refs(advice.get("candidate_refs"), candidate=True)
     allowed = {tuple(r[k] for k in ("segment_id", "provider", "conversation_id",
                                     "prompt_sha256", "response_sha256", "source_sha256")) for r in candidate_refs}
@@ -331,9 +363,10 @@ def handoff(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, job_id: str,
             install: Callable[[Path, Mapping[str, Any]], Mapping[str, Any]] | None = None) -> dict:
     gates = verify_shared_gates(post)
     job, central = provider_job(post, job_id)
-    hashes, sources, candidates, source_refs_sha = verify_inputs(post, job, central, stage_remote=stage_remote)
+    hashes, sources, candidates, source_refs_sha, historical_sha = verify_inputs(
+        post, job, central, stage_remote=stage_remote)
     advice, plan, artifact_sha = verify_output(post, job, job["effect_evidence"], hashes,
-                                                sources, candidates, source_refs_sha,
+                                                sources, candidates, source_refs_sha, historical_sha,
                                                 stage_remote=stage_remote)
     if install is None:
         root = load(HERE / "cognilode-root-plan-handoff", "dx_advice_taskflow_installer")
@@ -353,6 +386,9 @@ def tick(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, job_id: str,
     job = result.get("job") or {}
     if not result.get("ok") or job.get("id") != job_id:
         raise ValueError("DecisionX successor D1 job missing")
+    if job.get("state") in {"failed", "cancelled"}:
+        return {"ok": False, "phase": "predecessor_failed", "job_id": job_id,
+                "job_state": job["state"], "provider_requests_created": 0}
     if job.get("state") != "complete":
         return {"ok": True, "phase": "waiting_provider", "job_id": job_id,
                 "job_state": job.get("state"), "provider_requests_created": 0}
@@ -384,6 +420,19 @@ def tick(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, job_id: str,
     temp = marker.with_suffix(".next")
     temp.write_bytes(canonical(marker_value))
     os.replace(temp, marker)
+    # Local packet ZIPs are transient copies of the D1/Drive-backed inputs.
+    # The input launchpad mirrors and the returned output mirror remain available.
+    refs = job.get("attachment_refs") or []
+    if refs and isinstance(refs[0], Mapping):
+        first = Path(str(refs[0].get("ref") or "").removeprefix("file:"))
+        input_root = Path.home() / ".local/share/cognilode/decisionx-successor/input"
+        try:
+            folder = first.resolve(strict=True).parent
+            if (folder.parent == input_root.resolve() and first.name == "TARGET_AND_CANDIDATES.zip"
+                and all(isinstance(row, Mapping) and row.get("mirrors") for row in refs)):
+                shutil.rmtree(folder)
+        except (OSError, ValueError):
+            pass
     return {"phase": "installed", **installed}
 
 
@@ -401,7 +450,7 @@ def main() -> int:
         result = handoff(sender.operator_memory_post, job_id=args.decisionx_job_id,
                          output_root=args.output_root)
     print(json.dumps(result, sort_keys=True))
-    return 0
+    return 0 if result.get("ok") else 2
 
 
 if __name__ == "__main__":

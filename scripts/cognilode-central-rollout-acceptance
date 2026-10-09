@@ -177,7 +177,8 @@ if __name__ == '__main__':
             # A pinned native semantic mismatch needs a new build, not repeated
             # provider/Drive operations against unchanged bytes.
             if 'did not render imported conversation turns' in detail or \
-                'thread identity mismatch' in detail:
+                'thread identity mismatch' in detail or \
+                'Model provider `` not found' in detail:
                 sys.exit(1)
             time.sleep(delay)
             delay = min(900, delay * 2)

@@ -70,3 +70,41 @@ def test_export_range_rejects_changed_etag_or_full_body(monkeypatch):
         assert False, "full-body fallback must be rejected"
     except module.ExportChanged:
         pass
+
+
+def test_export_range_preserves_retry_after_from_head_and_range():
+    import chatmode_export_range as module
+
+    class Response:
+        def __init__(self, status, headers, content=b""):
+            self.status_code, self.headers, self.content = status, headers, content
+        def raise_for_status(self):
+            assert self.status_code == 200
+
+    class HeadLimited:
+        def head(self, *_args, **_kw):
+            return Response(503, {"Retry-After": "600"})
+
+    deferred = []
+    try:
+        module.AuthenticatedRangeFile(HeadLimited(), "https://chatgpt.com/export",
+                                      retry_hook=lambda *args: deferred.append(args))
+        assert False, "HEAD 503 must be retried later"
+    except module.ExportRetryLater as exc:
+        assert (exc.status_code, exc.retry_after_seconds) == (503, 600)
+    assert deferred == [(503, 600)]
+
+    class RangeLimited:
+        def head(self, *_args, **_kw):
+            return Response(200, {"Content-Length": "8", "Accept-Ranges": "bytes", "ETag": '"a"'})
+        def get(self, *_args, **_kw):
+            return Response(429, {"Retry-After": "300"})
+
+    source = module.AuthenticatedRangeFile(RangeLimited(), "https://chatgpt.com/export",
+                                           retry_hook=lambda *args: deferred.append(args))
+    try:
+        source.read(1)
+        assert False, "range 429 must be retried later"
+    except module.ExportRetryLater as exc:
+        assert (exc.status_code, exc.retry_after_seconds) == (429, 300)
+    assert deferred[-1] == (429, 300)

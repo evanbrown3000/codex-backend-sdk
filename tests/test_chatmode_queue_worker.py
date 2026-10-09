@@ -23,6 +23,55 @@ def worker():
     return module
 
 
+def test_bounded_job_scan_reaches_later_pages_after_state_changes(tmp_path):
+    module = worker()
+    module.ROOT = tmp_path
+    jobs = {f"job-{i:04d}": "claimed" for i in range(621)}
+    calls = []
+
+    class Sender:
+        @staticmethod
+        def operator_memory_post(body):
+            assert body["operation"] == "list_jobs"
+            calls.append(dict(body))
+            rows = [dict(id=key) for key in sorted(jobs)
+                    if jobs[key] == body["state"] and key > body["cursor"]]
+            page = rows[:body["limit"]]
+            return {"jobs": page, "next_cursor": page[-1]["id"] if len(rows) > len(page) else None}
+
+    module.sender = Sender()
+    first, cursor = module.scan_job_state("evanpc", "claimed")
+    assert len(first) == 400
+    assert cursor == "job-0399"
+    module._save_scan_cursor("evanpc", "claimed", cursor)
+    for row in first:
+        jobs[row["id"]] = "effect_pending"
+    second, cursor = module.scan_job_state("evanpc", "claimed")
+    assert len(second) == 221
+    assert cursor == ""
+    assert {x["id"] for x in first}.isdisjoint(x["id"] for x in second)
+    module._save_scan_cursor("evanpc", "claimed", cursor)
+    pending = []
+    for _ in range(4):
+        page, next_cursor = module.scan_job_state("evanpc", "effect_pending")
+        pending.extend(page)
+        module._save_scan_cursor("evanpc", "effect_pending", next_cursor)
+    assert len(pending) == 400
+    assert len(calls) <= 12
+
+
+def test_job_scan_rejects_unpaginated_full_page(tmp_path):
+    module = worker()
+    module.ROOT = tmp_path
+    class Sender:
+        @staticmethod
+        def operator_memory_post(_body):
+            return {"jobs": [{"id": str(i)} for i in range(module.JOB_SCAN_PAGE_SIZE)]}
+    module.sender = Sender()
+    with pytest.raises(RuntimeError, match="pagination is unavailable"):
+        module.scan_job_state("evanpc", "claimed")
+
+
 def test_only_fenced_rhythm_claim_for_selected_device_is_sendable():
     module = worker()
     job = {"provider": "chatgpt.com", "rhythm_tape_sha256": "a" * 64,

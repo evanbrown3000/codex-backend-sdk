@@ -621,6 +621,61 @@ def provider_sse_tool_history(raw: bytes, *, expected_sha256: str = "") -> dict:
             "finished_container_exec_results": finished_container_exec_results}
 
 
+def _provider_sse_bucket() -> str:
+    bucket = os.environ.get("COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET", "").strip()
+    if not bucket:
+        config = Path.home() / ".config/cognilode/chatmode-queue-worker.env"
+        try:
+            for line in config.read_text(encoding="utf-8").splitlines():
+                if line.startswith("COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET="):
+                    bucket = line.split("=", 1)[1].strip().strip('"')
+                    break
+        except OSError:
+            pass
+    if not re.fullmatch(r"[a-z0-9][a-z0-9.-]{2,62}", bucket):
+        raise CapabilityError("provider_sse_store_unconfigured", "private provider SSE source bucket is unavailable")
+    return bucket
+
+
+def archive_provider_sse(raw_path: Path, expected_sha256: str) -> dict:
+    """Keep the exact provider source reachable beyond this device.
+
+    The object key is content-addressed. A GET of the complete private object
+    is hashed before central memory advertises it as a durable source.
+    """
+    if not re.fullmatch(r"[a-f0-9]{64}", expected_sha256):
+        raise CapabilityError("provider_stream_hash_invalid", "provider SSE SHA-256 is invalid")
+    if not raw_path.is_file() or raw_path.stat().st_size > MAX_PROVIDER_SSE_BYTES:
+        raise CapabilityError("provider_stream_unavailable", "bounded provider SSE source file is unavailable")
+    bucket = _provider_sse_bucket()
+    key = f"chatmode-provider-sse/sha256/{expected_sha256[:2]}/{expected_sha256}.sse"
+    aws = os.environ.get("COGNILODE_AWS_CLI") or shutil.which("aws")
+    if not aws:
+        raise CapabilityError("provider_sse_store_unavailable", "AWS CLI is unavailable")
+    base = [str(aws), "s3api"]
+    head = subprocess.run([*base, "head-object", "--bucket", bucket, "--key", key,
+                           "--output", "json"], capture_output=True, text=True, timeout=45, check=False)
+    try: prior = json.loads(head.stdout) if head.returncode == 0 else {}
+    except ValueError: prior = {}
+    prior_metadata = prior.get("Metadata") if isinstance(prior.get("Metadata"), dict) else {}
+    if prior.get("ContentLength") != raw_path.stat().st_size or prior_metadata.get("sha256") != expected_sha256:
+        put = subprocess.run([*base, "put-object", "--bucket", bucket, "--key", key,
+                              "--body", str(raw_path), "--server-side-encryption", "AES256",
+                              "--metadata", "sha256=" + expected_sha256, "--output", "json"],
+                             capture_output=True, text=True, timeout=120, check=False)
+        if put.returncode:
+            raise CapabilityError("provider_sse_store_write_failed", "private provider SSE source upload failed")
+    with tempfile.TemporaryDirectory(prefix="cognilode-sse-readback-") as tmp:
+        target = Path(tmp) / "readback.sse"
+        got = subprocess.run([*base, "get-object", "--bucket", bucket, "--key", key,
+                              str(target), "--output", "json"],
+                             capture_output=True, text=True, timeout=120, check=False)
+        if got.returncode or not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != expected_sha256:
+            raise CapabilityError("provider_sse_store_readback_mismatch", "private provider SSE source readback failed")
+    return {"uri": f"s3://{bucket}/{key}", "sha256": expected_sha256,
+            "bytes": raw_path.stat().st_size, "readback_verified": True}
+
+
 def admit_central_conversation(*, result_id: str, prompt: str, result: dict, attachments: list[dict]) -> dict:
     assistant = str(result.get("terminal_assistant_text") or "")
     summary = result.get("provider_summary") if isinstance(result.get("provider_summary"), dict) else {}
@@ -636,8 +691,10 @@ def admit_central_conversation(*, result_id: str, prompt: str, result: dict, att
         if raw_path.stat().st_size > MAX_PROVIDER_SSE_BYTES:
             raise CapabilityError("provider_stream_too_large", "provider SSE exceeds bounded ingestion size")
         tool_history = provider_sse_tool_history(raw_path.read_bytes(), expected_sha256=raw_sha)
+        raw_source = archive_provider_sse(raw_path, raw_sha)
     else:
         tool_history = {"raw_stream_sha256": "", "tool_events": [], "finished_container_exec_results": 0}
+        raw_source = None
     user_event = {"role": "user", "provider_message_id": "b4pt0r-user:" + result_id,
                   "source_index": -1, "content": prompt, "authorship": "operator-authored",
                   "source_content_complete": True}
@@ -677,6 +734,7 @@ def admit_central_conversation(*, result_id: str, prompt: str, result: dict, att
             "assistant_terminal": result.get("assistant_terminal"),
             "terminal_assistant_message_id": result.get("terminal_assistant_message_id"),
             "raw_sha256": result.get("raw_sha256"),
+            "raw_sse_source": raw_source,
             "provider_tool_event_count": len(tool_history["tool_events"]),
             "provider_observed_finished_container_exec_results": tool_history["finished_container_exec_results"],
             "provider_requests_created_by_central_readback": 0,
@@ -730,6 +788,8 @@ def admit_central_conversation(*, result_id: str, prompt: str, result: dict, att
     receipt = conversation.get("read_receipt") or {}
     if raw_sha and receipt.get("raw_sha256") != raw_sha:
         raise CapabilityError("central_tool_history_readback_mismatch", "central raw stream hash mismatch")
+    if raw_source and receipt.get("raw_sse_source") != raw_source:
+        raise CapabilityError("central_tool_history_readback_mismatch", "central raw stream source mismatch")
     return {
         "ok": True,
         "stored": admitted.get("stored") is True,
@@ -740,6 +800,7 @@ def admit_central_conversation(*, result_id: str, prompt: str, result: dict, att
         "central_prompt_sha256": prompt_hash,
         "central_response_sha256": response_hash,
         "central_raw_stream_sha256": raw_sha or None,
+        "central_raw_sse_source": raw_source,
         "central_tool_event_count": len(observed_events),
         "central_observed_finished_container_exec_results": tool_history["finished_container_exec_results"],
         "provider_requests_created_by_readback": 0,

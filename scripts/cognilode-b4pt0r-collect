@@ -125,7 +125,8 @@ def collect(receipt_path: Path, *, allow_provider_read: bool = True) -> dict:
         if existing.get("complete") is True:
             prior_result = existing.get("result") if isinstance(existing.get("result"), dict) else {}
             prior_central = prior_result.get("central_conversation_store") if isinstance(prior_result.get("central_conversation_store"), dict) else {}
-            if prior_central.get("central_tool_event_count") is None and prior_result.get("raw_sha256") and existing.get("prompt") and prior_result.get("terminal_assistant_text"):
+            source = prior_central.get("central_raw_sse_source") if isinstance(prior_central.get("central_raw_sse_source"), dict) else {}
+            if (prior_central.get("central_tool_event_count") is None or source.get("readback_verified") is not True) and prior_result.get("raw_sha256") and existing.get("prompt") and prior_result.get("terminal_assistant_text"):
                 source_path = str(prior_result.get("raw_path_host") or receipt.get("raw_path_host") or receipt.get("raw_path") or receipt_path.with_name(stem + ".sse"))
                 if Path(source_path).is_file():
                     upgraded_result = {**prior_result, "raw_path_host": source_path}

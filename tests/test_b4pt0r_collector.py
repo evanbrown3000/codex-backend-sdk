@@ -61,7 +61,8 @@ def test_completed_local_receipt_upgrades_tool_history_without_provider_read(tmp
     observed = []
     def admit(**kwargs):
         observed.append(kwargs)
-        return {'ok':True,'central_readback_verified':True,'central_tool_event_count':2}
+        return {'ok':True,'central_readback_verified':True,'central_tool_event_count':2,
+                'central_raw_sse_source':{'uri':'s3://private/source.sse','readback_verified':True}}
     monkeypatch.setattr(collector.sender, 'admit_central_conversation', admit)
     result = collector.collect(receipt_path, allow_provider_read=False)
     assert result['state'] == 'central_tool_history_upgraded'

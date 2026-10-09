@@ -6,7 +6,7 @@ def load():
     loader=importlib.machinery.SourceFileLoader('taskflow_portable_test',str(SCRIPT)); spec=importlib.util.spec_from_loader(loader.name,loader); m=importlib.util.module_from_spec(spec); sys.modules[loader.name]=m; loader.exec_module(m); return m
 
 def test_portable_attachment_adds_content_addressed_https_mirror(monkeypatch,tmp_path):
-    m=load(); p=tmp_path/'research.zip'; p.write_bytes(b'x'); d='a'*64
+    m=load(); p=tmp_path/'research.zip'; p.write_bytes(b'x'); d=hashlib.sha256(p.read_bytes()).hexdigest()
     monkeypatch.setenv('COGNILODE_TASKFLOW_ATTACHMENT_MIRROR_BASE','https://launchpad.example/artifacts')
     row=m.portable_attachment_ref(p,d)
     assert row['ref']=='file:'+str(p)
@@ -14,9 +14,9 @@ def test_portable_attachment_adds_content_addressed_https_mirror(monkeypatch,tmp
     assert row['mirrors']==['https://launchpad.example/artifacts/'+d]
 
 def test_portable_attachment_rejects_non_https_mirror(monkeypatch,tmp_path):
-    m=load(); p=tmp_path/'research.zip'; p.write_bytes(b'x')
+    m=load(); p=tmp_path/'research.zip'; p.write_bytes(b'x'); d=hashlib.sha256(p.read_bytes()).hexdigest()
     monkeypatch.setenv('COGNILODE_TASKFLOW_ATTACHMENT_MIRROR_BASE','http://lan.invalid')
-    try: m.portable_attachment_ref(p,'b'*64)
+    try: m.portable_attachment_ref(p,d)
     except RuntimeError as e: assert 'https://' in str(e)
     else: raise AssertionError('expected rejection')
 

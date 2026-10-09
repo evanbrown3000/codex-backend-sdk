@@ -337,6 +337,8 @@ services:
       COGNILODE_RELAY_NODE_FILE: /relay/node.json
       COGNILODE_HEARTBEAT_STATUS: /runtime/relay/heartbeat.json
       COGNILODE_ROLLOUT_SOCKET: /runtime/drive-rollouts/rollouts.sock
+      COGNILODE_STOCK_CLI: /runtime/source/current/memory-stock-canonical/deploy/conversation-vacuum/conversation_stock_api.py
+      COGNILODE_STOCK_DB: /memory-stock/runtime/conversation-vacuum/intake.sqlite3
       COGNILODE_CENTRAL_ROLLOUT_HELPER: /codex/bin/central-rollouts
       COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
       PATH: /codex/bin:/usr/bin:/usr/local/bin:/bin
@@ -346,7 +348,7 @@ services:
       - company_relay_custody:/relay:ro
       - company_codex_release:/codex:ro
       - company_operator:/home/worker/.config/cognilode:ro
-      - memory_data:/memory-tools:ro
+      - memory_data:/memory-stock:ro
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
     depends_on:
       - credential-sync

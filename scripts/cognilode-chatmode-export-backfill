@@ -203,8 +203,12 @@ def admit(conversation: dict, info: zipfile.ZipInfo, source: AuthenticatedRangeF
             "prompt_sha256": sha256(prompt.encode()).hexdigest(),
             "response_sha256": sha256(response.encode()).hexdigest()}
     if existing and exact_readback(cid, events, summary):
-        if ((existing.get("capture") or {}).get("source_complete") is False
-            and (existing.get("capture") or {}).get("branch_graph_sha256") == summary["branch_graph_sha256"]):
+        old_capture = existing.get("capture") or {}
+        if (old_capture.get("source_complete") is False
+            and old_capture.get("branch_graph_sha256") == summary["branch_graph_sha256"]
+            and old_capture.get("source_text_projection_scope") == capture["source_text_projection_scope"]
+            and old_capture.get("source_omitted_thought_count") == capture["source_omitted_thought_count"]
+            and old_capture.get("source_omitted_thought_sha256") == capture["source_omitted_thought_sha256"]):
             return "exact_dedupe"
         # Metadata-only correction, retaining already verified D1 turns.
         repaired = sender.operator_memory_post({"operation": "record_conversation",
@@ -216,6 +220,9 @@ def admit(conversation: dict, info: zipfile.ZipInfo, source: AuthenticatedRangeF
         after = prior_conversation(cid) or {}
         if ((after.get("capture") or {}).get("source_complete") is not False
             or (after.get("capture") or {}).get("branch_graph_sha256") != summary["branch_graph_sha256"]
+            or (after.get("capture") or {}).get("source_text_projection_scope") != capture["source_text_projection_scope"]
+            or (after.get("capture") or {}).get("source_omitted_thought_count") != capture["source_omitted_thought_count"]
+            or (after.get("capture") or {}).get("source_omitted_thought_sha256") != capture["source_omitted_thought_sha256"]
             or not exact_readback(cid, events, summary)):
             raise RuntimeError("D1 export fidelity correction readback differs")
         return "exact_dedupe"
@@ -266,6 +273,76 @@ def append_receipt(state_root: Path, conversation: dict, info: zipfile.ZipInfo,
             os.fsync(out.fileno())
     except Exception:
         raise
+
+
+def legacy_scope_repair_pending(state_root: Path, state: dict | None) -> bool:
+    if not state:
+        return False
+    path = state_root / "d1_exact_receipts.jsonl"
+    return path.is_file() and path.stat().st_size > int(state.get("scope_repair_receipt_bytes") or 0)
+
+
+def repair_legacy_scope(archive: zipfile.ZipFile, source: AuthenticatedRangeFile,
+                        state_root: Path, state_path: Path, state: dict,
+                        *, maximum: int = 10) -> int:
+    """Replay exact source receipts for metadata only, with a durable byte cursor.
+
+    This stays in the existing export/D1/Drive path.  Each bounded turn reads
+    one authenticated ZIP member and never stores its conversation content.
+    D1 events must already match exactly; `admit` cannot add a new source here.
+    """
+    path = state_root / "d1_exact_receipts.jsonl"
+    if not path.is_file():
+        return 0
+    position = int(state.get("scope_repair_receipt_bytes") or 0)
+    targets = []
+    with path.open("rb") as receipts:
+        receipts.seek(position)
+        while len(targets) < maximum:
+            start = receipts.tell()
+            line = receipts.readline()
+            if not line or not line.endswith(b"\n"):
+                break
+            receipt = json.loads(line)
+            if receipt.get("archive_etag") != source.etag or receipt.get("archive_bytes") != source.size:
+                raise RuntimeError("scope repair source archive differs from exact D1 receipt")
+            if targets and receipt.get("member") != targets[0][1]["member"]:
+                break
+            targets.append((receipts.tell(), receipt))
+    if not targets:
+        return 0
+    member_name = targets[0][1]["member"]
+    info = archive.getinfo(member_name)
+    if info.file_size > MAX_SHARD_BYTES or any(
+            row["member_crc32"] != f"{info.CRC:08x}" for _, row in targets):
+        raise RuntimeError("scope repair ZIP member differs from exact D1 receipt")
+    offsets = {int(row["offset"]): (end, row) for end, row in targets}
+    if len(offsets) != len(targets):
+        raise RuntimeError("duplicate scope repair source offset")
+    repaired = 0
+    with archive.open(info) as member:
+        for offset, conversation in enumerate(ijson.items(member, "item")):
+            if offset not in offsets:
+                if offset > max(offsets):
+                    break
+                continue
+            end, receipt = offsets[offset]
+            if sha_json(conversation) != receipt["source_conversation_sha256"]:
+                raise RuntimeError("scope repair conversation differs from exact source receipt")
+            stored_id, _, existing = source_identity(conversation, info, source, offset)
+            expected_id = receipt.get("stored_conversation_id") or receipt.get("conversation_id")
+            if stored_id != expected_id or not existing:
+                raise RuntimeError("scope repair missing exact D1 source identity")
+            if admit(conversation, info, source, offset) != "exact_dedupe":
+                raise RuntimeError("scope repair unexpectedly created D1 conversation")
+            state["scope_repair_receipt_bytes"] = end
+            write_state(state_path, state)
+            repaired += 1
+            if repaired == len(targets):
+                break
+    if repaired != len(targets):
+        raise RuntimeError("scope repair ZIP member ended before receipt offset")
+    return repaired
 
 
 def append_empty_source_receipt(state_root: Path, info: zipfile.ZipInfo,
@@ -462,7 +539,9 @@ def run(url_file: Path, *, maximum: int, state_root: Path = STATE_ROOT) -> dict:
                                   "conversation has no visible textual events"}
             for row in state.get("deferred") or []))
         old_pending = archived_drive_lag(state_root)
-        if state is not None and not candidate_file.is_file() and not repairable_without_d1:
+        if (state is not None and not candidate_file.is_file()
+            and not repairable_without_d1
+            and not legacy_scope_repair_pending(state_root, state)):
             early_lag = drive_lag(state_root, state["archive_etag"], state)
             early_lag["archived_pending_drive"] = old_pending
             early_lag["pending_drive"] += old_pending
@@ -501,6 +580,11 @@ def run(url_file: Path, *, maximum: int, state_root: Path = STATE_ROOT) -> dict:
         if state is not None and (state.get("archive_etag") != source.etag or
                                   state.get("archive_bytes") != source.size):
             raise RuntimeError("new archive identity requires prior cursor reconciliation")
+        scope_repaired = 0
+        if legacy_scope_repair_pending(state_root, state):
+            with zipfile.ZipFile(source) as archive:
+                scope_repaired = repair_legacy_scope(
+                    archive, source, state_root, state_path, state, maximum=10)
         if state is None and old_pending >= PENDING_HIGH_WATER:
             return {"state": "drive_lag_backpressure", "pending_drive": old_pending,
                     "archived_pending_drive": old_pending,
@@ -520,6 +604,7 @@ def run(url_file: Path, *, maximum: int, state_root: Path = STATE_ROOT) -> dict:
                     state["backpressure_paused"] = True
                     write_state(state_path, state)
                 return {"state": "drive_lag_backpressure", **lag,
+                        "legacy_scope_receipts_verified": scope_repaired,
                         "resume_pending_at_or_below": PENDING_LOW_WATER,
                         "next_shard": state.get("next_shard"), "position": state.get("position")}
             if paused:

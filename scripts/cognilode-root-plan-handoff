@@ -309,12 +309,87 @@ def extract_plan(job: Mapping[str, Any], central: Mapping[str, Any]) -> tuple[di
         raise ValueError("root response needs one exact plan block")
     raw = text.split(BEGIN, 1)[1].split(END, 1)[0].strip()
     plan = json.loads(raw)
-    if not isinstance(plan, dict) or plan.get("schema") != "cognilode.root_taskflow_plan.v1":
+    if not isinstance(plan, dict) or plan.get("schema") not in (
+        "cognilode.root_taskflow_plan.v1", "cognilode.root_taskflow_portfolio.v1"
+    ):
         raise ValueError("root plan schema mismatch")
     return plan, _sha(text)
 
 
+def validate_portfolio(plan: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    """Preserve root-authored instructions while enforcing causal hierarchy.
+
+    Scope links are management relationships, not prompt templates. The first
+    action in each subordinate scope must consume an upstream plan action.
+    TaskFlow then enforces those edges in its existing dependency scheduler.
+    """
+    if plan.get("schema") != "cognilode.root_taskflow_portfolio.v1":
+        return {}
+    scopes = plan.get("scopes")
+    steps = plan.get("steps")
+    if not isinstance(scopes, list) or not 3 <= len(scopes) <= 32:
+        raise ValueError("root portfolio needs 3-32 company/team/employee scopes")
+    if not isinstance(steps, list) or not steps or len(steps) > 64:
+        raise ValueError("root portfolio needs 1-64 steps")
+    by_scope: dict[str, Mapping[str, Any]] = {}
+    kinds = {"company": 0, "team": 0, "employee": 0}
+    for scope in scopes:
+        if not isinstance(scope, Mapping):
+            raise ValueError("portfolio scope must be an object")
+        sid = str(scope.get("id") or "")
+        kind = str(scope.get("kind") or "")
+        name = str(scope.get("name") or "").strip()
+        if (not IDENT.fullmatch(sid) or sid in by_scope or kind not in kinds
+            or not name or "\n" in name):
+            raise ValueError("invalid or duplicate portfolio scope")
+        if kind == "employee" and (not str(scope.get("employee") or "").strip()
+                                   or "\n" in str(scope["employee"])):
+            raise ValueError("employee scope requires a named employee")
+        by_scope[sid] = scope
+        kinds[kind] += 1
+    if kinds["company"] != 1 or kinds["team"] < 1 or kinds["employee"] < 1:
+        raise ValueError("portfolio needs one company and team/employee branches")
+    for sid, scope in by_scope.items():
+        kind = scope["kind"]
+        parent = scope.get("parent")
+        if kind == "company":
+            if parent not in (None, ""):
+                raise ValueError("company scope cannot have a parent")
+            continue
+        if parent not in by_scope or by_scope[parent]["kind"] != ("company" if kind == "team" else "team"):
+            raise ValueError("team/employee scope needs its immediate manager scope")
+    steps_by_scope: dict[str, list[Mapping[str, Any]]] = {sid: [] for sid in by_scope}
+    steps_by_id: dict[str, Mapping[str, Any]] = {}
+    for step in steps:
+        if not isinstance(step, Mapping):
+            raise ValueError("portfolio step must be an object")
+        sid = str(step.get("id") or "")
+        scope_id = str(step.get("scope_id") or "")
+        if not IDENT.fullmatch(sid) or sid in steps_by_id or scope_id not in by_scope:
+            raise ValueError("portfolio step has invalid id or scope")
+        scope = by_scope[scope_id]
+        if scope["kind"] == "employee" and step.get("owner") != scope["employee"]:
+            raise ValueError("employee step owner must be the named employee")
+        steps_by_id[sid] = step
+        steps_by_scope[scope_id].append(step)
+    if any(not scoped for scoped in steps_by_scope.values()):
+        raise ValueError("every portfolio scope needs a substantive step")
+    for sid, scope in by_scope.items():
+        if scope["kind"] == "company":
+            continue
+        parent = scope["parent"]
+        first = steps_by_scope[sid][0]
+        deps = first.get("depends_on") or []
+        if (not isinstance(deps, list) or not any(
+            str(dep) in steps_by_id and steps_by_id[str(dep)].get("scope_id") == parent
+            for dep in deps
+        )):
+            raise ValueError("first child-scope step must depend on a parent-scope step")
+    return by_scope
+
+
 def render_taskflow(plan: Mapping[str, Any], *, conversation_id: str, assistant_sha256: str) -> str:
+    scopes = validate_portfolio(plan)
     project_id = str(plan.get("project_id") or "")
     name = str(plan.get("project_name") or "").strip()
     if (not IDENT.fullmatch(project_id) or not name or "\n" in name
@@ -344,6 +419,12 @@ def render_taskflow(plan: Mapping[str, Any], *, conversation_id: str, assistant_
             raise ValueError("invalid root plan step")
         ids.add(sid)
         lines.extend([f"[ ] {sid} {title}", f"    owner: {owner}", f"    role: {role}"])
+        if scopes:
+            scope_id = str(item["scope_id"])
+            scope = scopes[scope_id]
+            lines.extend(["    hierarchy_scope: " + scope_id,
+                          "    hierarchy_kind: " + str(scope["kind"]),
+                          "    hierarchy_parent: " + str(scope.get("parent") or "")])
         if deps:
             lines.append("    depends_on: " + ", ".join(str(d) for d in deps))
         lines.append("    do:")

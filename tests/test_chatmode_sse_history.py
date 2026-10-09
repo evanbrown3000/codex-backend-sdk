@@ -4,7 +4,9 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import json
+import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -49,8 +51,46 @@ def test_sse_history_reconstructs_patches_and_true_native_pair():
         module.provider_sse_tool_history(raw, expected_sha256='0' * 64)
 
 
+def test_private_raw_source_requires_exact_get_readback(tmp_path, monkeypatch):
+    module = sender()
+    path = tmp_path / 'source.sse'
+    path.write_bytes(tiny_stream())
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    object_path = tmp_path / 'private-object.sse'
+    monkeypatch.setenv('COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET', 'private-chatmode-source')
+    monkeypatch.setenv('COGNILODE_AWS_CLI', '/usr/bin/aws')
+
+    def run(argv, **_kwargs):
+        operation = argv[2]
+        if operation == 'head-object':
+            if object_path.is_file():
+                return SimpleNamespace(returncode=0, stdout=json.dumps({
+                    'ContentLength':path.stat().st_size,'Metadata':{'sha256':digest}}))
+            return SimpleNamespace(returncode=1, stdout='')
+        if operation == 'put-object':
+            shutil.copyfile(argv[argv.index('--body') + 1], object_path)
+            return SimpleNamespace(returncode=0, stdout='{}')
+        if operation == 'get-object':
+            shutil.copyfile(object_path, argv[-3])
+            return SimpleNamespace(returncode=0, stdout='{}')
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(module.subprocess, 'run', run)
+    source = module.archive_provider_sse(path, digest)
+    assert source['sha256'] == digest
+    assert source['readback_verified'] is True
+    assert source['bytes'] == len(tiny_stream())
+    assert source['uri'].startswith('s3://private-chatmode-source/chatmode-provider-sse/sha256/')
+    object_path.write_bytes(b'tampered')
+    with pytest.raises(module.CapabilityError, match='readback failed'):
+        module.archive_provider_sse(path, digest)
+
+
 def test_sse_history_is_admitted_in_order_and_independently_read_back(tmp_path, monkeypatch):
     module = sender()
+    monkeypatch.setattr(module, 'archive_provider_sse', lambda path, sha: {
+        'uri':'s3://private/chatmode-provider-sse/sha256/'+sha+'.sse',
+        'sha256':sha,'bytes':path.stat().st_size,'readback_verified':True})
     raw = tiny_stream()
     path = tmp_path / 'provider.sse'
     path.write_bytes(raw)
@@ -84,6 +124,9 @@ def test_sse_history_is_admitted_in_order_and_independently_read_back(tmp_path, 
 
 def test_readback_rejects_missing_provider_tool_result(tmp_path, monkeypatch):
     module = sender()
+    monkeypatch.setattr(module, 'archive_provider_sse', lambda path, sha: {
+        'uri':'s3://private/chatmode-provider-sse/sha256/'+sha+'.sse',
+        'sha256':sha,'bytes':path.stat().st_size,'readback_verified':True})
     raw = tiny_stream()
     path = tmp_path / 'provider.sse'
     path.write_bytes(raw)

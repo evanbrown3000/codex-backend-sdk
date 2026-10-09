@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""Discover factual Slack roles; install only employees proven by a real D1 turn.
+
+This is a roster reconciler, not a prompt queue. Slack text supplies identity facts,
+never instructions. The installed roster is deliberately narrower than candidates.
+"""
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+import html
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import tempfile
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+INSTALLED = ROOT / "config/employee-slack-roles.json"
+CANDIDATES = ROOT / "config/employee-slack-candidates.json"
+SENDER = ROOT / "scripts/cognilode-b4pt0r-chatmode"
+DEFAULT_SNAPSHOTS = (Path.home() / ".local/share/cognilode/"
+                     "spine-rpe-decisionx-batches-20261007T223721Z/decisionx-spine/slack")
+ROLE = re.compile(r"^(?P<name>[A-Z][a-z]+(?: [A-Z][a-z]+){1,2}) — "
+                  r"(?P<role>[^—\n]{8,100}) — (?P<org>[^\n]{4,180})$")
+TITLE = re.compile(r"\b(?:Engineer|Researcher|Scientist|Architect|Manager|Director|Specialist|Lead)\b")
+MAX_SNAPSHOTS = 500
+MAX_SNAPSHOT_BYTES = 4_000_000
+
+
+def source_message(channel: str, ts: str) -> str:
+    return f"https://everything-ces8532.slack.com/archives/{channel}/p{ts.replace('.', '')}"
+
+
+def role_from_message(text: str) -> tuple[str, str, str] | None:
+    first = html.unescape(text).strip().split("\n", 1)[0].strip()
+    match = ROLE.fullmatch(first)
+    if not match or not TITLE.search(match["role"]):
+        return None
+    org = match["org"]
+    # Execution status lines are not role declarations.
+    if re.search(r"\b(?:ACTIVE|execution note|changed shared effect|claim-barrier|\d{1,2}:\d{2})\b", org, re.I):
+        return None
+    return match["name"], match["role"], org
+
+
+def discover(snapshot_dirs: list[Path]) -> dict[str, Any]:
+    candidates: dict[str, dict[str, Any]] = {}
+    projects: dict[str, list[str]] = {}
+    for directory in snapshot_dirs:
+        files = sorted(directory.glob("*.json")) if directory.is_dir() else []
+        if len(files) > MAX_SNAPSHOTS:
+            raise ValueError(f"too many Slack snapshots in {directory}")
+        for path in files:
+            if path.stat().st_size > MAX_SNAPSHOT_BYTES:
+                raise ValueError(f"Slack snapshot too large: {path}")
+            document = json.loads(path.read_text(encoding="utf-8"))
+            channel = str(document.get("channel_id") or "")
+            if not re.fullmatch(r"C[A-Z0-9]{8,}", channel):
+                continue
+            channel_names: set[str] = set()
+            for message in document.get("messages") or []:
+                if not isinstance(message, dict):
+                    continue
+                parsed = role_from_message(str(message.get("text") or ""))
+                ts = str(message.get("ts") or "")
+                if not parsed or not re.fullmatch(r"\d{10}\.\d{1,6}", ts):
+                    continue
+                name, role, org = parsed
+                channel_names.add(name)
+                ref = source_message(channel, ts)
+                row = candidates.setdefault(name, {"role": role, "org": org,
+                                                   "slack_message": ref,
+                                                   "sources": [], "role_variants": []})
+                row["sources"].append(ref)
+                variant = {"role": role, "org": org, "slack_message": ref}
+                if variant not in row["role_variants"]:
+                    row["role_variants"].append(variant)
+                # Prefer the latest valid declaration, never a status update.
+                if ts > row.get("latest_ts", ""):
+                    row.update(role=role, org=org, slack_message=ref, latest_ts=ts)
+            if channel_names:
+                projects[path.stem] = sorted(channel_names)
+    for row in candidates.values():
+        row["sources"] = sorted(set(row["sources"]))
+        row.pop("latest_ts", None)
+    return {"schema": "cognilode.employee_slack_candidates.v1",
+            "sources": [str(p) for p in snapshot_dirs],
+            "candidates": dict(sorted(candidates.items())), "channels": projects}
+
+
+def _sender():
+    loader = importlib.machinery.SourceFileLoader("employee_roster_sender", str(SENDER))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    loader.exec_module(module)
+    return module
+
+
+def verified_employee_job(job: dict[str, Any], candidate: dict[str, Any], post) -> bool:
+    name = str(job.get("assigned_employee") or "")
+    if (job.get("state") != "complete" or job.get("claimed_by") != name
+        or job.get("provider") not in {"codex.research", "codex.external-effect"}
+        or job.get("prompt_author") != "taskflow_plan"
+        or not isinstance(job.get("taskflow_plan_receipt"), dict)
+        or name not in str(job.get("prompt") or "")):
+        return False
+    evidence = [e for e in job.get("effect_evidence") or [] if isinstance(e, dict)]
+    effect_kind = "research_zip" if job["provider"] == "codex.research" else "external_effect"
+    if not any(e.get("kind") == effect_kind and e.get("ref") for e in evidence):
+        return False
+    identities = [e for e in evidence if e.get("kind") == "codex_session_identity"
+                  and e.get("job_id") == job.get("id")
+                  and e.get("conversation_id_source") == "codex_cli_stderr_header"]
+    if len(identities) != 1:
+        return False
+    cid = str(identities[0].get("conversation_id") or "")
+    if not re.fullmatch(r"[0-9a-f-]{36}", cid):
+        return False
+    if job.get("conversation_id") not in (None, cid):
+        return False
+    # A completed D1 job alone does not prove that other agents can read the turn.
+    read = post({"operation": "read", "provider": "openai-codex", "conversation_id": cid})
+    conversation = read.get("conversation") or {}
+    if not read.get("ok") or conversation.get("conversation_id") != cid:
+        return False
+    events = conversation.get("events") or []
+    if not any(isinstance(e, dict) and e.get("role") == "assistant"
+               and e.get("source_content_complete") is True for e in events):
+        return False
+    # The installed route must be backed by the user's actual Codex executable.
+    executable = Path.home() / ".local/bin/codex"
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        return False
+    return True
+
+
+def _atomic_json(path: Path, value: dict[str, Any]) -> None:
+    raw = (json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode()
+    if path.is_file() and path.read_bytes() == raw:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("wb", dir=path.parent,
+                                     prefix=".roster-", delete=False) as out:
+        tmp = Path(out.name)
+        out.write(raw)
+        out.flush()
+        os.fsync(out.fileno())
+    tmp.replace(path)
+
+
+def reconcile(snapshot_dirs: list[Path], *, activate: bool = True,
+              installed_path: Path = INSTALLED, candidates_path: Path = CANDIDATES,
+              post=None) -> dict[str, Any]:
+    facts = discover(snapshot_dirs)
+    installed = json.loads(installed_path.read_text(encoding="utf-8"))
+    employees = installed.get("employees") or {}
+    if not isinstance(employees, dict):
+        raise ValueError("installed roster employees invalid")
+    # Candidate file may be read by TaskFlow for a one-turn onboarding job;
+    # root planning reads only installed employees.
+    _atomic_json(candidates_path, facts)
+    added: list[str] = []
+    if activate:
+        if post is None:
+            post = _sender().operator_memory_post
+        for provider in ("codex.research", "codex.external-effect"):
+            cursor = None
+            for _ in range(20):
+                request = {"operation": "list_jobs", "provider": provider,
+                           "state": "complete", "limit": 100}
+                if cursor:
+                    request["cursor"] = cursor
+                result = post(request)
+                if not result.get("ok"):
+                    raise RuntimeError(f"D1 {provider} job listing failed")
+                for job in result.get("jobs") or []:
+                    name = str(job.get("assigned_employee") or "")
+                    candidate = facts["candidates"].get(name)
+                    if not candidate or name in employees:
+                        continue
+                    if verified_employee_job(job, candidate, post):
+                        employees[name] = {k: candidate[k] for k in
+                                           ("role", "org", "slack_message")}
+                        added.append(name)
+                cursor = result.get("next_cursor")
+                if not cursor:
+                    break
+            else:
+                raise RuntimeError("D1 employee job inventory exceeds bounded scan")
+    if added:
+        installed["employees"] = dict(sorted(employees.items()))
+        installed["captured_at"] = datetime.now(timezone.utc).date().isoformat()
+        _atomic_json(installed_path, installed)
+    return {"candidates": len(facts["candidates"]), "installed": len(employees),
+            "activated": sorted(added), "channels": len(facts["channels"])}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--snapshot-dir", action="append", type=Path,
+                        dest="snapshot_dirs")
+    parser.add_argument("--candidates-only", action="store_true")
+    args = parser.parse_args()
+    print(json.dumps(reconcile(args.snapshot_dirs or [DEFAULT_SNAPSHOTS],
+                               activate=not args.candidates_only), sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

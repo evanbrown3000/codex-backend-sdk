@@ -246,7 +246,7 @@ class RootMemoryCycleTests(unittest.TestCase):
                 "attachment_refs": [{"ref": "file:" + row["path"], "sha256": row["sha256"]}
                                     for row in batches],
                 "conversation_id": "chat-native", "effect_evidence": [
-                    {"kind": "provider_observed_functions_exec", "ref": "native-tool-result"},
+                    {"kind": "provider_observed_native_exec", "ref": "native-tool-result"},
                     {"kind": "provider_conversation", "ref": "chat-native"},
                     {"kind": "central_conversation_readback", "ref": "chat-native"},
                     {"kind": "chatgpt_sandbox_artifact", "ref": digest, "path": str(packet)}]}
@@ -271,7 +271,9 @@ class RootMemoryCycleTests(unittest.TestCase):
             d1.chat["chat-native"]["provider_structured_uploads"] = [
                 {"sha256": row["sha256"]} for row in batches]
             d1.jobs["native-job"]["effect_evidence"] = [row for row in d1.jobs["native-job"]["effect_evidence"]
-                if row["kind"] != "provider_observed_functions_exec"]
+                if row["kind"] != "provider_observed_native_exec"]
+            d1.jobs["native-job"]["effect_evidence"].append(
+                {"kind": "provider_observed_functions_exec", "ref": "code-mode-tool-result"})
             with self.assertRaises(ValueError):
                 cycle.finalize(d1, native_job_id="native-job", bridge=FakeBridge(selected),
                                controller=FakeController(), publish=lambda row: "not-used")

@@ -13,10 +13,62 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE = ROOT / "deploy/compose/company-chatmode.yml"
 SELF = "cognilode-company-containers.service"
+
+
+def prepare_portable_aws(project: str, image: str, uid: int, gid: int) -> None:
+    """Create credential_process custody after one central broker readback.
+
+    No AWS access key or host ~/.aws file enters this volume. The one-time
+    operator enrollment token may be supplied by a company registration file.
+    """
+    volume = f"{project}_company_aws_client"
+    operator = f"{project}_company_operator"
+    for name in (volume, operator):
+        subprocess.run(["docker", "volume", "create", name], stdout=subprocess.DEVNULL,
+                       check=True, timeout=30)
+    probe = subprocess.run(["docker", "run", "--rm", "--volume", f"{operator}:/operator:ro",
+                            image, "cat", "/operator/operator-bearer"],
+                           capture_output=True, text=True, check=False, timeout=30)
+    token = probe.stdout.strip() if probe.returncode == 0 else ""
+    if not token:
+        enrollment = Path(os.environ.get("COGNILODE_BOOTSTRAP_OPERATOR_TOKEN_FILE", ""))
+        if not enrollment.is_file():
+            raise RuntimeError("portable AWS bootstrap requires enrolled operator token custody")
+        subprocess.run(["docker", "run", "--rm", "--user", "0",
+                        "--mount", f"type=bind,src={enrollment.resolve()},dst=/seed,readonly",
+                        "--volume", f"{operator}:/operator", image, "sh", "-c",
+                        f"cp /seed /operator/operator-bearer && chmod 600 /operator/operator-bearer && chown {uid}:{gid} /operator/operator-bearer"],
+                       stdout=subprocess.DEVNULL, check=True, timeout=30)
+        token = enrollment.read_text().strip()
+    token = token.removeprefix("Bearer ").strip()
+    marker = subprocess.run(["docker", "run", "--rm", "--volume", f"{volume}:/aws:ro",
+                             image, "sh", "-c", "test -s /aws/central-broker-ready && test -s /aws/config"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            check=False, timeout=30)
+    if marker.returncode == 0:
+        return
+    base = os.environ.get("COGNILODE_OPERATOR_URL", "https://cognilode.com").rstrip("/")
+    request = urllib.request.Request(base + "/api/operator/aws-session",
+        data=b'{"purpose":"artifact-read"}', method="POST",
+        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json",
+            "Accept": "application/json,text/plain,*/*",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+            "Origin": base, "Referer": base + "/"})
+    with urllib.request.urlopen(request, timeout=45) as response:
+        readback = json.load(response)
+    if not readback.get("ok") or not readback.get("credentials", {}).get("Expiration"):
+        raise RuntimeError("central scoped AWS broker has no live STS session")
+    config = ("[default]\nregion = us-west-2\n"
+        "credential_process = python3 /runtime/source/current/codex-backend-sdk/scripts/cognilode-aws-credential-process\n")
+    subprocess.run(["docker", "run", "--rm", "-i", "--user", "0",
+                    "--volume", f"{volume}:/aws", image, "sh", "-c",
+                    f"cat > /aws/config && touch /aws/central-broker-ready && chmod 600 /aws/config && chown -R {uid}:{gid} /aws"],
+                   input=config, text=True, stdout=subprocess.DEVNULL, check=True, timeout=30)
 
 
 def run(*args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -84,6 +136,7 @@ def main() -> int:
     startup_time = time.time()
     repos = Path(os.environ.get("COMPANY_REPOS_ROOT", str(Path.home() / "Projects"))).resolve()
     runtime = Path(os.environ.get("COMPANY_RUNTIME_ROOT", str(Path.home() / ".local/share/cognilode/company-runtime"))).resolve()
+    portable_aws = os.environ.get("COGNILODE_PORTABLE_AWS") == "1"
     aws = Path(os.environ.get("AWS_AUTH_ROOT", str(Path.home() / ".aws"))).resolve()
     for name in ("worker", "shared"):
         (runtime / name).mkdir(parents=True, exist_ok=True)
@@ -106,7 +159,8 @@ def main() -> int:
                           {**os.environ, "COGNILODE_BOOTSTRAP_FROM_SYNC": "1"})
     migrate_previous_state(Path(os.environ.get("COMPANY_LEGACY_DATA_ROOT", str(Path.home() / ".local/share/cognilode"))), runtime)
     env = {**os.environ, "COMPANY_REPOS_ROOT": str(repos), "COMPANY_RUNTIME_ROOT": str(runtime),
-           "AWS_AUTH_ROOT": str(aws), "COMPANY_UID": str(os.getuid()), "COMPANY_GID": str(os.getgid()),
+           "AWS_AUTH_ROOT": "company_aws_client" if portable_aws else str(aws),
+           "COMPANY_UID": str(os.getuid()), "COMPANY_GID": str(os.getgid()),
            "COGNILODE_ENVIRONMENT_ID": os.environ.get("COGNILODE_ENVIRONMENT_ID", "evanpc-company-container")}
     legacy_relay = Path(os.environ.get("COGNILODE_LEGACY_RELAY_ENV",
                                    str(Path.home() / ".config/cognilode/evanpc-host-node.env")))
@@ -114,6 +168,8 @@ def main() -> int:
                    env=env, check=True, timeout=120)
     project = "cognilode-company-runtime"
     image = env.get("COGNILODE_WORKSPACE_IMAGE", "cognilode-standard-workspace:2026-09-28")
+    if portable_aws:
+        prepare_portable_aws(project, image, os.getuid(), os.getgid())
     migrate_container_browser(project, image)
     for name in ("company_auth", "company_operator", "company_deploy_custody",
                  "memory_data", "memory_drive_auth", "company_relay_custody"):

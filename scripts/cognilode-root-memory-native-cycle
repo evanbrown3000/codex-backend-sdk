@@ -443,11 +443,19 @@ def enqueue_root_planning(post: Callable[[dict[str, Any]], Mapping[str, Any]],
     step = plan.steps[0]
     digest = str(memory["sha256"])
     job_id = "root-agent-" + digest[:32] + f"-a{attempt}"
+    bridge = _load(BRIDGE, "root_planning_employee_roster")
+    roster = bridge.executable_roster_snapshot(
+        DEFAULT_ROOT / "root-rosters" / (digest[:32] + f"-a{attempt}.json"))
+    roster_context = json.dumps(roster, sort_keys=True)
     prompt = ("Carry out the attached long-horizon root-agent TaskFlow plan in ChatGPT.com Chat mode. "
               "Read the physically attached multi-year global/project/role memory ZIP. "
               "Write a causal portfolio of plans for the company, named teams, and named individual "
               "employees, not prompts for them. Ground dependencies and effects in the attached memory "
               "while preserving uncertainty and changing circumstances. "
+              "Assign immediate TaskFlow steps only to employees in the current installed roster below. "
+              "You may plan onboarding new employees as work owned by an existing employee; later root "
+              "turns can use them after installation. The roster is factual capacity, not policy or "
+              "authority over your decisions. Current installed employee roster: " + roster_context + ". "
               "The final in-chat response must contain one exact "
               "COGNILODE_ROOT_TASKFLOW_PLAN_JSON_BEGIN / COGNILODE_ROOT_TASKFLOW_PLAN_JSON_END "
               "block with schema cognilode.root_taskflow_portfolio.v1 and a full report. Return one downloadable "

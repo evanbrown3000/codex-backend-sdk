@@ -394,6 +394,61 @@ def verify_manifest_zip(path: Path, *, expected_plan_sha256: str | None = None,
     }
 
 
+def root_portfolio_plan(plan: Plan) -> bool:
+    return "root_conversation_id " in plan.text and any(
+        step.fields.get("hierarchy_scope") for step in plan.steps)
+
+
+def verify_independent_probe_packet(path: Path, plan: Plan, step: Step) -> dict[str, str]:
+    """Freeze a named research employee's probe before the sandbox worker sees it."""
+    command = str(step.fields.get("effect_probe_command") or "")
+    argv = shlex.split(command)
+    if len(argv) < 3 or argv[:2] != ["/usr/bin/python3", "-I"]:
+        raise ValueError("root step lacks a dedicated Python effect probe")
+    target = str(Path.home() / ".local/share/cognilode/taskflow-probes"
+                 / plan.project_id / (step.step_id + ".py"))
+    if argv[2] != target:
+        raise ValueError("root step probe target differs from its dedicated path")
+    source_member = f"probes/{step.step_id}.py"
+    with zipfile.ZipFile(path) as archive:
+        if "PROBE_INSTALL.json" not in archive.namelist() or source_member not in archive.namelist():
+            raise ValueError("independent research ZIP lacks probe install packet")
+        if archive.getinfo("PROBE_INSTALL.json").file_size > 16_384:
+            raise ValueError("probe install packet is oversized")
+        raw = archive.read("PROBE_INSTALL.json")
+        packet = json.loads(raw)
+        script = archive.read(source_member)
+    if (not isinstance(packet, dict)
+        or packet.get("schema") != "cognilode.taskflow.independent_probe.v1"
+        or packet.get("plan_sha256") != plan.sha256
+        or packet.get("step_id") != step.step_id
+        or packet.get("command") != command
+        or packet.get("target_path") != target
+        or packet.get("source_member") != source_member
+        or packet.get("source_sha256") != sha256_bytes(script)
+        or not 32 <= len(script) <= 256_000):
+        raise ValueError("independent probe packet differs from committed root plan or script")
+    return {"packet_sha256": sha256_bytes(raw), "source_sha256": sha256_bytes(script),
+            "target_path": target, "source_member": source_member}
+
+
+def verify_installed_independent_probe(work_zip: Path, plan: Plan, step: Step) -> dict[str, str]:
+    packet = verify_independent_probe_packet(work_zip, plan, step)
+    target = Path(packet["target_path"])
+    if not target.is_file() or sha256_file(target) != packet["source_sha256"]:
+        raise ValueError("external Codex has not installed the frozen independent probe")
+    return packet
+
+
+def verify_carried_independent_probe(research_zip: Path, work_zip: Path,
+                                     plan: Plan, step: Step) -> dict[str, str]:
+    frozen = verify_independent_probe_packet(research_zip, plan, step)
+    carried = verify_independent_probe_packet(work_zip, plan, step)
+    if frozen != carried:
+        raise ValueError("ChatGPT work ZIP changed independent research probe")
+    return frozen
+
+
 class QueueClient:
     def __init__(self, sender_module: Any): self.sender = sender_module
     def post(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -480,15 +535,33 @@ def job_base(plan: Plan, step: Step, phase: str, *, provider: str, priority: int
 
 
 def research_prompt(plan: Plan, step: Step, role: str, out_zip: Path) -> str:
-    return f"""You are the named Codex research employee for this TaskFlow step.\n{slack_role_context(role)}\nProject: {plan.project_id}\nPlan SHA-256: {plan.sha256}\nStep: {step.step_id} {step.title}\n\nRead and use the FULL plan below, not an isolated leaf. Research only; do not claim TaskFlow completion. Build a focused physically readable ZIP at exactly:\n{out_zip}\nThe ZIP must contain top-level MANIFEST.json with plan_sha256={plan.sha256!r} and a files list that SHA-256 covers every other non-directory member. Include relevant code/docs/data and a research report. Do not include secrets or credentials.\n\n--- FULL PLAN ---\n{plan.text}\n"""
+    probe = (f"Because this is a root portfolio step, independently author a read-only beneficiary "
+             f"effect probe before the ChatGPT worker begins. Include top-level PROBE_INSTALL.json "
+             f"with schema=cognilode.taskflow.independent_probe.v1, plan_sha256={plan.sha256}, "
+             f"step_id={step.step_id}, command exactly as this step's effect_probe_command, "
+             f"target_path equal to the Python script path in that command, "
+             f"source_member=probes/{step.step_id}.py, and source_sha256 of that script. "
+             f"Include the script at probes/{step.step_id}.py in the ZIP manifest. "
+             f"The probe must read actual beneficiary state; do not make it a receipt/test-only assertion. "
+             f"The ChatGPT worker must carry these exact bytes forward unchanged.\n"
+             if root_portfolio_plan(plan) else "")
+    return f"""You are the named Codex research employee for this TaskFlow step.\n{slack_role_context(role)}\nProject: {plan.project_id}\nPlan SHA-256: {plan.sha256}\nStep: {step.step_id} {step.title}\n\nRead and use the FULL plan below, not an isolated leaf. Research only; do not claim TaskFlow completion. Build a focused physically readable ZIP at exactly:\n{out_zip}\nThe ZIP must contain top-level MANIFEST.json with plan_sha256={plan.sha256!r} and a files list that SHA-256 covers every other non-directory member. Include relevant code/docs/data and a research report. Do not include secrets or credentials.\n{probe}\n--- FULL PLAN ---\n{plan.text}\n"""
 
 
 def chatgpt_prompt(plan: Plan, step: Step, research_meta: Mapping[str, Any]) -> str:
-    return f"""You are the ChatGPT.com chat-mode native sandbox phase for TaskFlow. Work from the physically attached research ZIP.\nProject: {plan.project_id}\nPlan SHA-256: {plan.sha256}\nStep: {step.step_id} {step.title}\nResearch ZIP SHA-256: {research_meta['sha256']}\n\nRead the full attached packet and the full plan. Perform substantive code/data work and tests in your native sandbox. Return a substantial terminal in-chat report plus exactly one downloadable ZIP. That ZIP MUST contain top-level EXTERNAL_EFFECT_INSTRUCTIONS.md and top-level MANIFEST.json whose plan_sha256 equals {plan.sha256}. The manifest must SHA-256 cover every other file. Do not claim external deployment/effects you did not perform. Provider conversation completion is only this sandbox phase; it is NOT TaskFlow step completion.\n\n--- FULL PLAN ---\n{plan.text}\n"""
+    probe = ("Carry the research employee's PROBE_INSTALL.json and its probes/ script into your "
+             "work ZIP byte-for-byte. Do not edit or replace this independent probe; external Codex "
+             "will install it and TaskFlow will compare its SHA to the research ZIP before judging "
+             "your work.\n" if root_portfolio_plan(plan) else "")
+    return f"""You are the ChatGPT.com chat-mode native sandbox phase for TaskFlow. Work from the physically attached research ZIP.\nProject: {plan.project_id}\nPlan SHA-256: {plan.sha256}\nStep: {step.step_id} {step.title}\nResearch ZIP SHA-256: {research_meta['sha256']}\n\nRead the full attached packet and the full plan. Perform substantive code/data work and tests in your native sandbox. Return a substantial terminal in-chat report plus exactly one downloadable ZIP. That ZIP MUST contain top-level EXTERNAL_EFFECT_INSTRUCTIONS.md and top-level MANIFEST.json whose plan_sha256 equals {plan.sha256}. The manifest must SHA-256 cover every other file. {probe}Do not claim external deployment/effects you did not perform. Provider conversation completion is only this sandbox phase; it is NOT TaskFlow step completion.\n\n--- FULL PLAN ---\n{plan.text}\n"""
 
 
 def external_prompt(plan: Plan, step: Step, work_zip: Path, effect_receipt: Path, employee: str) -> str:
-    return f"""You are the Codex external-effect employee assigned to apply this TaskFlow sandbox output.\n{slack_role_context(employee)}\nProject: {plan.project_id}\nPlan SHA-256: {plan.sha256}\nStep: {step.step_id} {step.title}\nWork ZIP: {work_zip}\nWork ZIP SHA-256: {sha256_file(work_zip)}\n\nRead EXTERNAL_EFFECT_INSTRUCTIONS.md inside the ZIP, reconcile with current source/deployment, apply or deploy the work, and verify the real effect. Do not mark success for code/artifact production alone. On success, atomically write JSON to exactly {effect_receipt} with schema='cognilode.taskflow.external_effect.v1', status='applied', project_id, plan_sha256, step_id, work_zip_sha256, effect_kind, non-empty effect_ref, environment, checks (non-empty list of objects with command, exit_code, and observed result), and defects (list). If the effect is failed or uncertain, write status='failed' or 'uncertain'; that MUST NOT release dependents.\n\n--- FULL PLAN ---\n{plan.text}\n"""
+    probe = ("Install the frozen research-authored probe from PROBE_INSTALL.json at its declared "
+             "target_path with exactly its declared SHA-256. Do not rewrite its logic. TaskFlow "
+             "will independently compare the installed bytes and execute it after your deployment.\n"
+             if root_portfolio_plan(plan) else "")
+    return f"""You are the Codex external-effect employee assigned to apply this TaskFlow sandbox output.\n{slack_role_context(employee)}\nProject: {plan.project_id}\nPlan SHA-256: {plan.sha256}\nStep: {step.step_id} {step.title}\nWork ZIP: {work_zip}\nWork ZIP SHA-256: {sha256_file(work_zip)}\n\nRead EXTERNAL_EFFECT_INSTRUCTIONS.md inside the ZIP, reconcile with current source/deployment, apply or deploy the work, and verify the real effect. {probe}Do not mark success for code/artifact production alone. On success, atomically write JSON to exactly {effect_receipt} with schema='cognilode.taskflow.external_effect.v1', status='applied', project_id, plan_sha256, step_id, work_zip_sha256, effect_kind, non-empty effect_ref, environment, checks (non-empty list of objects with command, exit_code, and observed result), and defects (list). If the effect is failed or uncertain, write status='failed' or 'uncertain'; that MUST NOT release dependents.\n\n--- FULL PLAN ---\n{plan.text}\n"""
 
 
 def codex_binary_identity(binary: str) -> tuple[str, dict[str, str]]:
@@ -944,6 +1017,22 @@ def verified_chat_completion(job: Mapping[str, Any], plan: Plan) -> dict[str, An
         return None
     meta = verify_manifest_zip(path, expected_plan_sha256=plan.sha256,
                                require_external_instructions=True, returned_work=True)
+    if root_portfolio_plan(plan):
+        step_id = str(job.get("taskflow_step") or "")
+        step = plan.by_id().get(step_id)
+        if step is None:
+            raise ValueError("root ChatGPT job lacks exact TaskFlow step")
+        refs = job.get("attachment_refs") or []
+        if not refs or not isinstance(refs[0], Mapping):
+            raise ValueError("root ChatGPT job lacks independent research ZIP")
+        research_ref = refs[0]
+        research_path = Path(str(research_ref.get("ref") or "").removeprefix("file:"))
+        research_sha = str(research_ref.get("sha256") or "")
+        if (not research_path.is_file() or not HEX64.fullmatch(research_sha)
+            or sha256_file(research_path) != research_sha):
+            research_path = stage_external_work_zip(research_ref, research_sha)
+        verify_manifest_zip(research_path, expected_plan_sha256=plan.sha256)
+        verify_carried_independent_probe(research_path, path, plan, step)
     matching = [e for e in evidence if e.get("kind") == "chatgpt_sandbox_artifact"
                 and e.get("ref") == meta["sha256"]]
     if len(matching) != 1:
@@ -1078,6 +1167,8 @@ def ensure_chat_job(queue: QueueClient, plan: Plan, step: Step, research_meta: M
     jid=phase_job_id(plan,step.step_id,"chatgpt_sandbox")
     existing=queue.get(jid)
     if existing: return existing
+    if root_portfolio_plan(plan):
+        verify_independent_probe_packet(Path(research_meta["path"]), plan, step)
     prompt=chatgpt_prompt(plan,step,research_meta)
     job=job_base(plan,step,"chatgpt_sandbox",provider="chatgpt.com",priority=priority,dependencies=[])
     job.update({"prompt":prompt,"prompt_sha256":sha256_bytes(prompt.encode()),"reasoning_effort":"xhigh",
@@ -1611,6 +1702,8 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
             if not secretary_succeeded(json.loads(receipt_path.read_text(encoding="utf-8"))):
                 raise ValueError("Codex invocation was not verified")
             meta=verify_manifest_zip(out_zip,expected_plan_sha256=execution_plan.sha256)
+            if root_portfolio_plan(execution_plan):
+                verify_independent_probe_packet(out_zip,execution_plan,step)
             identity=codex_session_identity_evidence(receipt_path,str(pending["id"]))
         except Exception:
             action["actions"].append({"step":step.step_id,"phase":"research_reconcile","ok":False,"state":"awaiting_readback"}); continue
@@ -1647,6 +1740,8 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
                 try:
                     if not secretary_succeeded(receipt): raise ValueError("installed Codex invocation did not complete")
                     meta=verify_manifest_zip(out_zip,expected_plan_sha256=execution_plan.sha256)
+                    if root_portfolio_plan(execution_plan):
+                        verify_independent_probe_packet(out_zip,execution_plan,step)
                     receipt_path=run_dir/"secretary_receipt.json"
                     identity=codex_session_identity_evidence(receipt_path,str(rjob["id"]))
                     evidence=[{"kind":"research_zip","ref":meta["sha256"],"path":meta["path"]},
@@ -1799,6 +1894,8 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
             if not secretary_succeeded(json.loads(invocation_path.read_text(encoding="utf-8"))):
                 raise ValueError("Codex invocation was not verified")
             work=verified_work_attachment(pending,execution_plan)
+            if root_portfolio_plan(execution_plan):
+                verify_installed_independent_probe(Path(work["path"]),execution_plan,step)
             effect=verify_effect_receipt(receipt_path,plan=execution_plan,step=step,work_sha256=work["sha256"])
             probe=verify_effect_probe(step)
             identity=codex_session_identity_evidence(invocation_path,str(pending["id"]))
@@ -1831,6 +1928,8 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
                 atomic_json(run_dir/"secretary_receipt.json",invocation)
                 try:
                     if not secretary_succeeded(invocation): raise ValueError("installed Codex invocation did not complete")
+                    if root_portfolio_plan(execution_plan):
+                        verify_installed_independent_probe(Path(work["path"]),execution_plan,step)
                     effect=verify_effect_receipt(effect_receipt,plan=execution_plan,step=step,work_sha256=work["sha256"])
                     probe=verify_effect_probe(step)
                     identity=codex_session_identity_evidence(run_dir/"secretary_receipt.json",str(ejob["id"]))

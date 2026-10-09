@@ -6,6 +6,7 @@ import importlib.machinery
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -143,6 +144,12 @@ class RootPlanHandoffTests(unittest.TestCase):
         d1 = FakeD1(rows, sources, job, central)
         installed = []
         with tempfile.TemporaryDirectory() as directory:
+            subprocess.run(["git", "init", "-q", directory], check=True)
+            subprocess.run(["git", "-C", directory, "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", directory, "config", "user.email", "test@example.invalid"], check=True)
+            (Path(directory) / "README.md").write_text("Project\n")
+            subprocess.run(["git", "-C", directory, "add", "README.md"], check=True)
+            subprocess.run(["git", "-C", directory, "commit", "-qm", "initial"], check=True)
             def install(path, value):
                 installed.append((path, value))
                 return {"ok": True, "single_queue": "cloudflare-d1"}
@@ -153,6 +160,9 @@ class RootPlanHandoffTests(unittest.TestCase):
             self.assertEqual(installed[0][1], plan)
             self.assertTrue(installed[0][0].is_file())
             self.assertIn("Carry out the manager plan literally.", installed[0][0].read_text())
+            source = subprocess.run(["git", "-C", directory, "show", "HEAD:root-project.plan"],
+                                    check=True, capture_output=True, text=True)
+            self.assertEqual(source.stdout, installed[0][0].read_text())
             self.assertEqual(result["provider_requests_created"], 0)
 
 

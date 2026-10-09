@@ -215,6 +215,11 @@ def handoff(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, job_id: str,
     plan, source_sha = extract_plan(job, read.get("conversation") or {})
     rendered = render_taskflow(plan, conversation_id=job["conversation_id"], assistant_sha256=source_sha)
     target = output_root / (str(plan["project_id"]) + ".plan")
+    output_root.mkdir(parents=True, exist_ok=True)
+    repo = subprocess.run(["git", "-C", str(output_root), "rev-parse", "--show-toplevel"],
+                          text=True, capture_output=True, timeout=10, check=False)
+    if repo.returncode != 0:
+        raise ValueError("root plan destination must be inside the existing TaskFlow Git project")
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
         if target.read_text(encoding="utf-8") != rendered:
@@ -223,6 +228,18 @@ def handoff(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, job_id: str,
         tmp = target.with_suffix(".plan.next")
         tmp.write_text(rendered, encoding="utf-8")
         os.replace(tmp, target)
+    project_repo = Path(repo.stdout.strip()).resolve()
+    relative = target.resolve().relative_to(project_repo).as_posix()
+    committed = subprocess.run(["git", "-C", str(project_repo), "show", f"HEAD:{relative}"],
+                               capture_output=True, timeout=10, check=False)
+    if committed.returncode != 0 or _sha(committed.stdout.decode("utf-8")) != _sha(rendered):
+        subprocess.run(["git", "-C", str(project_repo), "add", "--", relative],
+                       timeout=15, check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(project_repo), "commit", "--only", "-m",
+                        f"Record provider-root plan {plan['project_id']} {source_sha[:12]}", "--", relative],
+                       timeout=30, check=True, capture_output=True)
+    controller = _load(CONTROLLER, "root_plan_taskflow_commit_verifier")
+    controller.verify_plan_revision(controller.parse_plan(target))
     installation = install(target, plan) if install is not None else None
     if installation is not None and installation.get("ok") is not True:
         raise ValueError("TaskFlow/Secretary service installation did not verify")
@@ -249,7 +266,8 @@ def install_taskflow(path: Path, plan: Mapping[str, Any]) -> Mapping[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root-job-id", required=True)
-    parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument("--output-root", type=Path, required=True,
+                        help="directory inside an existing Git project; source plan is committed before installation")
     args = parser.parse_args()
     sender = _load(SENDER, "root_plan_d1_reader")
     result = handoff(sender.operator_memory_post, job_id=args.root_job_id,

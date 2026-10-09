@@ -6,14 +6,14 @@ The historical mechanisms recovered for this seam are `LibriRenascendi/tools/roo
 
 Before installing a plan, the bridge pages the shared D1 conversation index and independently rereads distinct sources. A source counts only if its full user and assistant events, event completeness flags, prompt/response digests, source completion, and Drive verification are present. At least 500 distinct conversations must span 730 days. Index identities and unfinished Codex feed prefixes do not count. This census is computed from the shared store on each handoff; no local text corpus is written.
 
-The selected root job must be completed on `chatgpt.com`, show a historical-rhythm tape, and have D1 provider-conversation and central-readback evidence. Its final complete provider-visible assistant message must contain one exact `COGNILODE_ROOT_TASKFLOW_PLAN_JSON_BEGIN` / `COGNILODE_ROOT_TASKFLOW_PLAN_JSON_END` block with schema `cognilode.root_taskflow_plan.v1`. The JSON includes `project_id`, `project_name`, `research_employee`, `external_employee`, and `steps`. Each step has `id`, `title`, `owner`, `role`, `instructions` (literal plan lines), `depends_on`, and an independent `effect_probe` `{command, expected}`. The command must be an isolated Python script with a nonempty expected observation; shell snippets and trivial `true` probes are rejected. The TaskFlow parser checks graph validity before writing the plan. Existing different content at the same target is never overwritten.
+The selected root job must be completed on `chatgpt.com`, show a historical-rhythm tape, and have D1 provider-conversation and central-readback evidence. Its final complete provider-visible assistant message must contain one exact `COGNILODE_ROOT_TASKFLOW_PLAN_JSON_BEGIN` / `COGNILODE_ROOT_TASKFLOW_PLAN_JSON_END` block with schema `cognilode.root_taskflow_plan.v1`. The JSON includes `project_id`, `project_name`, `research_employee`, `external_employee`, and `steps`. Each step has `id`, `title`, `owner`, `role`, `instructions` (literal plan lines), `depends_on`, and an independent `effect_probe` `{command, expected}`. The command must be an isolated Python script with a nonempty expected observation; shell snippets and trivial `true` probes are rejected. The TaskFlow parser checks graph validity. The resulting plan is committed to the existing Git project and reread through TaskFlow's revision verifier before installation. Existing different content at the same target is never overwritten.
 
 The production CLI is:
 
 ```
 python3 scripts/cognilode-root-plan-handoff \
   --root-job-id ROOT_D1_JOB_ID \
-  --output-root /home/evan/.local/share/cognilode/root-plan-handoff/plans
+  --output-root /home/evan/Projects/codex-backend-sdk/plans/root-generated
 ```
 
 On success it calls `scripts/cognilode-taskflow-install-project` and checks the active single-queue installation result. It can be invoked by the root terminal collector when one exists; it does not schedule or send a root turn itself.

@@ -128,7 +128,8 @@ def _source_fidelity(capture: Mapping[str, Any]) -> str:
     """Classify provenance without upgrading a text projection to original data."""
     kind = str(capture.get("source_kind") or "")
     provenance = str(capture.get("source_provenance") or "")
-    if (capture.get("original_source_complete") is True
+    if (capture.get("source_complete") is True
+        and capture.get("original_source_complete") is True
         and capture.get("original_assets_complete") is True
         and HEX64.fullmatch(str(capture.get("original_source_sha256") or ""))
         and "unverified" not in provenance):

@@ -116,6 +116,18 @@ class RootPlanHandoffTests(unittest.TestCase):
         self.assertTrue(census['full_original_ready'])
         self.assertEqual({r['source_fidelity'] for r in census['verified_source_refs']},
                          {'full_original'})
+
+    def test_privacy_text_projection_cannot_claim_full_original(self):
+        capture = {
+            'source_kind': 'chatgpt_privacy_export_zip_http_range',
+            'source_provenance': 'authenticated_openai_export_email',
+            'source_complete': False,
+            'original_source_complete': True,
+            'original_assets_complete': True,
+            'original_source_sha256': 'e' * 64,
+        }
+        self.assertEqual(bridge._source_fidelity(capture),
+                         'authenticated_export_legacy_text_projection_scope_unknown')
     def test_drive_complete_source_accepts_interim_flags_and_flagless_snapshot(self):
         source = full("openai-codex", "interim", 0)
         source["events"][0]["source_content_complete"] = False

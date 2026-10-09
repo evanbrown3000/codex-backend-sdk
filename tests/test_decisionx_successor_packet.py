@@ -25,6 +25,44 @@ native = load("decisionx_successor_native_test", "decisionx_successor_native.py"
 handoff = load("decisionx_successor_handoff_retry_test", "cognilode-decisionx-advice-handoff")
 
 
+def test_successor_retrieves_only_sources_available_before_target_provider_turn():
+    cutoff = upstream.target_cutoff({
+        'created_at': '2026-01-01T00:00:00Z',
+        'claimed_at': '2026-02-01T00:00:00Z',
+        'completed_at': '2026-03-01T00:00:00Z'})
+    assert cutoff == datetime(2026, 2, 1, tzinfo=timezone.utc)
+    selected = [
+        {'segment_id': f'segment-{name}', 'provider': 'openai-codex',
+         'conversation_id': name} for name in ('future', 'past')]
+
+    def post(body):
+        cid = body.get('conversation_id')
+        if body['operation'] == 'read_segment':
+            return {'segment': {'segment_id': body['segment_id'], 'kind': 'IAE',
+                    'origin': 'chatgpt.com:decisionx_iae_label', 'content': '{}',
+                    'metadata': {'drive_verified_source': True,
+                                 'full_source_prompt_sha256': '1'*64,
+                                 'full_source_response_sha256': '2'*64}}}
+        assert body['operation'] == 'read'
+        return {'conversation': {'provider': 'openai-codex', 'conversation_id': cid,
+                'prompt_sha256': '1'*64, 'response_sha256': '2'*64,
+                'events': [{'role': 'user', 'content': 'Do the work',
+                            'created_at': '2026-01-01T00:00:00Z'},
+                           {'role': 'assistant', 'content': 'Completed',
+                            'created_at': '2026-03-01T00:00:00Z' if cid == 'future'
+                                          else '2026-01-02T00:00:00Z'}],
+                'capture': {'source_sha256': '3'*64}}}
+
+    class Bridge:
+        @staticmethod
+        def _complete_source(index, _read):
+            return datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    refs, candidates = upstream.source_refs(post, selected, Bridge(), as_of=cutoff, limit=1)
+    assert [row['conversation_id'] for row in refs] == ['past']
+    assert [row['conversation_id'] for row in candidates] == ['past']
+
+
 class MissingSegmentHTTP(RuntimeError):
     code = "central_memory_http_failed"
 

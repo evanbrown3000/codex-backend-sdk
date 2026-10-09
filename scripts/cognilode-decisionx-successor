@@ -143,7 +143,37 @@ def candidates(post: Callable[[dict], Mapping], target: Mapping[str, Any], *, li
     return distinct, selected
 
 
-def source_refs(post: Callable[[dict], Mapping], selected: list[dict], bridge: Any) -> tuple[list[dict], list[dict]]:
+def target_cutoff(job: Mapping[str, Any]) -> datetime:
+    """Use provider claim time, never the later completion, as historical cutoff."""
+    value = str(job.get("claimed_at") or job.get("created_at") or "")
+    try:
+        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("target provider start time unavailable") from exc
+    require(stamp.tzinfo is not None, "target provider start time lacks UTC offset")
+    return stamp.astimezone(timezone.utc)
+
+
+def source_finished_before(source: Mapping[str, Any], as_of: datetime) -> bool:
+    """A full historical thread is usable only if its last turn predates target."""
+    events = source.get("events") or []
+    if not isinstance(events, list) or not events:
+        return False
+    for event in events:
+        if not isinstance(event, Mapping):
+            return False
+        try:
+            created = datetime.fromisoformat(str(event.get("created_at") or "").replace(
+                "Z", "+00:00"))
+        except ValueError:
+            return False
+        if created.tzinfo is None or created.astimezone(timezone.utc) > as_of:
+            return False
+    return True
+
+
+def source_refs(post: Callable[[dict], Mapping], selected: list[dict], bridge: Any,
+                *, as_of: datetime, limit: int) -> tuple[list[dict], list[dict]]:
     refs, candidates_out = [], []
     for item in selected:
         provider, conversation_id = item["provider"], item["conversation_id"]
@@ -160,6 +190,8 @@ def source_refs(post: Callable[[dict], Mapping], selected: list[dict], bridge: A
         provisional = {"provider": provider, "conversation_id": conversation_id}
         stamp = bridge._complete_source(provisional, read)
         require(stamp is not None, "historical full source is no longer complete")
+        if stamp > as_of or not source_finished_before(source, as_of):
+            continue
         capture = source.get("capture") or {}
         ref = {"provider": provider, "conversation_id": conversation_id,
                "prompt_sha256": source.get("prompt_sha256"),
@@ -178,6 +210,8 @@ def source_refs(post: Callable[[dict], Mapping], selected: list[dict], bridge: A
                                 "response_sha256", "source_sha256")} | {
                                     "segment_id": item["segment_id"],
                                     "descriptor": json.loads(segment["content"])})
+        if len(refs) >= limit:
+            break
     return refs, candidates_out
 
 
@@ -188,8 +222,10 @@ def packet(post: Callable[[dict], Mapping], target_job_id: str, *, output_root: 
     bridge = load(BRIDGE, "decisionx_successor_bridge")
     builder = load(ROOT_CYCLE, "decisionx_successor_source_builder")
     job, target = target_job_and_read(post, target_job_id)
-    descriptor_count, selected = candidates(post, target, limit=limit)
-    refs, selected_out = source_refs(post, selected, bridge)
+    descriptor_count, selected = candidates(post, target, limit=limit * 3)
+    refs, selected_out = source_refs(post, selected, bridge,
+                                     as_of=target_cutoff(job), limit=limit)
+    require(bool(refs), "no source-grounded historical candidate predates target provider turn")
     selected_keys = {(r["provider"], r["conversation_id"]) for r in refs}
     census_keys = {(r["provider"], r["conversation_id"]) for r in stock["verified_source_refs"]}
     require(selected_keys <= census_keys, "retrieved source absent from current complete shared stock")

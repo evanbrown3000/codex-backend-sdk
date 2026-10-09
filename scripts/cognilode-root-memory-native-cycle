@@ -454,6 +454,28 @@ def enqueue_root_planning(post: Callable[[dict[str, Any]], Mapping[str, Any]],
     roster = bridge.executable_roster_snapshot(
         DEFAULT_ROOT / "root-rosters" / (digest[:32] + f"-a{attempt}.json"))
     roster_context = json.dumps(roster, sort_keys=True)
+    # The provider prompt is the user's fixed TaskFlow template. Put the
+    # project-specific plan and roster into a physical native-sandbox ZIP so
+    # normalizing that prompt cannot silently erase the root assignment.
+    plan_packet = DEFAULT_ROOT / "root-rosters" / (digest[:32] + f"-a{attempt}-plan.zip")
+    plan_packet.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=plan_packet.parent, suffix=".zip", delete=False) as stream:
+        temp_packet = Path(stream.name)
+    try:
+        with zipfile.ZipFile(temp_packet, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            _zip_write(archive, "root-agent-multi-year.plan", plan.text.encode())
+            _zip_write(archive, "installed-employee-roster.json", (roster_context + "\n").encode())
+            _zip_write(archive, "ROOT_OUTPUT_CONTRACT.md", (
+                "Write plans for the company, named teams, and individual employees; do not write prompts for agents.\n"
+                "Ground them in the physically attached multi-year memory and installed roster.\n"
+                "Return one downloadable planning ZIP with EXTERNAL_EFFECT_INSTRUCTIONS.md and an in-chat report.\n"
+                "Include one COGNILODE_ROOT_TASKFLOW_PLAN_JSON_BEGIN / "
+                "COGNILODE_ROOT_TASKFLOW_PLAN_JSON_END block with schema "
+                "cognilode.root_taskflow_portfolio.v1 in the final chat response.\n").encode())
+        os.replace(temp_packet, plan_packet)
+    finally:
+        temp_packet.unlink(missing_ok=True)
+    plan_packet_ref = controller.portable_attachment_ref(plan_packet, _sha(plan_packet.read_bytes()))
     prompt = ("Carry out the attached long-horizon root-agent TaskFlow plan in ChatGPT.com Chat mode. "
               "Read the physically attached multi-year global/project/role memory ZIP. "
               "Write a causal portfolio of plans for the company, named teams, and named individual "
@@ -473,7 +495,8 @@ def enqueue_root_planning(post: Callable[[dict[str, Any]], Mapping[str, Any]],
                 "reasoning_effort": "xhigh", "model": "gpt-5-6-thinking",
                 "assigned_employee": "ChatGPT root agent in chat mode", "role": "root-manager",
                 "attachment_refs": [{"ref": "file:" + str(memory["path"]), "sha256": digest,
-                                     "mirrors": [mirror], "name": "root-memory.zip"}]})
+                                     "mirrors": [mirror], "name": "root-memory.zip"},
+                                    {**plan_packet_ref, "name": "root-agent-plan-and-roster.zip"}]})
     result = post({**job, "operation": "enqueue_job", "job_id": job_id,
                    "prompt_authority": "taskflow_plan", "source": "root-memory-native-cycle"})
     saved = result.get("job") or {}

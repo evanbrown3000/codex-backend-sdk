@@ -1,6 +1,7 @@
 from __future__ import annotations
 import hashlib, importlib.machinery, importlib.util, json, os, re, stat, subprocess, tempfile, unittest, urllib.error, zipfile
 from pathlib import Path
+from unittest import mock
 
 ROOT=Path(__file__).resolve().parents[1]
 CTRL=ROOT/'scripts/cognilode-taskflow-phase-controller'
@@ -170,12 +171,30 @@ assert args[1]=='dispatch' and '--candidates-json' in args and '--prefer-install
 assert '--external-effect' in args and args[args.index('--external-effect')+1]=='shell'
 assert '--plan-file' in args and Path(args[args.index('--plan-file')+1]).read_text()=='full phase instructions'
 candidate=json.loads(Path(args[args.index('--candidates-json')+1]).read_text())
-assert len(candidate)==1 and candidate[0]['family']=='modified_codex'
+assert len(candidate)==1 and candidate[0]['family']=='installed_codex'
 print(json.dumps({'completed':True,'final_candidate':{'family':'chatgpt','name':'wrong-route'}}))
 '''); secretary.chmod(secretary.stat().st_mode|stat.S_IXUSR)
-            receipt=c.run_secretary(secretary,prompt,employee='Elliot Mercer',manager='m',repo_path=ROOT,phase='external_effect')
+            vanilla=td/'vanilla-codex'; vanilla.write_text('#!/bin/sh\nexit 0\n'); vanilla.chmod(0o755)
+            with mock.patch.dict(os.environ, {'COGNILODE_CODEX_BIN':str(vanilla)}):
+                receipt=c.run_secretary(secretary,prompt,employee='Elliot Mercer',manager='m',repo_path=ROOT,phase='external_effect')
             self.assertEqual(receipt['returncode'],0)
             self.assertFalse(c.secretary_succeeded(receipt))
+            self.assertEqual(receipt['taskflow_codex_provenance']['resolved_path'],str(vanilla))
+
+    def test_modified_release_requires_matching_manifest_digest(self):
+        with tempfile.TemporaryDirectory() as td:
+            release=Path(td); binary=release/'codex'; binary.write_bytes(b'modified release fixture')
+            binary.chmod(0o755)
+            manifest={'source_commit':'a'*40,'sha256':hashlib.sha256(binary.read_bytes()).hexdigest()}
+            (release/'manifest.json').write_text(json.dumps(manifest))
+            self.assertEqual(c.codex_binary_identity(str(binary))[0],'modified_codex')
+            launcher=release/'launcher'; launcher.write_text('#!/bin/sh\nrelease_dir="$(dirname "$0")"\n')
+            linked=release/'linked-launcher'; linked.symlink_to(launcher)
+            self.assertEqual(c.codex_binary_identity(str(linked))[0],'installed_codex')
+            launcher.write_text('#!/bin/sh\nrelease_dir="$(dirname "$(readlink -f -- "$0")")"\n')
+            self.assertEqual(c.codex_binary_identity(str(linked))[0],'modified_codex')
+            manifest['sha256']='0'*64; (release/'manifest.json').write_text(json.dumps(manifest))
+            self.assertEqual(c.codex_binary_identity(str(binary))[0],'installed_codex')
 
     def test_source_commit_receipt_cannot_complete_external_effect(self):
         plan=c.parse_plan(PLAN); step=plan.by_id()['AM-5']
@@ -266,7 +285,8 @@ if 'named Codex research employee' in prompt:
 elif 'Codex external-effect employee' in prompt:
     out=Path(re.search(r'write JSON to exactly ([^ ]+) with schema',prompt).group(1)); psha=re.search(r'Plan SHA-256: ([0-9a-f]{64})',prompt).group(1); step=re.search(r'Step: ([^ ]+)',prompt).group(1); wsha=re.search(r'Work ZIP SHA-256: ([0-9a-f]{64})',prompt).group(1)
     out.parent.mkdir(parents=True,exist_ok=True); out.write_text(json.dumps({'schema':'cognilode.taskflow.external_effect.v1','status':'applied','project_id':'agent-memory','plan_sha256':psha,'step_id':step,'work_zip_sha256':wsha,'effect_kind':'test_deployment','effect_ref':'deploy:test-123','environment':'native-test-fixture','checks':[{'command':'fixture verification','exit_code':0,'result':'observed deployed state'}],'defects':[]}))
-print(json.dumps({'completed':True,'final_candidate':{'family':'modified_codex','name':'taskflow-installed-codex'},'final_assessment':{'terminal':True}}))
+candidate=json.loads(Path(args[args.index('--candidates-json')+1]).read_text())[0]
+print(json.dumps({'completed':True,'final_candidate':{'family':candidate['family'],'name':candidate['name']},'final_assessment':{'terminal':True}}))
 ''')
             secretary.chmod(secretary.stat().st_mode|stat.S_IXUSR)
             state=td/'state'

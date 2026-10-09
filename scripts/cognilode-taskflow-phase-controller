@@ -371,15 +371,51 @@ def external_prompt(plan: Plan, step: Step, work_zip: Path, effect_receipt: Path
     return f"""You are the Codex external-effect employee assigned to apply this TaskFlow sandbox output.\n{slack_role_context(employee)}\nProject: {plan.project_id}\nPlan SHA-256: {plan.sha256}\nStep: {step.step_id} {step.title}\nWork ZIP: {work_zip}\nWork ZIP SHA-256: {sha256_file(work_zip)}\n\nRead EXTERNAL_EFFECT_INSTRUCTIONS.md inside the ZIP, reconcile with current source/deployment, apply or deploy the work, and verify the real effect. Do not mark success for code/artifact production alone. On success, atomically write JSON to exactly {effect_receipt} with schema='cognilode.taskflow.external_effect.v1', status='applied', project_id, plan_sha256, step_id, work_zip_sha256, effect_kind, non-empty effect_ref, environment, checks (non-empty list of objects with command, exit_code, and observed result), and defects (list). If the effect is failed or uncertain, write status='failed' or 'uncertain'; that MUST NOT release dependents.\n\n--- FULL PLAN ---\n{plan.text}\n"""
 
 
+def codex_binary_identity(binary: str) -> tuple[str, dict[str, str]]:
+    """Identify a modified release by matching its manifest to the actual binary."""
+    path = Path(binary).expanduser().resolve()
+    provenance = {"resolved_path": str(path), "sha256": sha256_file(path)}
+    try:
+        version = subprocess.run(
+            [binary, "--version"], text=True, capture_output=True, timeout=10, check=False
+        )
+        if version.returncode == 0 and version.stdout.strip():
+            provenance["reported_version"] = version.stdout.strip()[:160]
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    manifest_path = path.parent / "manifest.json"
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            release_binary = path.parent / "codex"
+            release_digest = sha256_file(release_binary)
+            commit = manifest.get("source_commit", "")
+            launcher_is_safe = (
+                path.name in {"launcher", "launcher-fixed"}
+                and 'readlink -f -- "$0"' in path.read_text(encoding="utf-8")
+            )
+            if (re.fullmatch(r"[0-9a-f]{40}", commit)
+                    and manifest.get("sha256") == release_digest
+                    and (path.name == "codex" or launcher_is_safe)):
+                provenance["source_commit"] = commit
+                provenance["release_binary_sha256"] = release_digest
+                return "modified_codex", provenance
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+    return "installed_codex", provenance
+
+
 def run_secretary(secretary: Path, prompt_path: Path, *, employee: str, manager: str, repo_path: Path, phase: str) -> dict[str, Any]:
     binary = next((p for p in (os.getenv("COGNILODE_CODEX_BIN"), str(Path.home()/".local/bin/codex-cognilode"), shutil.which("codex")) if p and Path(p).is_file() and os.access(p, os.X_OK)), None)
     if not binary:
         return {"completed":False,"error":"installed Codex executable unavailable","employee":employee,"phase":phase}
-    candidate = {"name":"taskflow-installed-codex", "family":"modified_codex", "mode":"workspace",
+    family, provenance = codex_binary_identity(binary)
+    candidate = {"name":"taskflow-installed-codex", "family":family, "mode":"workspace",
                  "can_mutate_repo":True,"has_workspace_repo":True,"can_shell":True,
                  "supports_artifact_return":True,"quota_cost":"codex","available":True,
                  "effect_capabilities":{"shell":"available","repo":"available"},
-                 "metadata":{"binary":binary,"sandbox_mode":"danger-full-access" if phase == "external_effect" else "workspace-write"}}
+                 "metadata":{"binary":binary,"sandbox_mode":"danger-full-access" if phase == "external_effect" else "workspace-write",
+                             "codex_provenance":provenance}}
     candidates_path = prompt_path.parent / "secretary_candidates.json"
     candidates_path.write_text(json.dumps([candidate],sort_keys=True,indent=2)+"\n",encoding="utf-8")
     command=[str(secretary),"dispatch","--plan-file",str(prompt_path),"--employee",employee,
@@ -396,7 +432,8 @@ def run_secretary(secretary: Path, prompt_path: Path, *, employee: str, manager:
     if not isinstance(body, dict): body={"raw_stdout":cp.stdout,"error":"Secretary returned non-object JSON"}
     body.update({"returncode":cp.returncode,"stderr_tail":cp.stderr[-4000:]})
     final = body.get("final_candidate") or {}
-    body["taskflow_route_verified"] = bool(cp.returncode == 0 and body.get("completed") is True and final.get("family") == "modified_codex" and final.get("name") == candidate["name"])
+    body["taskflow_route_verified"] = bool(cp.returncode == 0 and body.get("completed") is True and final.get("family") == family and final.get("name") == candidate["name"])
+    body["taskflow_codex_provenance"] = provenance
     return body
 
 

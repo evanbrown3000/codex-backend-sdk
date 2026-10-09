@@ -74,6 +74,52 @@ class FakeQueue:
         raise AssertionError(body)
 
 class Tests(unittest.TestCase):
+    def test_linked_plan_hierarchy_reaches_all_employees_and_blocks_stale_d1_jobs(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)
+            (root/'plans'/'children').mkdir(parents=True)
+            entry=root/'plans'/'main.plan'
+            child=root/'plans'/'children'/'work.plan'
+            entry.write_text('project Hierarchy\nid hierarchy\n[ ] H-1 work\n    child_plans: children/work.plan\n')
+            child.write_text('project Child\nid child\n[ ] C-1 research evidence\n    slack_thread_url: https://slack.example/thread\n')
+            subprocess.run(['git','init','-q',str(root)],check=True)
+            subprocess.run(['git','-C',str(root),'add','plans'],check=True)
+            subprocess.run(['git','-C',str(root),'-c','user.name=Test','-c','user.email=test@example.com',
+                            'commit','-qm','Initial hierarchy'],check=True)
+            plan=c.parse_plan(entry); step=plan.by_id()['H-1']; linked=c.linked_plan_context(plan)
+            self.assertEqual(len(linked['sources']),1)
+            self.assertEqual(linked['sources'][0]['path'],'plans/children/work.plan')
+            with mock.patch.object(c,'slack_role_context',return_value='Researcher'):
+                self.assertIn('C-1 research evidence',c.research_prompt(plan,step,'Researcher',root/'research.zip'))
+                self.assertIn('C-1 research evidence',c.chatgpt_prompt(plan,step,{'sha256':'0'*64}))
+                with mock.patch.object(c,'sha256_file',return_value='1'*64):
+                    self.assertIn('C-1 research evidence',c.external_prompt(plan,step,root/'work.zip',root/'effect.json','Researcher'))
+            q=FakeQueue()
+            with mock.patch.object(c,'slack_role_context',return_value='Researcher'):
+                job=c.materialize_research_job(q,plan,step,50,role='Researcher',state_root=root/'state')
+            self.assertEqual(job['linked_plan_sha256'],linked['sha256'])
+            self.assertEqual(job['payload']['linked_plan_sha256'],linked['sha256'])
+            child.write_text(child.read_text()+'    done_when: stronger evidence\n')
+            with self.assertRaisesRegex(ValueError,'not committed'):
+                c.linked_plan_context(plan)
+            subprocess.run(['git','-C',str(root),'add','plans/children/work.plan'],check=True)
+            subprocess.run(['git','-C',str(root),'-c','user.name=Test','-c','user.email=test@example.com',
+                            'commit','-qm','Revise child'],check=True)
+            with self.assertRaisesRegex(ValueError,'linked .plan hierarchy changed'):
+                c.run_once(queue=q,plan=plan,role='Researcher',secretary=root/'secretary',
+                           state_root=root/'state',worker_id='test',manager='Manager',priority=50,
+                           external_employee='Researcher')
+
+    def test_linked_plan_rejects_path_escape(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td); (root/'plans').mkdir()
+            entry=root/'plans'/'main.plan'
+            entry.write_text('project Hierarchy\nid hierarchy\n[ ] H-1 work\n    child_plans: ../../escape.plan\n')
+            subprocess.run(['git','init','-q',str(root)],check=True)
+            plan=c.parse_plan(entry)
+            with self.assertRaisesRegex(ValueError,'unsafe or missing'):
+                c.linked_plan_context(plan)
+
     def test_step_sidecar_is_hash_verified_and_atomically_attached_before_enqueue(self):
         with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, {"COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET":""}):
             root=Path(td); plan_path=root/'plans'/'decisionx.plan'; plan_path.parent.mkdir()

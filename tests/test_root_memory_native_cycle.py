@@ -147,6 +147,17 @@ class RootMemoryCycleTests(unittest.TestCase):
             lines = (native / "reconstructed_sources.jsonl").read_text().splitlines()
             self.assertEqual(len(lines), 500)
             self.assertEqual(json.loads(lines[0])["conversation_id"], "c0000")
+            for key in ("global", "project", "role"):
+                (native / (key + ".md")).write_text((key + " source-grounded synthesis. ") * 100)
+            (native / "EXTERNAL_EFFECT_INSTRUCTIONS.md").write_text("Use the root memory as context for company plans.")
+            packet_builder = native / "batch-000" / "BUILD_MEMORY_PACKET_IN_NATIVE_SANDBOX.py"
+            subprocess.run([sys.executable, str(packet_builder)], cwd=native,
+                           capture_output=True, text=True, check=True)
+            with zipfile.ZipFile(native / "root-memory-work-product.zip") as packet:
+                manifest = json.loads(packet.read("MANIFEST.json"))
+                self.assertEqual(manifest["schema"], "cognilode.root_memory_packet.v1")
+                self.assertEqual(len(manifest["source_refs"]), 500)
+                self.assertEqual(set(manifest["sections"]), {"global", "project", "role"})
 
     def test_no_under_500_source_packet_or_job(self):
         partial = refs(2)

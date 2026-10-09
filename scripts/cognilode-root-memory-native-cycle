@@ -120,6 +120,41 @@ print("reconstructed_distinct_sources", len(parts))
 '''
 
 
+PACKET_BUILDER = '''#!/usr/bin/env python3
+"""Package your human/agent-authored synthesis in this Chat-mode native sandbox."""
+from datetime import datetime
+from hashlib import sha256
+import json
+from pathlib import Path
+import zipfile
+
+root = Path(".")
+sources = [json.loads(line) for line in (root / "reconstructed_sources.jsonl").read_text().splitlines()]
+refs = [{key: row[key] for key in ("provider", "conversation_id", "prompt_sha256", "response_sha256", "source_at_utc")}
+        for row in sources]
+if len(refs) != 500 or len({(row["provider"], row["conversation_id"]) for row in refs}) != 500:
+    raise ValueError("expected 500 distinct reconstructed full sources")
+times = sorted(datetime.fromisoformat(row["source_at_utc"]) for row in refs)
+if (times[-1] - times[0]).days < 730:
+    raise ValueError("source span is under two years")
+sections = {}
+for key in ("global", "project", "role"):
+    raw = (root / (key + ".md")).read_bytes()
+    if len(raw.strip()) < 1000:
+        raise ValueError(key + " synthesis is missing or too short")
+    sections[key] = {"path": key + ".md", "sha256": sha256(raw).hexdigest()}
+if not (root / "EXTERNAL_EFFECT_INSTRUCTIONS.md").read_text().strip():
+    raise ValueError("deployment/handoff instructions missing")
+manifest = {"schema": "cognilode.root_memory_packet.v1", "source_refs": refs, "sections": sections}
+with zipfile.ZipFile("root-memory-work-product.zip", "w", compression=zipfile.ZIP_DEFLATED) as out:
+    out.writestr("MANIFEST.json", json.dumps(manifest, sort_keys=True, ensure_ascii=False) + "\\n")
+    for name in ("global.md", "project.md", "role.md", "EXTERNAL_EFFECT_INSTRUCTIONS.md"):
+        out.write(root / name, arcname=name)
+print("packet_sha256", sha256(Path("root-memory-work-product.zip").read_bytes()).hexdigest())
+print("packet_sources", len(refs))
+'''
+
+
 def build_source_batches(post: Callable[[dict[str, Any]], Mapping[str, Any]],
                          refs: list[dict[str, str]], *, output_root: Path,
                          bridge: Any) -> list[dict[str, Any]]:
@@ -153,6 +188,7 @@ def build_source_batches(post: Callable[[dict[str, Any]], Mapping[str, Any]],
         with zipfile.ZipFile(target, "w") as archive:
             _zip_write(archive, "MANIFEST.json", (json.dumps(manifest, sort_keys=True) + "\n").encode())
             _zip_write(archive, "RECONSTRUCT_IN_NATIVE_SANDBOX.py", RECONSTRUCTOR.encode())
+            _zip_write(archive, "BUILD_MEMORY_PACKET_IN_NATIVE_SANDBOX.py", PACKET_BUILDER.encode())
             for name, raw, _ in entries:
                 _zip_write(archive, name, raw)
         if target.stat().st_size > MAX_ZIP_BYTES:
@@ -189,7 +225,10 @@ def enqueue_native_synthesis(post: Callable[[dict[str, Any]], Mapping[str, Any]]
     job_id = "root-memory-native-" + stable[:32]
     prompt = ("Perform the attached TaskFlow plan in your ChatGPT.com Chat-mode native sandbox. "
               "Physically read every attached ZIP, run RECONSTRUCT_IN_NATIVE_SANDBOX.py there, "
-              "and perform the heavy semantic synthesis there. Produce one work-product ZIP with "
+              "and perform the heavy semantic synthesis there. Write substantive global.md, project.md, "
+              "role.md and EXTERNAL_EFFECT_INSTRUCTIONS.md, then run "
+              "BUILD_MEMORY_PACKET_IN_NATIVE_SANDBOX.py there. Return its root-memory-work-product.zip "
+              "as the single downloadable work ZIP with "
               "MANIFEST.json schema cognilode.root_memory_packet.v1, exact source_refs for all input "
               "conversations, global.md, project.md, role.md, and EXTERNAL_EFFECT_INSTRUCTIONS.md. "
               "Provide a comprehensive in-chat report. Do not write prompts for other agents.\n\n"

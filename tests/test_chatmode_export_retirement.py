@@ -1,6 +1,7 @@
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
+import json
 import sqlite3
 
 
@@ -45,3 +46,28 @@ def test_text_projection_requires_exact_drive_readback_and_keeps_original_url(mo
         assert "identity/fidelity" in str(exc)
     else:
         raise AssertionError("lost original provider URL should reject retirement proof")
+
+
+def test_skipped_thought_only_source_is_audited_without_retiring_zip(tmp_path):
+    root = tmp_path / "state"
+    root.mkdir()
+    (root / "cursor.json").write_text(json.dumps({"archive_etag": '"etag"',
+        "next_shard": -1, "deferred": [], "admitted": 0, "exact_deduped": 0,
+        "source_skipped_conversations": 1}))
+    (root / "d1_exact_receipts.jsonl").write_text("")
+    skipped = {"archive_etag": '"etag"', "member": "conversations-145.json",
+               "offset": 44, "source_item_sha256": "sha", "source_complete": False,
+               "classification": "conversation_without_visible_text_skipped"}
+    (root / "skipped_source_conversations.jsonl").write_text(json.dumps(skipped) + "\n")
+    db_path = tmp_path / "writer.sqlite3"
+    sqlite3.connect(db_path).close()
+    result = retirement.run(root, db_path, 1)
+    assert result["source_retirement_allowed"] is False
+    assert result["verified"] == 0
+    skipped["source_complete"] = True
+    (root / "skipped_source_conversations.jsonl").write_text(json.dumps(skipped) + "\n")
+    try:
+        retirement.run(root, db_path, 1)
+        assert False, "falsely complete skipped source must reject"
+    except RuntimeError as exc:
+        assert "skipped source" in str(exc)

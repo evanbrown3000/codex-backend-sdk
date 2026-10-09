@@ -65,12 +65,18 @@ def normalize(conversation: dict) -> tuple[list[dict], dict]:
                     for node_id, node in mapping.items() if isinstance(node, dict)]
     rows = []
     nontext = 0
+    omitted_thoughts = []
     for index, (node_id, node) in enumerate(mapping.items()):
         if not isinstance(node, dict):
             continue
         message = node.get("message") or {}
         role = str((message.get("author") or {}).get("role") or "")
         if role not in {"system", "developer", "user", "assistant", "tool"}:
+            continue
+        content = message.get("content") or {}
+        if isinstance(content, dict) and content.get("content_type") == "thoughts":
+            omitted_thoughts.append((str(node_id), sha_json(content)))
+            nontext += 1
             continue
         text = sender.message_text(message)
         if not text:
@@ -92,10 +98,14 @@ def normalize(conversation: dict) -> tuple[list[dict], dict]:
                            "provider_parent_id": parent, "source_content_complete": True,
                            "index": len(events), "authorship":
                            "export-user-role-unverified" if role == "user" else "export-role-observed"})
-    if not events or len(events) > MAX_EVENTS:
-        raise ValueError("conversation has no bounded textual events")
+    if not events:
+        raise ValueError("conversation has no visible textual events")
+    if len(events) > MAX_EVENTS:
+        raise ValueError("conversation normalized events exceed bound")
     summary = {"source_nodes": len(mapping), "source_text_messages": len(rows),
                "source_nontext_messages": nontext, "normalized_events": len(events),
+               "source_omitted_thought_count": len(omitted_thoughts),
+               "source_omitted_thought_sha256": sha_json(omitted_thoughts),
                "normalized_events_sha256": sha_json([(e["role"], e["content"]) for e in events]),
                "source_text_bytes": total_text_bytes,
                "branch_parent_edges": parent_edges,
@@ -158,8 +168,8 @@ def admit(conversation: dict, info: zipfile.ZipInfo, source: AuthenticatedRangeF
           offset: int) -> str:
     if not isinstance(conversation, dict):
         raise ValueError("export source item is not an object")
-    cid, original_cid, existing = source_identity(conversation, info, source, offset)
     events, summary = normalize(conversation)
+    cid, original_cid, existing = source_identity(conversation, info, source, offset)
     source_sha = sha_json(conversation)
     if existing:
         old = existing.get("capture") or {}
@@ -173,7 +183,8 @@ def admit(conversation: dict, info: zipfile.ZipInfo, source: AuthenticatedRangeF
     capture = {"prompt": bool(prompt), "response": bool(response),
                "source_kind": "chatgpt_privacy_export_zip_http_range",
                "source_complete": False, "source_text_projection_complete": True,
-               "source_fidelity": "all_textual_mapping_nodes_and_branch_edges;media_bytes_not_copied",
+               "source_text_projection_scope": "standard_message_text_excluding_thoughts",
+               "source_fidelity": "visible_turn_text_and_branch_edges;thoughts_and_media_not_copied",
                "source_provenance": "authenticated_openai_export_email",
                "source_conversation_id": original_cid, "source_conversation_sha256": source_sha,
                "source_identity_status": ("provider_uuid" if original_cid else "synthetic_export_source_id"),
@@ -276,6 +287,42 @@ def append_empty_source_receipt(state_root: Path, info: zipfile.ZipInfo,
         os.fsync(out.fileno())
 
 
+def append_skipped_source_receipt(state_root: Path, conversation: dict,
+                                  info: zipfile.ZipInfo, source: AuthenticatedRangeFile,
+                                  offset: int):
+    """Preserve provenance for a real conversation with no visible turns.
+
+    Thought bodies/summaries and media are not rendered as assistant replies.
+    This receipt holds hashes and counts only, never omitted content.
+    """
+    mapping = conversation.get("mapping") or {}
+    thoughts = []
+    for node_id, node in mapping.items():
+        content = (((node or {}).get("message") or {}).get("content") or {})
+        if isinstance(content, dict) and content.get("content_type") == "thoughts":
+            thoughts.append((str(node_id), sha_json(content)))
+    raw_id = str(conversation.get("id") or conversation.get("conversation_id") or "")
+    row = {"archive_etag": source.etag, "archive_bytes": source.size,
+           "member": info.filename, "member_crc32": f"{info.CRC:08x}",
+           "offset": offset, "source_item_sha256": sha_json(conversation),
+           "source_conversation_id": raw_id if re.fullmatch(r"[0-9a-f-]{36}", raw_id) else None,
+           "source_invalid_id_sha256": sha256(raw_id.encode()).hexdigest() if raw_id and not re.fullmatch(r"[0-9a-f-]{36}", raw_id) else None,
+           "classification": "conversation_without_visible_text_skipped",
+           "mapping_nodes": len(mapping), "omitted_thought_count": len(thoughts),
+           "omitted_thought_sha256": sha_json(thoughts),
+           "source_complete": False}
+    path = state_root / "skipped_source_conversations.jsonl"
+    if path.exists():
+        with path.open(encoding="utf-8") as existing:
+            if any(json.loads(line) == row for line in existing):
+                return
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as out:
+        out.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+        out.flush()
+        os.fsync(out.fileno())
+
+
 def repair_one_deferred(archive: zipfile.ZipFile, source: AuthenticatedRangeFile,
                         state_root: Path, state_path: Path, state: dict):
     if not state.get("deferred"):
@@ -302,6 +349,12 @@ def repair_one_deferred(archive: zipfile.ZipFile, source: AuthenticatedRangeFile
     try:
         effect = admit(found, info, source, target)
     except ValueError as exc:
+        if str(exc) == "conversation has no visible textual events":
+            append_skipped_source_receipt(state_root, found, info, source, target)
+            state["source_skipped_conversations"] = int(state.get("source_skipped_conversations") or 0) + 1
+            state["deferred"].pop(0)
+            write_state(state_path, state)
+            return
         held["reason"] = str(exc)[:100]
         write_state(state_path, state)
         return
@@ -404,8 +457,12 @@ def run(url_file: Path, *, maximum: int, state_root: Path = STATE_ROOT) -> dict:
             raise RuntimeError("unexpected export URL origin or path")
         state_path = state_root / "cursor.json"
         state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else None
+        repairable_without_d1 = bool(state and any(
+            row.get("reason") in {"conversation has no bounded textual events",
+                                  "conversation has no visible textual events"}
+            for row in state.get("deferred") or []))
         old_pending = archived_drive_lag(state_root)
-        if state is not None and not candidate_file.is_file():
+        if state is not None and not candidate_file.is_file() and not repairable_without_d1:
             early_lag = drive_lag(state_root, state["archive_etag"], state)
             early_lag["archived_pending_drive"] = old_pending
             early_lag["pending_drive"] += old_pending
@@ -441,6 +498,9 @@ def run(url_file: Path, *, maximum: int, state_root: Path = STATE_ROOT) -> dict:
             source = replacement
             url = candidate
             old_pending = archived_drive_lag(state_root)
+        if state is not None and (state.get("archive_etag") != source.etag or
+                                  state.get("archive_bytes") != source.size):
+            raise RuntimeError("new archive identity requires prior cursor reconciliation")
         if state is None and old_pending >= PENDING_HIGH_WATER:
             return {"state": "drive_lag_backpressure", "pending_drive": old_pending,
                     "archived_pending_drive": old_pending,
@@ -453,6 +513,9 @@ def run(url_file: Path, *, maximum: int, state_root: Path = STATE_ROOT) -> dict:
             paused = bool(state.get("backpressure_paused"))
             if lag["pending_drive"] >= PENDING_HIGH_WATER or (
                     paused and lag["pending_drive"] > PENDING_LOW_WATER):
+                if repairable_without_d1:
+                    with zipfile.ZipFile(source) as archive:
+                        repair_one_deferred(archive, source, state_root, state_path, state)
                 if not paused:
                     state["backpressure_paused"] = True
                     write_state(state_path, state)
@@ -465,10 +528,7 @@ def run(url_file: Path, *, maximum: int, state_root: Path = STATE_ROOT) -> dict:
             maximum = min(maximum, PENDING_HIGH_WATER - lag["pending_drive"])
         else:
             maximum = min(maximum, PENDING_HIGH_WATER - old_pending)
-        if state is not None:
-            if state.get("archive_etag") != source.etag or state.get("archive_bytes") != source.size:
-                raise RuntimeError("new archive identity requires prior cursor reconciliation")
-        else:
+        if state is None:
             state = {"schema": "cognilode.chatmode.privacy_export_backfill.v1",
                      "archive_etag": source.etag, "archive_bytes": source.size,
                      "last_completed_shard": None, "next_shard": None, "position": 0,
@@ -530,9 +590,13 @@ def run(url_file: Path, *, maximum: int, state_root: Path = STATE_ROOT) -> dict:
                             effect = admit(conversation, info, source, offset)
                             state["admitted" if effect == "admitted_exact" else "exact_deduped"] += 1
                         except ValueError as exc:
-                            # Keep a source locator, not a hidden local corpus.
-                            state["deferred"].append({"shard": info.filename, "offset": offset,
-                                                      "conversation_id": cid, "reason": str(exc)[:100]})
+                            if str(exc) == "conversation has no visible textual events":
+                                append_skipped_source_receipt(state_root, conversation, info, source, offset)
+                                state["source_skipped_conversations"] = int(state.get("source_skipped_conversations") or 0) + 1
+                            else:
+                                # Keep a source locator, not a hidden local corpus.
+                                state["deferred"].append({"shard": info.filename, "offset": offset,
+                                                          "conversation_id": cid, "reason": str(exc)[:100]})
                         else:
                             append_receipt(state_root, conversation, info, source, offset)
                     state["position"] = offset + 1

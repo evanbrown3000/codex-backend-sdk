@@ -110,6 +110,19 @@ def run(root: Path, db_path: Path, limit: int):
             any(item.get("classification") != "empty_nonconversation_json_object" or
                 item.get("archive_etag") != state["archive_etag"] for item in items)):
             raise RuntimeError("source non-conversation receipts differ from cursor")
+    skipped = root / "skipped_source_conversations.jsonl"
+    if state.get("source_skipped_conversations", 0):
+        if not skipped.exists():
+            raise RuntimeError("source cursor lacks skipped conversation receipts")
+        with skipped.open(encoding="utf-8") as source:
+            items = [json.loads(line) for line in source]
+        locators = {(item.get("archive_etag"), item.get("member"), item.get("offset"),
+                     item.get("source_item_sha256")) for item in items}
+        if (len(locators) != state["source_skipped_conversations"] or
+            any(item.get("classification") != "conversation_without_visible_text_skipped" or
+                item.get("source_complete") is not False or
+                item.get("archive_etag") != state["archive_etag"] for item in items)):
+            raise RuntimeError("skipped source conversation receipts differ from cursor")
     # A crash after a Drive proof but before this checkpoint is harmless: repeat
     # exact readback. A changed archive identity resets verification to zero.
     checkpoint_path = root / "retirement-checkpoint.json"

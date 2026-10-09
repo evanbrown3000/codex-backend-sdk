@@ -1042,11 +1042,12 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
             if not conversation_id or not all(any(e.get("kind")==kind and e.get("ref")==conversation_id for e in evidence)
                                               for kind in ("provider_conversation","central_conversation_readback")):
                 raise ValueError("ChatGPT conversation lacks matching central readback evidence")
-            native=[e for e in evidence if e.get("kind")=="provider_observed_functions_exec"
+            native=[e for e in evidence if e.get("kind") in {"provider_observed_functions_exec","provider_observed_native_exec"}
+                    and e.get("tool") in {"functions.exec","container.exec",None}
                     and str(e.get("ref") or "").strip() and str(e.get("call_ref") or "").strip()
                     and HEX64.fullmatch(str(e.get("raw_stream_sha256") or ""))]
             if not native:
-                raise ValueError("ChatGPT phase lacks matched provider-observed native functions.exec call and result")
+                raise ValueError("ChatGPT phase lacks matched provider-observed native exec call and result")
         except Exception as exc:
             action["actions"].append({"step":step.step_id,"phase":"chatgpt_readback","ok":False,"error":f"{type(exc).__name__}:{exc}"}); continue
         ejob=ensure_external_job(queue,plan,step,priority,meta,state_root=state_root,external_employee=external_employee)

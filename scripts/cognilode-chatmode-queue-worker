@@ -154,10 +154,13 @@ def provider_tool_evidence(raw: bytes, *, expected_sha256: str = "") -> list[dic
     evidence = []
     for result_id, (name, parent_id) in results.items():
         if not parent_id or calls.get(parent_id) != name: continue
-        # api_tool.call_tool invokes an external plugin, so do not label it as
-        # provider-native execution. The built-in functions.exec is distinct.
-        if name != "functions.exec": continue
-        evidence.append({"kind": "provider_observed_functions_exec", "ref": result_id,
+        # ChatGPT Chat-mode's built-in sandbox is container.exec; Code Mode's
+        # built-in sandbox is functions.exec. An opaque plugin recipient (for
+        # example api_tool.call_tool or a dynamic tool ID) is not native work.
+        if name not in {"functions.exec", "container.exec"}: continue
+        evidence.append({"kind": ("provider_observed_native_exec" if name == "container.exec"
+                                  else "provider_observed_functions_exec"),
+                         "tool": name, "ref": result_id,
                          "call_ref": parent_id, "raw_stream_sha256": raw_sha})
     return sorted(evidence, key=lambda row: row["ref"])
 

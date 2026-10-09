@@ -592,6 +592,8 @@ def main() -> int:
         parser.error("shared --remember requires --reader-id or COGNILODE_READER_ID for the named employee")
     if args.inbox_detail and not args.inbox:
         parser.error("--inbox-detail requires --inbox")
+    if args.inbox_detail and not args.remember:
+        parser.error("--inbox-detail requires --remember so unread pages remain discoverable")
     if args.inbox:
         if args.job_id or args.conversation_id or args.since or (args.remember and args.inbox_cursor):
             parser.error("--inbox cannot combine with a conversation, job, --since, or remembered explicit cursor")

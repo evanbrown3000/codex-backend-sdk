@@ -4,6 +4,7 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import zipfile
 
@@ -125,3 +126,45 @@ def test_private_s3_attachment_stages_exact_zip_for_alternate_device(monkeypatch
     staged = module.attachment_paths({'attachment_refs': [row]})[0]
     assert staged.read_bytes() == source.read_bytes()
     assert [x[2] for x in calls] == ['head-object', 'get-object']
+
+
+def test_cross_device_recovery_reconstructs_only_known_provider_conversation(monkeypatch, tmp_path):
+    module = worker()
+    monkeypatch.setattr(module.sender, 'DEFAULT_OUTPUT_ROOT', tmp_path)
+    job = {'id': 'job-123', 'reasoning_effort': 'xhigh'}
+    message_id = module.stable_user_message_id(job['id'])
+    monkeypatch.setattr(module, 'result_for_job', lambda _job_id: None)
+    monkeypatch.setattr(module, 'send_custody', lambda _job: {'custody': {
+        'user_message_id': message_id, 'conversation_id': 'provider-conversation-1'}})
+    commands = []
+    monkeypatch.setattr(module.subprocess, 'run', lambda argv, **_kwargs: commands.append(argv))
+    module.recover(job)
+    receipt = tmp_path / (module.job_stem(job['id']) + '.sse.receipt.json')
+    value = json.loads(receipt.read_text())
+    assert value['user_message_id'] == message_id
+    assert value['conversation_id'] == 'provider-conversation-1'
+    assert value['recovered_from_central_custody'] is True
+    assert len(commands) == 1 and str(module.COLLECTOR_PATH) in commands[0]
+
+
+def test_alternate_device_recovers_pending_turn_when_original_heartbeat_stales(monkeypatch):
+    module = worker()
+    now = datetime.now(timezone.utc)
+    job = {'id': 'pending-1', 'provider': 'chatgpt.com', 'rhythm_tape_sha256': 'a'*64,
+           'rhythm_slot_index': 1, 'claimed_by': 'rhythm:evanpc:aaaa:1'}
+    def post(body):
+        if body['operation'] == 'list_jobs':
+            return {'jobs': [job] if body['state'] == 'effect_pending' else []}
+        if body['operation'] == 'rhythm_read':
+            return {'gate': {'devices': [
+                {'id': 'evanpc', 'available': True, 'priority': 100,
+                 'observed_at': (now-timedelta(minutes=7)).isoformat()},
+                {'id': 'laptop', 'available': True, 'priority': 50,
+                 'observed_at': now.isoformat()}]}}
+        raise AssertionError(body)
+    monkeypatch.setattr(module.sender, 'operator_memory_post', post)
+    recovered = []
+    monkeypatch.setattr(module, 'recover', lambda item: recovered.append(item['id']))
+    import threading
+    module.poll('laptop', set(), threading.Lock())
+    assert recovered == ['pending-1']

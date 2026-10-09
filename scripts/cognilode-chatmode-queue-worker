@@ -8,6 +8,7 @@ An ambiguous send is never replayed; the exact receipt is recovered instead.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import importlib.machinery
@@ -533,6 +534,19 @@ def recover(job: dict) -> None:
     if value and complete_from_result(job, value):
         return
     receipt = sender.DEFAULT_OUTPUT_ROOT / (job_stem(job["id"]) + ".sse.receipt.json")
+    if not receipt.exists():
+        try:
+            custody = (send_custody(job) or {}).get("custody") or {}
+        except Exception:
+            custody = {}
+        conversation_id = str(custody.get("conversation_id") or "")
+        if conversation_id and custody.get("user_message_id") == stable_user_message_id(str(job["id"])):
+            atomic_json(receipt, {"state": "provider_accepted", "queue_job_id": job["id"],
+                "user_message_id": custody["user_message_id"], "conversation_id": conversation_id,
+                "transport": "codex_desktop_auth_http", "model": job.get("model") or "gpt-5-6-thinking",
+                "thinking_effort": job.get("reasoning_effort") or "xhigh",
+                "attached_context_files": [], "recovered_from_central_custody": True})
+            event("cross_device_receipt_reconstructed", job_id=job["id"], conversation_id=conversation_id)
     if receipt.exists():
         subprocess.run([sys.executable, str(COLLECTOR_PATH), "--limit", "40"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180, check=False)
@@ -639,8 +653,24 @@ def poll(device_id: str, active_ids: set[str], lock: threading.Lock) -> None:
                                            "state": "claimed", "limit": 100}).get("jobs") or []
     pending = sender.operator_memory_post({"operation": "list_jobs", "provider": "chatgpt.com",
                                            "state": "effect_pending", "limit": 100}).get("jobs") or []
+    recovery_leader = None
+    if pending:
+        try:
+            gate = sender.operator_memory_post({"operation": "rhythm_read"}).get("gate") or {}
+            now = datetime.now(timezone.utc).timestamp()
+            devices = []
+            for device in gate.get("devices") or []:
+                if not device.get("available") or not device.get("chatgpt_eligible", True):
+                    continue
+                observed = datetime.fromisoformat(str(device.get("observed_at") or "").replace("Z", "+00:00"))
+                if 0 <= now - observed.timestamp() <= 300:
+                    devices.append(device)
+            if devices:
+                recovery_leader = max(devices, key=lambda item: (int(item.get("priority") or 0), str(item.get("id") or ""))).get("id")
+        except Exception:
+            recovery_leader = None
     for job in pending:
-        if selected_for_device(job, device_id):
+        if selected_for_device(job, device_id) or recovery_leader == device_id:
             with lock:
                 if str(job.get("id") or "") in active_ids:
                     continue

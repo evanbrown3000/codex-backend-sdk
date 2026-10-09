@@ -100,6 +100,12 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
                 ["git", "-C", str(synced), "merge-base", "--is-ancestor", known_main, selected],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0)
             if selected and selected == synced_main and current_enough:
+                synced_starter = synced / "scripts/cognilode-company-container-bootstrap"
+                if synced_starter.is_file() and synced_starter.resolve() != Path(__file__).resolve():
+                    print(f"company starter adopting synchronized source: {selected}", flush=True)
+                    os.execve(sys.executable, [sys.executable,
+                              str(synced_starter)],
+                              {**os.environ, "COGNILODE_BOOTSTRAP_FROM_SYNC": "1"})
                 digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
                 if digest != applied_digest:
                     try:

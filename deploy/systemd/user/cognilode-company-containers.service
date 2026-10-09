@@ -4,11 +4,10 @@ After=network-online.target docker.service
 Wants=network-online.target
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+Type=exec
 ExecStart=%h/Projects/codex-backend-sdk/scripts/cognilode-company-container-bootstrap
 TimeoutStartSec=0
-Restart=on-failure
+Restart=always
 RestartSec=30s
 
 [Install]

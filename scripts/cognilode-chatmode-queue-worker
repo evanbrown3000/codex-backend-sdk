@@ -349,7 +349,7 @@ DX_TARGET = 32
 DX_EPISODES_PER_SOURCE_PER_SCAN = 1
 DX_MIN = 16
 DX_TAIL_MIN = 8
-DX_INPUT_CHAR_BUDGET = 70_000  # about 20K tokens, before ZIP compression
+DX_INPUT_CHAR_BUDGET = 1_000_000  # physical ZIP limit still applies; native sandbox chunks analysis
 DX_SCAN_INTERVAL_SECONDS = 600
 DX_STOCK_CACHE_SECONDS = 900
 DX_PRIORITY = 20
@@ -390,7 +390,9 @@ Produce grounded, concise lexical descriptors AND natural-language embedding_tex
 changed_conditions, outcome_signals, and uncertainties. Do not invent observed
 success or source text; the evidence field may be null.
 
-You MUST process all input episodes, in groups if helpful within this ONE agent
+You MUST process all input episodes in ~20K-token groups inside your native
+ChatGPT sandbox, retaining each group's result before processing the next.
+Do the heavy source verification and lexical computation there. In this ONE agent
 turn, not one provider call per episode. For each source, keep its provider, conversation ID and original turn IDs as exact locator evidence. Use native-sandbox computation to create
 one downloadable ZIP. That ZIP MUST contain decisionx_iae_labels.jsonl, exactly
 one JSON object for each input episode, and EXTERNAL_EFFECT_INSTRUCTIONS.md.
@@ -413,6 +415,9 @@ def _dx_connection():
             (id TEXT PRIMARY KEY, source_sha TEXT NOT NULL, state TEXT NOT NULL,
              attempts INTEGER NOT NULL DEFAULT 0, retry_after REAL NOT NULL DEFAULT 0,
              batch TEXT, updated REAL NOT NULL)""")
+        db.execute("""CREATE TABLE IF NOT EXISTS verified_dispatches
+            (batch TEXT PRIMARY KEY, job_id TEXT NOT NULL, prompt_sha TEXT NOT NULL,
+             priority INTEGER NOT NULL, queued_at REAL NOT NULL)""")
         yield db
         db.commit()
     except Exception:
@@ -641,6 +646,8 @@ def _dx_reconcile_queued(db):
         job = result.get("job") or {}
         if job.get("state") not in {"cancelled", "failed", "complete"}:
             continue
+        if job.get("state") in {"cancelled", "failed"}:
+            db.execute("DELETE FROM verified_dispatches WHERE batch=?", (batch,))
         evidence = job.get("effect_evidence") or []
         admission = next((row for row in evidence if isinstance(row, dict)
                           and row.get("kind") == "decisionx_label_admission"), None)
@@ -657,9 +664,38 @@ def _dx_reconcile_queued(db):
     return released
 
 
+def _dx_reconcile_unproved_done(db):
+    """Retire legacy local completion claims without central label admission.
+
+    Earlier transport-only ChatGPT jobs were marked done locally even though
+    their returned labels never entered the D1 descriptor index. Those rows
+    must remain eligible for genuine native source-grounded labeling.
+    """
+    released = 0
+    batches = [row[0] for row in db.execute(
+        "SELECT DISTINCT batch FROM episodes WHERE state='done' AND batch IS NOT NULL")]
+    for batch in batches:
+        result = sender.operator_memory_post({"operation": "get_job", "job_id": "decisionx-iae-" + batch})
+        job = result.get("job") or {}
+        if job.get("id") != "decisionx-iae-" + batch:
+            raise RuntimeError("DecisionX completed-batch provenance unavailable")
+        evidence = job.get("effect_evidence") or []
+        admission = next((row for row in evidence if isinstance(row, dict)
+                          and row.get("kind") == "decisionx_label_admission"
+                          and int(row.get("admitted") or 0) > 0), None)
+        source_refs = [ref for ref in job.get("attachment_refs") or []
+                       if isinstance(ref, dict) and ref.get("kind") == "decisionx_native_source"]
+        if job.get("state") == "complete" and admission and len(source_refs) >= 2:
+            continue
+        cursor = db.execute("UPDATE episodes SET state='retry',retry_after=0,updated=? "
+                            "WHERE state='done' AND batch=?", (time.time(), batch))
+        released += cursor.rowcount
+    return released
+
+
 def _dx_batch_priority(db):
     """Advance one verified first batch, then use low-priority quota-sensitive work."""
-    prior = db.execute("SELECT 1 FROM episodes WHERE state IN ('queued','done') LIMIT 1").fetchone()
+    prior = db.execute("SELECT 1 FROM verified_dispatches LIMIT 1").fetchone()
     return DX_PRIORITY if prior else DX_FIRST_VERIFIED_PRIORITY
 
 
@@ -722,6 +758,8 @@ def decisionx_batch_pump():
     with _dx_connection() as db:
         released = _dx_reconcile_queued(db)
         if released: event("decisionx_cancelled_batch_refs_released", episodes=released)
+        unproved = _dx_reconcile_unproved_done(db)
+        if unproved: event("decisionx_unproved_done_released", episodes=unproved)
         pending = list(state.get("spool") or [])
         known = {e["episode_id"] for e in pending}
         source_refs = _dx_diversified_source_refs(stock.get("verified_source_refs") or [])
@@ -836,6 +874,9 @@ def decisionx_batch_pump():
             atomic_json(DX_HOME/"scan.json",state)
             raise RuntimeError("DecisionX enqueue was not retained as an actionable D1 job: "
                                + str(reply.get("error") or (reply.get("job") or {}).get("state")))
+        db.execute("INSERT OR REPLACE INTO verified_dispatches"
+                   "(batch,job_id,prompt_sha,priority,queued_at) VALUES(?,?,?,?,?)",
+                   (batch,id_value,digest,priority,time.time()))
         now = time.time()
         for e in selected:
             db.execute("""INSERT INTO episodes(id,source_sha,state,attempts,retry_after,batch,updated)

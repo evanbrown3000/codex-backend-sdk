@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
 import argparse
+import fcntl
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -28,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import zipfile
 
@@ -103,6 +105,10 @@ class Plan:
     text: str
     steps: tuple[Step, ...]
     source_ref: str = ""
+    inflight_revisions: Mapping[str, str] = field(default_factory=dict)
+    completed_effects: Mapping[str, str] = field(default_factory=dict)
+    completed_effect_revisions: Mapping[str, str] = field(default_factory=dict)
+    inherited_checked: tuple[str, ...] = ()
 
     def by_id(self) -> dict[str, Step]:
         return {s.step_id: s for s in self.steps}
@@ -117,11 +123,32 @@ def parse_plan_text(text: str) -> Plan:
     project_id = ""
     raw_steps: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
+    inflight_revisions: dict[str, str] = {}
+    completed_effects: dict[str, str] = {}
+    completed_effect_revisions: dict[str, str] = {}
+    inherited_checked: set[str] = set()
     for line in text.splitlines():
         if line.startswith("project ") and not project_name:
             project_name = line.removeprefix("project ").strip()
         elif line.startswith("id ") and not project_id:
             project_id = line.removeprefix("id ").strip()
+        elif line.startswith("inflight_revision "):
+            parts = line.split()
+            if len(parts) != 3 or not HEX64.fullmatch(parts[2]) or parts[1] in inflight_revisions:
+                raise ValueError("invalid or duplicate inflight_revision")
+            inflight_revisions[parts[1]] = parts[2]
+        elif line.startswith("completed_effect "):
+            parts = line.split()
+            if (len(parts) != 4 or not HEX64.fullmatch(parts[2])
+                or not re.fullmatch(r"tf-[0-9a-f]{40}", parts[3]) or parts[1] in completed_effects):
+                raise ValueError("invalid or duplicate completed_effect")
+            completed_effect_revisions[parts[1]] = parts[2]
+            completed_effects[parts[1]] = parts[3]
+        elif line.startswith("inherited_checked "):
+            parts = line.split()
+            if len(parts) != 2 or parts[1] in inherited_checked:
+                raise ValueError("invalid or duplicate inherited_checked")
+            inherited_checked.add(parts[1])
         match = STEP_RE.match(line)
         if match:
             current = {
@@ -141,6 +168,8 @@ def parse_plan_text(text: str) -> Plan:
     ids = {row["step_id"] for row in raw_steps}
     if len(ids) != len(raw_steps):
         raise ValueError("duplicate step id")
+    if (set(inflight_revisions) | set(completed_effects) | inherited_checked) - ids:
+        raise ValueError("revision metadata references an unknown step")
     stack: list[dict[str, Any]] = []
     steps: list[Step] = []
     for row in raw_steps:
@@ -168,7 +197,28 @@ def parse_plan_text(text: str) -> Plan:
         for dep in graph[node]: visit(dep)
         temporary.remove(node); permanent.add(node)
     for node in graph: visit(node)
-    return Plan(project_id, project_name or project_id, sha256_bytes(text.encode()), text, tuple(steps))
+    if set(inflight_revisions) & set(completed_effects):
+        raise ValueError("step cannot be inflight and complete")
+    if any(row["checked"] and row["step_id"] in inflight_revisions for row in raw_steps):
+        raise ValueError("checked step cannot be inflight")
+    if any(not row["checked"] and row["step_id"] in completed_effects for row in raw_steps):
+        raise ValueError("completed_effect requires a checked step")
+    if inherited_checked & set(completed_effects):
+        raise ValueError("inherited and verified checkoff overlap")
+    if any(jid != stable_id(project_id, completed_effect_revisions[step_id], step_id, "external_effect", "0")
+           for step_id, jid in completed_effects.items()):
+        raise ValueError("completed_effect job ID does not match its source revision")
+    if any(not row["checked"] and row["step_id"] in inherited_checked for row in raw_steps):
+        raise ValueError("inherited_checked requires a checked step")
+    if (inflight_revisions or completed_effects or inherited_checked) and any(
+        row["checked"] and row["step_id"] not in completed_effects and row["step_id"] not in inherited_checked
+        for row in raw_steps
+    ):
+        raise ValueError("checked step lacks verified effect or explicit inherited baseline")
+    return Plan(project_id, project_name or project_id, sha256_bytes(text.encode()), text, tuple(steps),
+                inflight_revisions=inflight_revisions, completed_effects=completed_effects,
+                completed_effect_revisions=completed_effect_revisions,
+                inherited_checked=tuple(sorted(inherited_checked)))
 
 
 def parse_plan(path: Path) -> Plan:
@@ -176,6 +226,28 @@ def parse_plan(path: Path) -> Plan:
     raw = path.read_bytes()
     plan = parse_plan_text(raw.decode("utf-8"))
     return replace(plan, sha256=sha256_bytes(raw), source_ref="file:" + str(path))
+
+
+def plan_revision_path(path: Path, revision: str) -> Path:
+    if not HEX64.fullmatch(revision):
+        raise ValueError("invalid prior plan revision")
+    return path.parent / ".taskflow-plan-revisions" / path.name / f"{revision}.plan"
+
+
+def prior_plan_cohorts(plan: Plan) -> list[tuple[Plan, set[str]]]:
+    """Resume already-started work from the committed plan bytes that created it."""
+    source = Path(plan.source_ref.removeprefix("file:"))
+    cohorts: list[tuple[Plan, set[str]]] = []
+    for revision in sorted(set(plan.inflight_revisions.values())):
+        old = parse_plan(plan_revision_path(source, revision))
+        verify_plan_revision(old)
+        if old.sha256 != revision or old.project_id != plan.project_id:
+            raise ValueError("prior plan snapshot does not match its revision/project")
+        ids = {step_id for step_id, value in plan.inflight_revisions.items() if value == revision}
+        if not ids <= old.by_id().keys():
+            raise ValueError("prior plan snapshot is missing an in-flight step")
+        cohorts.append((old, ids))
+    return cohorts
 
 
 def verify_plan_revision(plan: Plan) -> None:
@@ -200,12 +272,16 @@ def verify_plan_revision(plan: Plan) -> None:
 
 
 def phase_job_id(plan: Plan, step_id: str, phase: str, attempt: int = 0) -> str:
-    return stable_id(plan.project_id, plan.sha256, step_id, phase, str(attempt))
+    return stable_id(plan.project_id, plan.inflight_revisions.get(step_id, plan.sha256), step_id, phase, str(attempt))
 
 
 def final_dependency_ids(plan: Plan, step: Step) -> list[str]:
     by_id = plan.by_id()
-    return [phase_job_id(plan, dep, "external_effect") for dep in step.dependencies if not by_id[dep].checked]
+    inherited = [dep for dep in step.dependencies if by_id[dep].checked and dep not in plan.completed_effects]
+    if inherited:
+        raise ValueError(f"checked dependency lacks a D1-verified external effect: {', '.join(inherited)}")
+    return [plan.completed_effects[dep] if by_id[dep].checked else phase_job_id(plan, dep, "external_effect")
+            for dep in step.dependencies]
 
 
 def safe_zip_members(path: Path) -> list[zipfile.ZipInfo]:
@@ -467,6 +543,34 @@ def verify_effect_receipt(path: Path, *, plan: Plan, step: Step, work_sha256: st
     return body
 
 
+def validate_probe_observation(step: Step, observed: str) -> str:
+    expected = str(step.fields.get("effect_probe_expected") or "").strip()
+    if expected:
+        if observed != expected:
+            raise ValueError(f"independent effect probe failed: output mismatch {observed[:200]!r}")
+        return expected
+    try:
+        structured = json.loads(observed)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("independent effect probe needs structured JSON evidence") from exc
+    if not isinstance(structured, dict) or structured.get("schema") != "cognilode.effect_probe.v1" or structured.get("verified") is not True:
+        raise ValueError("independent effect probe structured evidence is not verified")
+    evidence = structured.get("evidence")
+    if not isinstance(evidence, list) or not evidence or any(
+        not isinstance(row, dict) or not str(row.get("kind") or "").strip()
+        or not str(row.get("ref") or "").strip()
+        or not HEX64.fullmatch(str(row.get("sha256") or "")) for row in evidence
+    ):
+        raise ValueError("independent effect probe needs SHA-bound evidence")
+    declared_sources = structured.get("distinct_sources")
+    if declared_sources is not None and (
+        not isinstance(declared_sources, int) or declared_sources < 1
+        or len({str(row["ref"]) for row in evidence}) < declared_sources
+    ):
+        raise ValueError("independent effect probe distinct source count is unsupported by its evidence")
+    return "cognilode.effect_probe.v1 verified"
+
+
 def verify_effect_probe(step: Step) -> dict[str, Any]:
     """Independently read the effect with a command authored in the .plan file."""
     command = str(step.fields.get("effect_probe_command") or "").strip()
@@ -481,30 +585,7 @@ def verify_effect_probe(step: Step) -> dict[str, Any]:
     observed = result.stdout.strip()
     if result.returncode != 0:
         raise ValueError(f"independent effect probe failed: exit={result.returncode}, observed={observed[:200]!r}")
-    if expected:
-        if observed != expected:
-            raise ValueError(f"independent effect probe failed: exit={result.returncode}, observed={observed[:200]!r}")
-    else:
-        try:
-            structured = json.loads(observed)
-        except (json.JSONDecodeError, TypeError) as exc:
-            raise ValueError("independent effect probe needs structured JSON evidence") from exc
-        if not isinstance(structured, dict) or structured.get("schema") != "cognilode.effect_probe.v1" or structured.get("verified") is not True:
-            raise ValueError("independent effect probe structured evidence is not verified")
-        evidence = structured.get("evidence")
-        if not isinstance(evidence, list) or not evidence or any(
-            not isinstance(row, dict) or not str(row.get("kind") or "").strip()
-            or not str(row.get("ref") or "").strip()
-            or not HEX64.fullmatch(str(row.get("sha256") or "")) for row in evidence
-        ):
-            raise ValueError("independent effect probe needs SHA-bound evidence")
-        declared_sources = structured.get("distinct_sources")
-        if declared_sources is not None and (
-            not isinstance(declared_sources, int) or declared_sources < 1
-            or len({str(row["ref"]) for row in evidence}) < declared_sources
-        ):
-            raise ValueError("independent effect probe distinct source count is unsupported by its evidence")
-        expected = "cognilode.effect_probe.v1 verified"
+    expected = validate_probe_observation(step, observed)
     proof = {"command": command, "expected": expected, "observed": observed,
              "timeout_seconds": str(timeout_seconds), "verified_at": utc()}
     proof["sha256"] = sha256_bytes(json.dumps(proof, sort_keys=True).encode())
@@ -619,6 +700,10 @@ def ensure_external_job(queue: QueueClient, plan: Plan, step: Step, priority: in
 
 
 def completed_prerequisites(queue: QueueClient, plan: Plan, step: Step) -> bool:
+    if any(plan.by_id()[dep].checked and dep not in plan.completed_effects for dep in step.dependencies):
+        return False
+    if any(plan.by_id()[dep].checked for dep in step.dependencies):
+        verify_completed_effects(queue,plan,step_ids=set(step.dependencies))
     for jid in final_dependency_ids(plan,step):
         row=queue.get(jid)
         if not row or row.get("state") != "complete" or row.get("provider") != "codex.external-effect": return False
@@ -626,28 +711,267 @@ def completed_prerequisites(queue: QueueClient, plan: Plan, step: Step) -> bool:
     return True
 
 
-def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, state_root: Path, worker_id: str, manager: str, priority: int, external_employee: str, seed_step: str | None = None) -> dict[str,Any]:
+def completed_effect_job(queue: QueueClient, plan: Plan, step: Step) -> dict[str, Any] | None:
+    """Only the fenced D1 completion with an independent readback can check a box."""
+    job_id = phase_job_id(plan, step.step_id, "external_effect")
+    job = queue.get(job_id)
+    if job is None or job.get("state") != "complete":
+        return None
+    expected_revision = plan.inflight_revisions.get(step.step_id, plan.sha256)
+    payload = job.get("payload") or {}
+    if (job.get("id") != job_id or job.get("provider") != "codex.external-effect"
+        or (job.get("plan_revision") or payload.get("plan_revision")) != expected_revision
+        or (job.get("taskflow_step") or payload.get("taskflow_step")) != step.step_id
+        or (job.get("phase") or payload.get("taskflow_phase")) != "external_effect"):
+        raise ValueError(f"D1 effect job identity mismatch for {step.step_id}")
+    evidence = job.get("effect_evidence") or job.get("effect_evidence_json") or []
+    if isinstance(evidence,str):
+        try: evidence=json.loads(evidence)
+        except json.JSONDecodeError as exc: raise ValueError("D1 effect evidence JSON is malformed") from exc
+    if not isinstance(evidence, list):
+        raise ValueError(f"D1 effect evidence is malformed for {step.step_id}")
+    by_kind: dict[str, list[dict[str, Any]]] = {}
+    for row in evidence:
+        if isinstance(row, dict):
+            by_kind.setdefault(str(row.get("kind")), []).append(row)
+    effect = by_kind.get("external_effect", [])
+    receipt = by_kind.get("external_effect_receipt", [])
+    work = by_kind.get("chatgpt_work_zip", [])
+    probes = by_kind.get("independent_effect_probe", [])
+    if (len(effect), len(receipt), len(work), len(probes)) != (1, 1, 1, 1):
+        raise ValueError(f"D1 effect lacks exactly one effect, receipt, work ZIP and independent probe for {step.step_id}")
+    if (not str(effect[0].get("ref") or "").strip()
+        or any(not HEX64.fullmatch(str(row.get("ref") or "")) for row in (receipt[0], work[0], probes[0]))
+        or probes[0].get("command") != step.fields.get("effect_probe_command")
+        or not str(probes[0].get("observed") or "").strip()):
+        raise ValueError(f"D1 effect evidence is not hash-bound to the plan probe for {step.step_id}")
+    validate_probe_observation(step,str(probes[0]["observed"]))
+    return job
+
+
+def plan_root_source_path(plan: Plan) -> Path:
+    source=Path(plan.source_ref.removeprefix("file:"))
+    if source.parent.parent.name == ".taskflow-plan-revisions":
+        return source.parent.parent.parent / source.parent.name
+    return source
+
+
+def verify_completed_effects(queue: QueueClient, plan: Plan, *, step_ids: set[str] | None = None) -> None:
+    """Read D1 and the committed source revision before honoring checked steps."""
+    root_source=plan_root_source_path(plan)
+    for step_id,stored_id in plan.completed_effects.items():
+        if step_ids is not None and step_id not in step_ids:
+            continue
+        revision=plan.completed_effect_revisions.get(step_id)
+        if not revision:
+            raise ValueError(f"checked step has no source revision: {step_id}")
+        archived=parse_plan(plan_revision_path(root_source,revision))
+        verify_plan_revision(archived)
+        if archived.project_id != plan.project_id or archived.sha256 != revision:
+            raise ValueError(f"checked step source revision mismatch: {step_id}")
+        old_step=archived.by_id().get(step_id)
+        current_step=plan.by_id().get(step_id)
+        if (not old_step or old_step.checked or not current_step or not current_step.checked
+            or archived.inflight_revisions.get(step_id)
+            or old_step.title != current_step.title
+            or any(old_step.fields.get(key) != current_step.fields.get(key)
+                   for key in ("done_when","effect_probe_command","effect_probe_expected"))):
+            raise ValueError(f"checked step differs from its effect source: {step_id}")
+        job=completed_effect_job(queue,archived,old_step)
+        if not job or job["id"] != stored_id:
+            raise ValueError(f"checked step has no matching D1 external effect: {step_id}")
+
+
+def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(["git", "-C", str(repo), *args], text=True, capture_output=True, timeout=30, check=False)
+    if check and result.returncode:
+        raise RuntimeError(f"git {' '.join(args[:2])} failed: {result.stderr.strip()[:300]}")
+    return result
+
+
+def plan_repo(path: Path) -> Path:
+    return Path(_git(path.parent, "rev-parse", "--show-toplevel").stdout.strip()).resolve()
+
+
+def execution_repo(path: Path) -> Path:
+    # A plan fixture can live outside Git; checkoff itself still requires Git.
+    root = _git(path.parent, "rev-parse", "--show-toplevel", check=False)
+    return Path(root.stdout.strip()).resolve() if root.returncode == 0 else path.parent.parent
+
+
+def _revised_plan_text(plan: Plan, *, completed: Mapping[str, str], completed_revisions: Mapping[str, str],
+                       inflight: Mapping[str, str], inherited: Sequence[str]) -> str:
+    lines = []
+    inserted = False
+    for line in plan.text.splitlines(keepends=True):
+        if line.startswith(("inflight_revision ", "completed_effect ", "inherited_checked ")):
+            continue
+        match = STEP_RE.match(line.rstrip("\r\n"))
+        if match and match.group("id") in completed and match.group("check") == " ":
+            line = line[:len(match.group("indent"))] + "[x]" + line[len(match.group("indent")) + 3:]
+        lines.append(line)
+        if line.startswith("id ") and not inserted:
+            ending = "\r\n" if line.endswith("\r\n") else "\n"
+            lines.extend(f"completed_effect {key} {completed_revisions[key]} {value}{ending}"
+                         for key, value in sorted(completed.items()))
+            lines.extend(f"inflight_revision {key} {value}{ending}" for key, value in sorted(inflight.items()))
+            lines.extend(f"inherited_checked {key}{ending}" for key in sorted(inherited))
+            inserted = True
+    if not inserted:
+        raise ValueError("plan has no id line")
+    return "".join(lines)
+
+
+def checkoff_verified_effects(queue: QueueClient, plan: Plan, *, expected_revision: str,
+                              expected_job_id: str, step_id: str) -> dict[str, Any]:
+    """Codex employee calls this after D1 effect completion, with a revision/job fence.
+
+    All current-revision in-flight siblings are retained under their original
+    committed plan snapshot. A dependent step keeps the old D1 effect job ID
+    until the sibling itself is checked off.
+    """
+    if plan.sha256 != expected_revision or not HEX64.fullmatch(expected_revision):
+        raise ValueError("plan revision changed before checkoff")
     verify_plan_revision(plan)
-    repo_path = Path(plan.source_ref.removeprefix("file:")).parent.parent
+    step = plan.by_id().get(step_id)
+    if not step or step.checked:
+        raise ValueError("checkoff target must be an unchecked plan step")
+    if phase_job_id(plan, step_id, "external_effect") != expected_job_id:
+        raise ValueError("external effect job fence mismatch")
+    if not completed_effect_job(queue, plan, step):
+        raise ValueError("D1 external effect is not complete with independent readback")
+    verify_completed_effects(queue, plan)
+    source = Path(plan.source_ref.removeprefix("file:"))
+    repo = plan_repo(source)
+    relative = source.relative_to(repo).as_posix()
+    if _git(repo, "status", "--porcelain", "--", relative).stdout.strip():
+        raise ValueError("plan path has uncommitted changes")
+    completed = dict(plan.completed_effects)
+    completed_revisions = dict(plan.completed_effect_revisions)
+    inflight = dict(plan.inflight_revisions)
+    newly_checked: list[str] = []
+    for candidate in plan.steps:
+        if candidate.checked:
+            continue
+        job = completed_effect_job(queue, plan, candidate)
+        if job:
+            completed[candidate.step_id] = str(job["id"])
+            completed_revisions[candidate.step_id] = plan.inflight_revisions.get(candidate.step_id,plan.sha256)
+            inflight.pop(candidate.step_id, None)
+            newly_checked.append(candidate.step_id)
+            continue
+        # Existing phase jobs retain their originating revision across this edit.
+        for phase in ("research", "chatgpt_sandbox", "external_effect"):
+            existing = queue.get(phase_job_id(plan, candidate.step_id, phase))
+            if existing:
+                revision = plan.inflight_revisions.get(candidate.step_id, plan.sha256)
+                payload = existing.get("payload") or {}
+                if ((existing.get("plan_revision") or payload.get("plan_revision")) != revision
+                    or (existing.get("taskflow_step") or payload.get("taskflow_step")) != candidate.step_id):
+                    raise ValueError(f"phase job identity mismatch for {candidate.step_id}")
+                inflight[candidate.step_id] = revision
+    if step_id not in newly_checked:
+        raise ValueError("target effect did not qualify for checkoff")
+    inherited = set(plan.inherited_checked) | {candidate.step_id for candidate in plan.steps
+                                                 if candidate.checked and candidate.step_id not in completed}
+    updated = _revised_plan_text(plan, completed=completed, completed_revisions=completed_revisions,
+                                 inflight=inflight, inherited=inherited)
+    parsed = parse_plan_text(updated)
+    if not parsed.by_id()[step_id].checked:
+        raise ValueError("checkoff did not update target")
+    snapshot = plan_revision_path(source, plan.sha256)
+    snapshot_rel = snapshot.relative_to(repo).as_posix()
+    created_snapshot = not snapshot.exists()
+    if snapshot.exists() and sha256_file(snapshot) != plan.sha256:
+        raise ValueError("prior plan snapshot path has different bytes")
+    if _git(repo, "status", "--porcelain", "--", snapshot_rel).stdout.strip():
+        raise ValueError("prior plan snapshot has uncommitted changes")
+    head_before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    if sha256_file(source) != plan.sha256:
+        raise ValueError("plan changed before checkoff write")
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    if created_snapshot:
+        snapshot.write_bytes(source.read_bytes())
+    new_bytes = updated.encode("utf-8")
+    commit_created = False
+    try:
+        tmp = source.with_name(source.name + ".checkoff.tmp")
+        tmp.write_bytes(new_bytes)
+        tmp.replace(source)
+        if _git(repo, "rev-parse", "HEAD").stdout.strip() != head_before:
+            raise ValueError("repository HEAD moved during checkoff")
+        _git(repo, "add", "--", relative, snapshot_rel)
+        _git(repo, "-c", "user.name=TaskFlow Codex Employee", "-c", "user.email=taskflow@cognilode.local",
+             "commit", "--only", "-m", f"Check off verified TaskFlow effect {step_id}", "--", relative, snapshot_rel)
+        commit_created = True
+        committed = parse_plan(source)
+        verify_plan_revision(committed)
+        if sha256_file(snapshot) != plan.sha256:
+            raise ValueError("committed prior plan snapshot changed")
+    except Exception as exc:
+        head_now = _git(repo, "rev-parse", "HEAD", check=False)
+        # A commit may have succeeded even if a later verification or wrapper
+        # failed. Never restore old bytes over the committed plan in that case.
+        if commit_created or head_now.returncode or head_now.stdout.strip() != head_before:
+            raise RuntimeError("TaskFlow checkoff commit may exist; committed plan and snapshot left intact for recovery") from exc
+        if not source.exists() or source.read_bytes() != new_bytes:
+            raise RuntimeError("TaskFlow checkoff failed before commit, but plan changed concurrently; left intact") from exc
+        restore=source.with_name(source.name+".checkoff.restore.tmp")
+        restore.write_bytes(plan.text.encode("utf-8"))
+        restore.replace(source)
+        _git(repo, "reset", "-q", "--", relative, snapshot_rel, check=False)
+        if created_snapshot and snapshot.exists() and sha256_file(snapshot) == plan.sha256:
+            snapshot.unlink()
+        raise
+    return {"schema": "cognilode.taskflow.checkoff.v1", "project": plan.project_id,
+            "previous_revision": plan.sha256, "new_revision": committed.sha256,
+            "checked_steps": newly_checked, "effect_job_id": expected_job_id,
+            "inflight_revisions": inflight, "git_commit": _git(repo, "rev-parse", "HEAD").stdout.strip()}
+
+
+def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, state_root: Path, worker_id: str, manager: str, priority: int, external_employee: str, seed_step: str | None = None, active_step_ids: set[str] | None = None) -> dict[str,Any]:
+    verify_plan_revision(plan)
+    verify_completed_effects(queue,plan)
+    repo_path = execution_repo(Path(plan.source_ref.removeprefix("file:")))
     state_root.mkdir(parents=True,exist_ok=True)
     action={"at":utc(),"project":plan.project_id,"plan_sha256":plan.sha256,"actions":[]}
+    def active(step: Step) -> bool:
+        return ((active_step_ids is None or step.step_id in active_step_ids) and not step.checked
+                and completed_prerequisites(queue,plan,step))
+    def phase_jobs(phase: str, provider: str, state: str) -> Iterable[dict[str, Any]]:
+        # The D1 queue is global. A limited list page can omit this project
+        # indefinitely when other projects have more than one page of work.
+        for candidate in plan.steps:
+            if not active(candidate):
+                continue
+            jid=phase_job_id(plan,candidate.step_id,phase)
+            row=queue.get(jid)
+            if not row:
+                continue
+            payload=row.get("payload") or {}
+            if (row.get("id") != jid or row.get("provider") != provider
+                or (row.get("plan_revision") or payload.get("plan_revision")) != plan.sha256
+                or (row.get("taskflow_step") or payload.get("taskflow_step")) != candidate.step_id
+                or (row.get("phase") or payload.get("taskflow_phase")) != phase):
+                raise ValueError(f"D1 exact phase job identity mismatch: {candidate.step_id}/{phase}")
+            if row.get("state") == state:
+                yield row
     # Materialize only newly dependency-eligible unchecked steps. Checked plan steps are inherited.
     if seed_step and seed_step not in plan.by_id():
         raise ValueError(f"unknown seed step: {seed_step}")
     for step in plan.steps:
         if seed_step and step.step_id != seed_step: continue
-        if step.checked or not completed_prerequisites(queue,plan,step): continue
+        if not active(step): continue
         owner=step.fields.get("owner") or role
         slack_role_context(owner)
         rjob=materialize_research_job(queue,plan,step,priority,role=owner,state_root=state_root)
         action["actions"].append({"step":step.step_id,"phase":"research","state":rjob.get("state"),"employee":owner})
     # Reconcile research actions that crossed begin_effect before a crash/timeout. Never resend them.
-    pending_research=queue.post({"operation":"list_jobs","provider":"codex.research","state":"effect_pending","limit":100}).get("jobs") or []
-    for pending in pending_research:
+    for pending in phase_jobs("research","codex.research","effect_pending"):
         payload=pending.get("payload") or {}
         if (pending.get("plan_revision") or payload.get("plan_revision")) != plan.sha256: continue
         step=plan.by_id().get(str(pending.get("taskflow_step") or payload.get("taskflow_step")))
-        if not step: continue
+        if not step or not active(step): continue
         run_dir=state_root/plan.project_id/step.step_id/"research"/str(pending["id"]); out_zip=run_dir/"research.zip"
         try:
             owner=step.fields.get("owner") or role
@@ -670,7 +994,7 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
     # Research workers are generic D1 claims; this controller is their actuator.
     rjob=None
     for candidate_step in plan.steps:
-        if candidate_step.checked or (seed_step and candidate_step.step_id != seed_step): continue
+        if not active(candidate_step) or (seed_step and candidate_step.step_id != seed_step): continue
         candidate_role=candidate_step.fields.get("owner") or role
         rjob=queue.claim("codex.research",candidate_role,phase_job_id(plan,candidate_step.step_id,"research"))
         if rjob:
@@ -702,12 +1026,11 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
         else:
             action["actions"].append({"phase":"research_claim","ok":False,"error":"claimed job does not match plan and employee"})
     # Advance completed ChatGPT phase jobs to an external-effect job. Never use ChatGPT completion as TaskFlow completion.
-    rows=queue.post({"operation":"list_jobs","provider":"chatgpt.com","state":"complete","limit":100}).get("jobs") or []
-    for cjob in rows:
+    for cjob in phase_jobs("chatgpt_sandbox","chatgpt.com","complete"):
         payload=cjob.get("payload") or {}
         if (cjob.get("phase") or payload.get("taskflow_phase")) != "chatgpt_sandbox" or (cjob.get("plan_revision") or payload.get("plan_revision")) != plan.sha256: continue
         step=plan.by_id().get(str(cjob.get("taskflow_step") or payload.get("taskflow_step")))
-        if not step: continue
+        if not step or not active(step): continue
         path=_artifact_from_chat_job(cjob)
         if not path: continue
         try:
@@ -719,12 +1042,11 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
         ejob=ensure_external_job(queue,plan,step,priority,meta,state_root=state_root,external_employee=external_employee)
         action["actions"].append({"step":step.step_id,"phase":"external_effect","state":ejob.get("state"),"work_zip":meta["sha256"]})
     # Reconcile external effects from their durable receipt before considering a new mutation.
-    pending_effects=queue.post({"operation":"list_jobs","provider":"codex.external-effect","state":"effect_pending","limit":100}).get("jobs") or []
-    for pending in pending_effects:
+    for pending in phase_jobs("external_effect","codex.external-effect","effect_pending"):
         payload=pending.get("payload") or {}
         if (pending.get("plan_revision") or payload.get("plan_revision")) != plan.sha256: continue
         step=plan.by_id().get(str(pending.get("taskflow_step") or payload.get("taskflow_step")))
-        if not step: continue
+        if not step or not active(step): continue
         receipt_path=state_root/plan.project_id/step.step_id/"external_effect"/str(pending["id"])/"EXTERNAL_EFFECT_RESULT.json"
         try:
             if pending.get("claimed_by") != external_employee or pending.get("assigned_employee") != external_employee:
@@ -744,7 +1066,7 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
 
     ejob=None
     for candidate_step in plan.steps:
-        if candidate_step.checked or (seed_step and candidate_step.step_id != seed_step): continue
+        if not active(candidate_step) or (seed_step and candidate_step.step_id != seed_step): continue
         ejob=queue.claim("codex.external-effect",external_employee,phase_job_id(plan,candidate_step.step_id,"external_effect"))
         if ejob: break
     if ejob:
@@ -779,13 +1101,85 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
 
 
 def main(argv: Sequence[str] | None=None) -> int:
-    p=argparse.ArgumentParser(); p.add_argument("--plan",required=True); p.add_argument("--role",required=True)
+    p=argparse.ArgumentParser(); p.add_argument("--plan",required=True); p.add_argument("--role",default="")
     p.add_argument("--secretary",default=str(DEFAULT_SECRETARY)); p.add_argument("--state-root",default=""); p.add_argument("--worker-id",default="taskflow-phase-controller")
-    p.add_argument("--manager",default="agent-memory-manager"); p.add_argument("--priority",type=int,default=50); p.add_argument("--external-employee",required=True); p.add_argument("--seed-step",default="")
+    p.add_argument("--manager",default="agent-memory-manager"); p.add_argument("--priority",type=int,default=50); p.add_argument("--external-employee",default=""); p.add_argument("--seed-step",default="")
+    p.add_argument("--checkoff-only",action="store_true"); p.add_argument("--expected-plan-sha",default=""); p.add_argument("--expected-effect-job-id",default=""); p.add_argument("--step-id",default="")
     args=p.parse_args(argv); plan=parse_plan(Path(args.plan)); queue=QueueClient(load_sender())
-    repo_path=Path(plan.source_ref.removeprefix("file:")).parent.parent
+    repo_path=plan_repo(Path(plan.source_ref.removeprefix("file:")))
     state_root=Path(args.state_root).resolve() if args.state_root else repo_path/".taskflow-state"
-    result=run_once(queue=queue,plan=plan,role=args.role,secretary=Path(args.secretary),state_root=state_root,worker_id=args.worker_id,manager=args.manager,priority=args.priority,external_employee=args.external_employee,seed_step=args.seed_step or None)
+    state_root.mkdir(parents=True,exist_ok=True)
+    lock_path=state_root/("plan-"+sha256_bytes(str(Path(args.plan).resolve()).encode())[:20]+".checkoff.lock")
+    if args.checkoff_only:
+        if not (args.external_employee and args.expected_plan_sha and args.expected_effect_job_id and args.step_id):
+            p.error("checkoff requires external employee, expected plan SHA, effect job ID and step ID")
+        with lock_path.open("a+") as lock:
+            fcntl.flock(lock.fileno(),fcntl.LOCK_EX)
+            result=checkoff_verified_effects(queue,parse_plan(Path(args.plan)),expected_revision=args.expected_plan_sha,
+                                             expected_job_id=args.expected_effect_job_id,step_id=args.step_id)
+        print(json.dumps(result,indent=2,sort_keys=True))
+        return 0
+    if not args.role or not args.external_employee:
+        p.error("controller requires --role and --external-employee")
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock.fileno(),fcntl.LOCK_SH)
+        plan=parse_plan(Path(args.plan))
+        result={"at":utc(),"project":plan.project_id,"plan_sha256":plan.sha256,"actions":[]}
+        for older,ids in prior_plan_cohorts(plan):
+            row=run_once(queue=queue,plan=older,role=args.role,secretary=Path(args.secretary),state_root=state_root,
+                         worker_id=args.worker_id,manager=args.manager,priority=args.priority,
+                         external_employee=args.external_employee,seed_step=args.seed_step or None,active_step_ids=ids)
+            result["actions"].extend(row["actions"])
+        current_ids={step.step_id for step in plan.steps if step.step_id not in plan.inflight_revisions}
+        row=run_once(queue=queue,plan=plan,role=args.role,secretary=Path(args.secretary),state_root=state_root,
+                     worker_id=args.worker_id,manager=args.manager,priority=args.priority,
+                     external_employee=args.external_employee,seed_step=args.seed_step or None,active_step_ids=current_ids)
+        result["actions"].extend(row["actions"])
+    # A second Codex invocation performs the plan mutation after the controller's
+    # D1 completion and independent readback. It is not inferred from a receipt.
+    for step in plan.steps:
+        if step.checked or (args.seed_step and step.step_id != args.seed_step):
+            continue
+        try:
+            effect=completed_effect_job(queue,plan,step)
+        except ValueError as exc:
+            result["actions"].append({"step":step.step_id,"phase":"checkoff_preflight","ok":False,"error":str(exc)})
+            continue
+        if not effect:
+            continue
+        if sha256_file(Path(args.plan)) != plan.sha256:
+            result["actions"].append({"step":step.step_id,"phase":"plan_checkoff_wait","reason":"plan revision advanced"})
+            break
+        run_dir=state_root/plan.project_id/step.step_id/"checkoff"/str(effect["id"])
+        run_dir.mkdir(parents=True,exist_ok=True)
+        retry_path=run_dir/"retry.json"
+        retry=json.loads(retry_path.read_text(encoding="utf-8")) if retry_path.exists() else {}
+        if time.time() < float(retry.get("next_due_epoch") or 0):
+            result["actions"].append({"step":step.step_id,"phase":"plan_checkoff_wait","next_due_epoch":retry["next_due_epoch"]})
+            break
+        relative=Path(args.plan).resolve().relative_to(repo_path).as_posix()
+        if _git(repo_path,"status","--porcelain","--",relative).stdout.strip():
+            result["actions"].append({"step":step.step_id,"phase":"plan_checkoff_preflight","ok":False,"error":"plan path has uncommitted changes"})
+            break
+        prompt_path=run_dir/"prompt.md"
+        command=[str(Path(__file__).resolve()),"--plan",str(Path(args.plan).resolve()),
+                 "--state-root",str(state_root),"--checkoff-only","--external-employee",args.external_employee,
+                 "--expected-plan-sha",plan.sha256,"--expected-effect-job-id",str(effect["id"]),"--step-id",step.step_id]
+        prompt_path.write_text(f"You are {args.external_employee}, the Codex external-effect employee. D1 has completed and independently verified TaskFlow step {step.step_id}. Run this exact fenced command to check off the committed .plan file and preserve in-flight siblings:\n\n{shlex.join(command)}\n\nReport the command's JSON result. Do not edit the .plan file by hand.\n",encoding="utf-8")
+        invocation=run_secretary(Path(args.secretary),prompt_path,employee=args.external_employee,
+                                 manager=args.manager,repo_path=repo_path,phase="external_effect")
+        atomic_json(run_dir/"secretary_receipt.json",invocation)
+        refreshed=parse_plan(Path(args.plan))
+        ok=bool(secretary_succeeded(invocation) and refreshed.sha256 != plan.sha256
+                and refreshed.by_id()[step.step_id].checked
+                and refreshed.completed_effects.get(step.step_id)==effect["id"])
+        if not ok:
+            attempts=min(int(retry.get("attempts") or 0)+1,20)
+            atomic_json(retry_path,{"attempts":attempts,"next_due_epoch":time.time()+min(3600,300*3**min(attempts-1,4)),
+                                    "effect_job_id":effect["id"],"plan_revision":plan.sha256})
+        result["actions"].append({"step":step.step_id,"phase":"plan_checkoff","ok":ok,
+                                  "previous_revision":plan.sha256,"new_revision":refreshed.sha256 if ok else None})
+        break
     print(json.dumps(result,indent=2,sort_keys=True))
     return 1 if any(row.get("ok") is False for row in result["actions"]) else 0
 

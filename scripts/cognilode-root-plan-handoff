@@ -19,6 +19,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from typing import Any, Callable, Mapping
 import zipfile
 
@@ -86,7 +87,41 @@ def _complete_source(index: Mapping[str, Any], read: Mapping[str, Any]) -> datet
     return min(times) if times else None
 
 
-def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, minimum: int = 500) -> dict[str, Any]:
+def _stock_readback_proofs(path: Path | None) -> dict[str, dict]:
+    if path is None or not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text())
+        if (value.get("schema") != "cognilode.stock_readback_proofs.v1"
+            or time.time() - float(value.get("saved_at") or 0) > 6 * 3600):
+            return {}
+        proofs = value.get("proofs")
+        return proofs if isinstance(proofs, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _save_stock_readback_proofs(path: Path | None, proofs: Mapping[str, dict]) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(json.dumps({"schema": "cognilode.stock_readback_proofs.v1",
+                                "saved_at": time.time(), "proofs": proofs},
+                               sort_keys=True, separators=(",", ":")))
+    os.replace(temp, path)
+
+
+def _stock_index_signature(index: Mapping[str, Any]) -> str:
+    capture = index.get("capture") or {}
+    fields = [index.get("provider"), index.get("conversation_id"),
+              index.get("updated_at"), index.get("prompt_sha256"),
+              index.get("response_sha256"), capture]
+    return sha256(json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, minimum: int = 500,
+                        checkpoint_path: Path | None = None) -> dict[str, Any]:
     """Count distinct, independently reread, complete Drive-backed conversations."""
     cursor = "0"
     seen: set[tuple[str, str]] = set()
@@ -94,6 +129,8 @@ def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, 
     verified: list[datetime] = []
     source_refs: list[dict[str, str]] = []
     pages = 0
+    proofs = _stock_readback_proofs(checkpoint_path)
+    read_errors: list[str] = []
     while True:
         page = post({"operation": "conversations", "limit": 60, "cursor": cursor})
         if not page.get("ok") or not isinstance(page.get("records") or page.get("rows") or [], list):
@@ -120,16 +157,52 @@ def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, 
             capture = index.get("capture") or {}
             if capture.get("drive_verified") is not True or capture.get("source_response_complete") is not True:
                 continue
-            source_read = post({"operation": "read", "provider": key[0], "conversation_id": key[1]})
-            stamp = _complete_source(index, source_read)
-            if stamp is not None:
-                verified_logical_ids.add(logical_key)
-                verified.append(stamp)
+            proof_key = key[0] + ":" + key[1]
+            signature = _stock_index_signature(index)
+            cached = proofs.get(proof_key) or {}
+            ref = (cached.get("source_ref") if
+                   cached.get("index_signature") == signature
+                   and time.time() - float(cached.get("verified_at") or 0) < 6 * 3600
+                   else None)
+            if ref is not None:
+                try:
+                    stamp = datetime.fromisoformat(str(ref["source_at_utc"]))
+                    if ((ref["provider"], ref["conversation_id"]) != key
+                        or not HEX64.fullmatch(str(ref["prompt_sha256"]))
+                        or not HEX64.fullmatch(str(ref["response_sha256"]))):
+                        ref = None
+                except (KeyError, TypeError, ValueError):
+                    ref = None
+            if ref is None:
+                source_read = None
+                for attempt in range(3 if checkpoint_path is not None else 1):
+                    try:
+                        source_read = post({"operation": "read", "provider": key[0],
+                                            "conversation_id": key[1]})
+                        break
+                    except Exception:
+                        if checkpoint_path is None:
+                            raise
+                        if attempt < 2:
+                            time.sleep(0.5 * (2 ** attempt))
+                if source_read is None:
+                    read_errors.append(proof_key)
+                    continue
+                stamp = _complete_source(index, source_read)
+                if stamp is None:
+                    proofs.pop(proof_key, None)
+                    continue
                 source = source_read["conversation"]
-                source_refs.append({"provider": key[0], "conversation_id": key[1],
-                                    "prompt_sha256": str(source["prompt_sha256"]),
-                                    "response_sha256": str(source["response_sha256"]),
-                                    "source_at_utc": stamp.isoformat()})
+                ref = {"provider": key[0], "conversation_id": key[1],
+                       "prompt_sha256": str(source["prompt_sha256"]),
+                       "response_sha256": str(source["response_sha256"]),
+                       "source_at_utc": stamp.isoformat()}
+                proofs[proof_key] = {"index_signature": signature, "source_ref": ref,
+                                     "verified_at": time.time()}
+            verified_logical_ids.add(logical_key)
+            verified.append(stamp)
+            source_refs.append(ref)
+        _save_stock_readback_proofs(checkpoint_path, proofs)
         next_cursor = str(page.get("next_cursor") or "")
         if not next_cursor:
             break
@@ -144,6 +217,7 @@ def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, 
             "span_days": span_days, "minimum": minimum,
             "multi_year_ready": len(verified) >= minimum and span_days >= 730,
             "index_identities_seen": len(seen), "pages": pages,
+            "partial_read_errors": len(read_errors),
             "verified_source_refs": source_refs}
 
 

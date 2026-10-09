@@ -94,6 +94,30 @@ class RootPlanHandoffTests(unittest.TestCase):
         sources[("openai-codex", "c499")]["capture"]["source_response_complete"] = False
         self.assertFalse(bridge.shared_stock_census(d1)["multi_year_ready"])
 
+    def test_export_and_live_chatgpt_alias_count_as_one_logical_conversation(self):
+        cid = "29c2e8d8-1270-4efd-9546-f2a8bf4ce5f1"
+        live = full("chatgpt.com", cid, 0)
+        exported = full("chatgpt-export-format", cid, 0)
+        sources = {("chatgpt.com", cid): live,
+                   ("chatgpt-export-format", cid): exported}
+        rows = [{"provider": provider, "conversation_id": cid,
+                 "capture": source["capture"]}
+                for (provider, _), source in sources.items()]
+        d1 = FakeD1(rows, sources)
+        census = bridge.shared_stock_census(d1, minimum=2)
+        self.assertEqual(census["index_identities_seen"], 2)
+        self.assertEqual(census["distinct_complete"], 1)
+        self.assertEqual(len(census["verified_source_refs"]), 1)
+        self.assertFalse(census["multi_year_ready"])
+
+        # An incomplete live row must not suppress the verified export row.
+        live["capture"]["drive_verified"] = False
+        rows[0]["capture"] = live["capture"]
+        census = bridge.shared_stock_census(FakeD1(rows, sources), minimum=1)
+        self.assertEqual(census["distinct_complete"], 1)
+        self.assertEqual(census["verified_source_refs"][0]["provider"],
+                         "chatgpt-export-format")
+
     def test_root_plan_is_preserved_as_taskflow_instruction(self):
         plan = {"schema": "cognilode.root_taskflow_plan.v1", "project_id": "memory-a",
                 "project_name": "Long Horizon Memory", "research_employee": "Nadia Brooks",

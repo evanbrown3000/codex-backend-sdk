@@ -49,9 +49,9 @@ class FakeQueue:
             x=json.loads(json.dumps(job)); x.setdefault('effect_evidence',[]); self.jobs[x['id']]=x
         return self.jobs[job['id']]
     def _ready(self,j): return all(self.jobs.get(d,{}).get('state')=='complete' for d in j.get('taskflow_dependencies',[]))
-    def claim(self,provider,worker_id):
+    def claim(self,provider,worker_id,job_id):
         for j in self.jobs.values():
-            if j['provider']==provider and j['state']=='queued' and self._ready(j):
+            if j['id']==job_id and j['provider']==provider and j['state']=='queued' and self._ready(j):
                 self.gen+=1; j.update(state='claimed',claimed_by=worker_id,lease_token=f't{self.gen}',lease_generation=self.gen); return j
         return None
     def begin(self,j):
@@ -147,7 +147,18 @@ class Tests(unittest.TestCase):
                 return {'jobs':[{'id':'j','provider':body['provider'],'claimed_by':'other',
                                  'lease_token':'t','lease_generation':1}]}
         with self.assertRaisesRegex(RuntimeError,'employee'):
-            c.QueueClient(Sender()).claim('codex.research','Elliot Mercer')
+            c.QueueClient(Sender()).claim('codex.research','Elliot Mercer','j')
+
+    def test_claim_requests_exact_job_and_rejects_wrong_project(self):
+        class Sender:
+            def operator_memory_post(self,body):
+                self.request=body
+                return {'jobs':[{'id':'other-project','provider':body['provider'],
+                                 'claimed_by':body['worker_id'],'lease_token':'t','lease_generation':1}]}
+        sender=Sender()
+        with self.assertRaisesRegex(RuntimeError,'job'):
+            c.QueueClient(sender).claim('codex.research','Elliot Mercer','this-project')
+        self.assertEqual(sender.request['job_id'],'this-project')
 
     def test_plan_revision_stays_immutable(self):
         with tempfile.TemporaryDirectory() as td:
@@ -278,7 +289,7 @@ print(json.dumps({'completed':True,'final_candidate':{'family':'chatgpt','name':
             td=Path(td); work=td/'work.zip'; manifest_zip(work,plan.sha256,{'EXTERNAL_EFFECT_INSTRUCTIONS.md':b'apply','patch.txt':b'x'})
             meta=c.verify_manifest_zip(work,expected_plan_sha256=plan.sha256,require_external_instructions=True)
             job=c.ensure_external_job(q,plan,step,50,meta,state_root=td/'state',external_employee='Rina Hale')
-            claimed=q.claim('codex.external-effect','Rina Hale'); self.assertEqual(claimed['id'],job['id']); self.assertTrue(q.begin(claimed)['ok'])
+            claimed=q.claim('codex.external-effect','Rina Hale',job['id']); self.assertEqual(claimed['id'],job['id']); self.assertTrue(q.begin(claimed)['ok'])
             receipt=td/'state'/plan.project_id/step.step_id/'external_effect'/job['id']/'EXTERNAL_EFFECT_RESULT.json'; receipt.parent.mkdir(parents=True,exist_ok=True)
             receipt.write_text(json.dumps({'schema':'cognilode.taskflow.external_effect.v1','status':'applied','project_id':plan.project_id,'plan_sha256':plan.sha256,'step_id':step.step_id,'work_zip_sha256':meta['sha256'],'effect_kind':'deployment','effect_ref':'deploy:recovered','environment':'fixture','checks':[{'command':'readback','exit_code':0,'result':'effect exists'}],'defects':[]}))
             receipt.with_name('secretary_receipt.json').write_text(json.dumps({'taskflow_route_verified':True}))

@@ -266,6 +266,9 @@ class RootPlanHandoffTests(unittest.TestCase):
             effect_id = controller.stable_id("root-outcomes", revision, "A", "external_effect", "0")
             state = {"plan_path": str(plan_path), "root_job_id": "root-job",
                      "root_memory_packet_sha256": memory_sha}
+            receipt_path = root / "EXTERNAL_EFFECT_RESULT.json"
+            receipt_path.write_text(json.dumps({"status": "complete", "deployed_ref": "deployed"}))
+            receipt_sha = sha256(receipt_path.read_bytes()).hexdigest()
             called = []
             def post(body):
                 called.append(dict(body))
@@ -279,7 +282,12 @@ class RootPlanHandoffTests(unittest.TestCase):
                     if body["job_id"] == effect_id:
                         return {"ok": True, "job": {"id": body["job_id"],
                                 "state": "complete", "provider": "codex.external-effect",
-                                "effect_evidence": [{"kind": "external_effect", "ref": "deployed"}]}}
+                                "effect_evidence": [
+                                    {"kind": "external_effect", "ref": "deployed"},
+                                    {"kind": "external_effect_receipt", "ref": receipt_sha,
+                                     "path": str(receipt_path)},
+                                    {"kind": "independent_effect_probe", "ref": "d" * 64,
+                                     "observed": "live"}]}}
                     if body["job_id"] in saved:
                         return {"ok": True, "job": saved[body["job_id"]]}
                     return {"error": "job_not_found"}
@@ -327,6 +335,9 @@ class RootPlanHandoffTests(unittest.TestCase):
             with zipfile.ZipFile(outcome_zip) as archive:
                 payload = json.loads(archive.read("OUTCOMES.json"))
                 self.assertEqual(payload["completed_outcomes"][0]["effect_job_id"], effect_id)
+                self.assertEqual(payload["completed_outcomes"][0]["external_effect_receipt"],
+                                 {"status": "complete", "deployed_ref": "deployed"})
+                self.assertEqual(payload["completed_outcomes"][0]["independent_probe_observation"], "live")
                 self.assertEqual(payload["prior_root_conversation"]["conversation_id"], "root-chat")
             retry_state = dict(state, prior_root_job_id="root-job",
                                root_job_id=result["root_job_id"])
@@ -338,6 +349,12 @@ class RootPlanHandoffTests(unittest.TestCase):
             self.assertEqual(retried["prior_root_job_id"], "root-job")
             self.assertEqual(retried["root_attempt"], 1)
             self.assertEqual(sum(row["operation"] == "enqueue_job" for row in called), 2)
+            receipt_path.write_text(json.dumps({"status": "failed", "deployed_ref": "deployed"}))
+            with mock.patch.object(controller, "verify_completed_effects", return_value=None):
+                with self.assertRaisesRegex(ValueError, "receipt changed"):
+                    bridge.enqueue_outcome_gated_successor(
+                        post, state=retry_state, output_root=root, controller=controller, cycle=cycle,
+                        publish=lambda row: "s3://private/" + row["sha256"] + ".zip", attempt=2)
 
     def test_handoff_does_not_write_or_send_from_tiny_stock(self):
         row = full("openai-codex", "only-one", 0)

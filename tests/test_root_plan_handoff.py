@@ -153,6 +153,22 @@ class RootPlanHandoffTests(unittest.TestCase):
             bridge.shared_stock_census(d1, minimum=3, checkpoint_path=checkpoint)
             self.assertEqual(d1.read_calls.count(('openai-codex', 'c0')), 2)
 
+    def test_decisionx_stock_stops_once_verified_minimum_spans_two_years(self):
+        rows = []
+        sources = {}
+        for i, day in enumerate((0, 800, 900)):
+            cid = f'c{i}'
+            source = full('openai-codex', cid, day)
+            rows.append({'provider': 'openai-codex', 'conversation_id': cid,
+                         'capture': source['capture']})
+            sources[('openai-codex', cid)] = source
+        d1 = FakeD1(rows, sources)
+        result = bridge.shared_stock_census(d1, minimum=2, stop_at_minimum=True)
+        self.assertEqual(result['distinct_complete'], 2)
+        self.assertTrue(result['multi_year_ready'])
+        self.assertFalse(result['scan_complete'])
+        self.assertNotIn(('openai-codex', 'c2'), d1.read_calls)
+
     def test_root_plan_is_preserved_as_taskflow_instruction(self):
         plan = {"schema": "cognilode.root_taskflow_plan.v1", "project_id": "memory-a",
                 "project_name": "Long Horizon Memory", "research_employee": "Nadia Brooks",

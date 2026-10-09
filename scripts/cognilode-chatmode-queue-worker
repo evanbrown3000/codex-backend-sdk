@@ -450,7 +450,8 @@ def _dx_refresh_stock():
     try:
         stock = _dx_bridge().shared_stock_census(
             sender.operator_memory_post, minimum=500,
-            checkpoint_path=DX_HOME / "shared-stock-readback-proofs.json")
+            checkpoint_path=DX_HOME / "shared-stock-readback-proofs.json",
+            stop_at_minimum=True)
         if not isinstance(stock, dict):
             raise ValueError("DecisionX shared stock census malformed")
         event("decisionx_shared_stock_census_result",

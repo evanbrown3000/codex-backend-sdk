@@ -121,7 +121,8 @@ def _stock_index_signature(index: Mapping[str, Any]) -> str:
 
 
 def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, minimum: int = 500,
-                        checkpoint_path: Path | None = None) -> dict[str, Any]:
+                        checkpoint_path: Path | None = None,
+                        stop_at_minimum: bool = False) -> dict[str, Any]:
     """Count distinct, independently reread, complete Drive-backed conversations."""
     cursor = "0"
     seen: set[tuple[str, str]] = set()
@@ -129,6 +130,7 @@ def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, 
     verified: list[datetime] = []
     source_refs: list[dict[str, str]] = []
     pages = 0
+    early_complete = False
     proofs = _stock_readback_proofs(checkpoint_path)
     read_errors: list[str] = []
     while True:
@@ -202,7 +204,13 @@ def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, 
             verified_logical_ids.add(logical_key)
             verified.append(stamp)
             source_refs.append(ref)
+            if (stop_at_minimum and len(verified) >= minimum
+                and (max(verified) - min(verified)).days >= 730):
+                early_complete = True
+                break
         _save_stock_readback_proofs(checkpoint_path, proofs)
+        if early_complete:
+            break
         next_cursor = str(page.get("next_cursor") or "")
         if not next_cursor:
             break
@@ -217,6 +225,7 @@ def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, 
             "span_days": span_days, "minimum": minimum,
             "multi_year_ready": len(verified) >= minimum and span_days >= 730,
             "index_identities_seen": len(seen), "pages": pages,
+            "scan_complete": not early_complete,
             "partial_read_errors": len(read_errors),
             "verified_source_refs": source_refs}
 

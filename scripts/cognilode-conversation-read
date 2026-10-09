@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read ChatGPT and Codex conversations through one CLI, with delta cursors.
+"""Read ChatGPT, Codex and historical conversations through one CLI, with delta cursors.
 
 ChatGPT is read from the hosted conversation service. Codex is read from the
 verified Google Drive delta store. This is a logical reader, not another copy
@@ -15,6 +15,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,10 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_DRIVE_READER = Path(os.environ.get(
     "COGNILODE_DRIVE_READBACK_SCRIPT",
     "/home/evan/.local/share/cognilode/memory-stock-runtime/deploy/conversation-vacuum/canonical_full_readback.py",
+))
+DEFAULT_HISTORICAL_READER = Path(os.environ.get(
+    "COGNILODE_HISTORICAL_S3_READER",
+    "/home/evan/.local/share/cognilode/memory-stock-runtime/scripts/historical_s3_conversation.py",
 ))
 
 
@@ -52,7 +57,36 @@ def _load_script(path: Path, name: str) -> Any:
     return module
 
 
-def read_conversation(provider: str, conversation_id: str, *, drive_reader: Path = DEFAULT_DRIVE_READER) -> dict:
+def read_conversation(provider: str, conversation_id: str, *, drive_reader: Path = DEFAULT_DRIVE_READER,
+                      historical_reader: Path = DEFAULT_HISTORICAL_READER) -> dict:
+    if provider in {"historical-s3", "historical_s3"}:
+        if not historical_reader.is_file():
+            raise FileNotFoundError(f"historical conversation reader unavailable: {historical_reader}")
+        completed = subprocess.run([sys.executable, str(historical_reader), "read", conversation_id, "--json"],
+                                   text=True, capture_output=True, check=True, timeout=120)
+        result = json.loads(completed.stdout)
+        rendered = result.get("rendered_markdown")
+        rows = result.get("events")
+        if (result.get("schema") != "memory_stock.historical_s3_delta_read.v1"
+            or result.get("changed") is not True or result.get("reset_required") is not False
+            or result.get("conversation_id") != conversation_id
+            or result.get("provider") != "historical-s3" or not isinstance(rendered, str)
+            or not isinstance(rows, list) or len(rows) != result.get("message_count")
+            or hashlib.sha256(rendered.encode("utf-8")).hexdigest() != result.get("rendered_sha256")):
+            raise ValueError("historical S3 readback identity, coverage or hash mismatch")
+        events = []
+        for row in rows:
+            if not isinstance(row, dict) or not row.get("node_id") or row.get("role") not in {
+                "user", "assistant", "system", "developer", "tool"} or not isinstance(row.get("text"), str):
+                raise ValueError("historical S3 event is malformed")
+            events.append({"id": str(row["node_id"]), "role": str(row["role"]),
+                           "text": row["text"],
+                           "occurred_at_utc": str(row.get("format_and_time") or "").rsplit(" · ", 1)[-1],
+                           "parent_node_id": row.get("parent_node_id")})
+        return {"provider": "historical-s3", "conversation_id": conversation_id,
+                "source": "s3_dynamodb_historical_stock", "events": events,
+                "coverage": result["coverage"], "all_provider_events_known": False,
+                "source_receipt": result["source_receipt"], "rendered_sha256": result["rendered_sha256"]}
     if provider in {"chatgpt", "chatgpt.com"}:
         sender = _load_script(HERE / "cognilode-b4pt0r-chatmode", "cognilode_conversation_sender_read")
         result = sender.operator_memory_post({
@@ -143,10 +177,12 @@ def main() -> int:
     parser.add_argument("--conversation-id", required=True)
     parser.add_argument("--since", default="", help="opaque next_cursor from a prior read")
     parser.add_argument("--drive-reader", type=Path, default=DEFAULT_DRIVE_READER)
+    parser.add_argument("--historical-reader", type=Path, default=DEFAULT_HISTORICAL_READER)
     parser.add_argument("--format", choices=("json", "markdown"), default="json")
     args = parser.parse_args()
     result = delta_view(read_conversation(args.provider, args.conversation_id,
-                                          drive_reader=args.drive_reader), args.since)
+                                          drive_reader=args.drive_reader,
+                                          historical_reader=args.historical_reader), args.since)
     if args.format == "json":
         print(json.dumps(result, ensure_ascii=False))
     else:

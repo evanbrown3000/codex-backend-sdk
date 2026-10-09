@@ -1,10 +1,13 @@
 import importlib.machinery
 import importlib.util
+import hashlib
+import json
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/cognilode-conversation-read"
@@ -75,6 +78,36 @@ class ConversationDeltaTests(unittest.TestCase):
                 text=True, capture_output=True, check=True,
             )
             self.assertEqual(check.stdout.strip(), "classified/reconciled")
+
+    def test_historical_stock_federates_verified_events_and_rejects_changed_source_hash(self):
+        rendered = "# Example\nConversation: historical-id\n"
+        source = {
+            "schema": "memory_stock.historical_s3_delta_read.v1",
+            "changed": True, "reset_required": False,
+            "provider": "historical-s3", "conversation_id": "historical-id",
+            "rendered_markdown": rendered,
+            "rendered_sha256": hashlib.sha256(rendered.encode()).hexdigest(),
+            "message_count": 2,
+            "coverage": "rendered_user_assistant_source_with_metadata_checks",
+            "source_receipt": {"s3_key": "conversations/historical-id.md.gz"},
+            "events": [
+                {"node_id": "u1", "role": "user", "text": "plan", "format_and_time": "text · 2024-01-01T00:00:00Z"},
+                {"node_id": "a1", "parent_node_id": "u1", "role": "assistant", "text": "work", "format_and_time": "text · 2024-01-01T00:01:00Z"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            script = Path(temporary) / "reader.py"
+            script.write_text("# mocked reader\n")
+            with mock.patch.object(reader.subprocess, "run", return_value=mock.Mock(stdout=json.dumps(source))) as run:
+                full = reader.read_conversation("historical-s3", "historical-id", historical_reader=script)
+                self.assertEqual(full["events"][1]["id"], "a1")
+                self.assertEqual(full["events"][1]["parent_node_id"], "u1")
+                self.assertEqual(reader.delta_view(full, reader.delta_view(full)["next_cursor"])["new_events"], 0)
+                self.assertEqual(run.call_args.args[0][2:], ["read", "historical-id", "--json"])
+            source["rendered_markdown"] += "tampered"
+            with mock.patch.object(reader.subprocess, "run", return_value=mock.Mock(stdout=json.dumps(source))):
+                with self.assertRaisesRegex(ValueError, "hash mismatch"):
+                    reader.read_conversation("historical-s3", "historical-id", historical_reader=script)
 
 
 if __name__ == "__main__":

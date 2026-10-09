@@ -70,6 +70,16 @@ def test_stable_send_identity_is_device_independent():
     assert module.stable_user_message_id('job-1') != module.stable_user_message_id('job-2')
 
 
+def test_sender_receives_queue_selected_model_and_effort(tmp_path):
+    module = worker()
+    job = {'id': 'job-1', 'model': 'gpt-route-selected', 'reasoning_effort': 'xhigh'}
+    attachment = tmp_path / 'research.zip'
+    command = module.sender_command(job, tmp_path / 'prompt.txt', [attachment])
+    assert command[command.index('--model') + 1] == 'gpt-route-selected'
+    assert command[command.index('--effort') + 1] == 'xhigh'
+    assert command[command.index('--attach') + 1] == str(attachment)
+
+
 def test_remote_attachment_requires_hash_and_https(monkeypatch, tmp_path):
     module = worker()
     module.STAGE_ROOT = tmp_path / 'stage'

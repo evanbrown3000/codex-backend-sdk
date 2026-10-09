@@ -134,7 +134,12 @@ def verified_employee_job(job: dict[str, Any], post) -> dict[str, str] | None:
     if job.get("conversation_id") not in (None, cid):
         return None
     # A completed D1 job alone does not prove that other agents can read the turn.
-    read = post({"operation": "read", "provider": "openai-codex", "conversation_id": cid})
+    try:
+        read = post({"operation": "read", "provider": "openai-codex", "conversation_id": cid})
+    except Exception:
+        # The rollout vacuum may trail the provider terminal. Leave this name
+        # staged and retry at the next cycle; one 404 must not stop the roster.
+        return None
     conversation = read.get("conversation") or {}
     if not read.get("ok") or conversation.get("conversation_id") != cid:
         return None

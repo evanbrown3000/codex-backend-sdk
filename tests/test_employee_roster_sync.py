@@ -71,6 +71,13 @@ def test_activation_requires_named_completed_job_and_central_readback(tmp_path, 
     result = module.reconcile([snapshots], installed_path=installed, candidates_path=candidates,
                               activations_path=activations, post=post)
     assert result["activated"] == []
+    def lagging_post(request):
+        if request["operation"] == "read":
+            raise RuntimeError("central conversation not yet ingested")
+        return post(request)
+    result = module.reconcile([snapshots], installed_path=installed, candidates_path=candidates,
+                              activations_path=activations, post=lagging_post)
+    assert result["activated"] == []
     readback["conversation"]["response_sha256"] = hashlib.sha256(terminal.encode()).hexdigest()
     result = module.reconcile([snapshots], installed_path=installed, candidates_path=candidates,
                               activations_path=activations, post=post)

@@ -51,6 +51,7 @@ sender = _LazySender()
 
 ROOT = Path.home() / ".local/share/cognilode/chatmode-queue-worker"
 DEVICE_ID = os.environ.get("COGNILODE_CHATMODE_DEVICE_ID", "evanpc")
+DEVICE_PRIORITY = int(os.environ.get("COGNILODE_CHATMODE_DEVICE_PRIORITY", "100"))
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
 
@@ -513,10 +514,11 @@ def heartbeat(device_id: str, active: int) -> None:
         "active_turns": active, "max_active_turns": 1,
         "quota_units": 1, "quota_remaining": 1,
         "estimated_cost": 0, "cost_remaining": 1,
-        "devices": [{"id": device_id, "available": ready, "chatgpt_eligible": True, "priority": 100}],
+        "devices": [{"id": device_id, "available": ready, "chatgpt_eligible": True, "priority": DEVICE_PRIORITY}],
     }})
     sender.operator_memory_post({"operation": "rhythm_device_heartbeat", "device": {
-        "id": device_id, "available": ready, "chatgpt_eligible": True, "priority": 100,
+        "id": device_id, "available": ready, "chatgpt_eligible": True, "priority": DEVICE_PRIORITY,
+        "active_turns": active,
         "network_route": os.environ.get("COGNILODE_CHATMODE_NETWORK_ROUTE", "home"),
     }})
     event("heartbeat", device_id=device_id, available=ready, active=active)

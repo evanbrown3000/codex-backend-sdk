@@ -20,10 +20,13 @@ services:
     environment:
       HOME: /home/worker
       COGNILODE_HTTP_GATE_BYPASS: "1"
+      COGNILODE_AWS_PURPOSE: secrets-read
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
       PATH: /usr/bin:/usr/local/bin:/bin
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - company_operator:/home/worker/.config/cognilode:ro
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
 
   credential-sync:
@@ -58,9 +61,11 @@ services:
       - cognilode/memory-drive/rclone-config
     environment:
       HOME: /home/worker
+      COGNILODE_AWS_PURPOSE: secrets-write
       PATH: /usr/bin:/usr/local/bin:/bin
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime:ro
       - company_auth:/home/worker/.codex
       - company_operator:/home/worker/.config/cognilode
       - company_deploy_custody:/deploy
@@ -130,6 +135,7 @@ services:
       COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
       COGNILODE_TASKFLOW_ATTACHMENT_S3_READ_BUCKETS: cognilode-conversation-visibility-362928919715-us-west-2
       COGNILODE_AWS_CLI: /usr/bin/aws
+      COGNILODE_AWS_PURPOSE: artifact-write
       PATH: /usr/bin:/usr/local/bin:/bin
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
@@ -153,10 +159,13 @@ services:
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
       COGNILODE_SOURCE_SYNC_INTERVAL: "300"
       COGNILODE_SOURCE_SYNC_GENERATION: full-history-v1
+      COGNILODE_AWS_PURPOSE: secrets-read
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
       COGNILODE_CODEX_SOURCE_COMMIT: cbc142bab43c51ba1e0e8837894c24696a068d72
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - company_operator:/home/worker/.config/cognilode:ro
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
 
   codex-release-custody:
@@ -172,8 +181,12 @@ services:
       COGNILODE_CODEX_INSTALL_ROOT: /codex
       COGNILODE_CODEX_RELEASE_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
       COGNILODE_AWS_CLI: /usr/bin/aws
+      COGNILODE_AWS_PURPOSE: artifact-write
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime:ro
+      - company_operator:/home/worker/.config/cognilode:ro
       - ${AWS_AUTH_ROOT}:/root/.aws:ro
       - company_codex_release:/codex
 
@@ -274,6 +287,7 @@ services:
       COGNILODE_CENTRAL_ROLLOUT_HELPER: /codex/bin/central-rollouts
       CODEX_HOME: /home/worker/.codex
       COGNILODE_RELAY_NODE_FILE: /relay/node.json
+      COGNILODE_AWS_PURPOSE: artifact-write
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
       - company_auth:/home/worker/.codex
@@ -450,12 +464,15 @@ services:
       COGNILODE_CODEX_INFERENCE_ROOT: /runtime/worker/codex-inference
       COGNILODE_LLM_GOVERNANCE_ROOT: /runtime/worker/llm-governance
       COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
+      COGNILODE_AWS_PURPOSE: artifact-write
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
     volumes:
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime:ro
       - ${COMPANY_RUNTIME_ROOT}/worker:/runtime/worker
       - memory_data:/workspace/company
       - memory_drive_auth:/memory-auth
       - company_codex_release:/codex:ro
+      - company_operator:/home/worker/.config/cognilode:ro
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
     depends_on:
       - source-sync
@@ -489,6 +506,7 @@ services:
       COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
       COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
       COGNILODE_AWS_CLI: /usr/bin/aws
+      COGNILODE_AWS_PURPOSE: artifact-write
       COGNILODE_TASKFLOW_SECRETARY_ROOT: /runtime/worker/taskflow-secretary
       COGNILODE_LLM_GOVERNANCE_ROOT: /runtime/worker/llm-governance
       COGNILODE_CODEX_INFERENCE_ROOT: /runtime/worker/codex-inference
@@ -525,6 +543,7 @@ services:
       COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
       COGNILODE_TASKFLOW_SECRETARY_ROOT: /runtime/worker/taskflow-secretary
       COGNILODE_AWS_CLI: /usr/bin/aws
+      COGNILODE_AWS_PURPOSE: artifact-write
       COGNILODE_RELAY_NODE_FILE: /relay/node.json
     volumes:
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
@@ -547,5 +566,6 @@ volumes:
   company_cargo_registry:
   company_cargo_git:
   company_relay_custody:
+  company_aws_client:
   memory_data:
   memory_drive_auth:

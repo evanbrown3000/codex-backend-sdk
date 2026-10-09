@@ -11,6 +11,7 @@ import argparse
 import copy
 from datetime import datetime, timezone
 import fcntl
+from functools import lru_cache
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -1943,6 +1944,13 @@ def health_ready() -> bool:
     local_ready = SENDER_PATH.is_file() and os.access(SENDER_PATH, os.R_OK)
     if not local_ready:
         return False
+    try:
+        unified = Path(os.environ.get("COGNILODE_UNIFIED_PROMPTER", "")).resolve(strict=True)
+        source = unified.stat()
+        if not _transport_cli_ready(str(unified), source.st_ino, source.st_size, source.st_mtime_ns):
+            return False
+    except (OSError, ValueError):
+        return False
     policy_path = Path(os.environ.get("COGNILODE_HTTP_GATE_POLICY_FILE", ""))
     try:
         policy = json.loads(policy_path.read_text()) if policy_path.is_file() else {}
@@ -1956,6 +1964,17 @@ def health_ready() -> bool:
                                   capture_output=True, text=True, timeout=30, check=False)
         return response.returncode == 0 and json.loads(response.stdout).get("ok") is True
     except Exception:
+        return False
+
+
+@lru_cache(maxsize=8)
+def _transport_cli_ready(path: str, inode: int, size: int, mtime_ns: int) -> bool:
+    """Check this synced generation locally; provider observability stays gated."""
+    try:
+        probe = subprocess.run([sys.executable, path, "transport", "--help"],
+                               capture_output=True, text=True, timeout=10, check=False)
+        return probe.returncode == 0 and "--provider" in probe.stdout
+    except (OSError, subprocess.TimeoutExpired):
         return False
 
 

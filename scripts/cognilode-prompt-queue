@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
+import html
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.machinery
 import importlib.util
 import json
@@ -10,7 +13,9 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import time
+from urllib.parse import unquote
 
 
 def _sender():
@@ -25,7 +30,7 @@ def _sender():
 def _jobs(sender, state: str, limit: int = 150) -> list[dict]:
     rows, cursor = [], ""
     while len(rows) < limit:
-        page = sender.operator_memory_post({"operation": "list_jobs", "provider": "chatgpt.com",
+        page = sender.operator_memory_post({"operation": "list_jobs",
                                             "state": state, "limit": min(100, limit - len(rows)), "cursor": cursor})
         rows.extend(page.get("jobs") or [])
         cursor = page.get("next_cursor") or ""
@@ -46,13 +51,15 @@ def _account() -> str:
 
 
 def _target(job: dict, account: str) -> str:
+    provider = str(job.get("provider") or "unspecified")
     return " ".join((
-        "platform=" + str(job.get("provider") or "chatgpt.com"),
-        "environment=" + str(job.get("target_environment") or job.get("research_environment") or "evanpc"),
-        "model=" + str(job.get("requested_model") or job.get("model") or "gpt-5-6-thinking"),
-        "reasoning=" + str(job.get("reasoning_effort") or "xhigh"),
-        "account=" + account,
-        "framework=computerusex.chatgpt_http_or_browser",
+        "platform=" + provider,
+        "environment=" + str(job.get("target_environment") or job.get("research_environment") or "unspecified"),
+        "model=" + str(job.get("requested_model") or job.get("model") or "unspecified"),
+        "reasoning=" + str(job.get("reasoning_effort") or "unspecified"),
+        "account=" + str(job.get("target_account") or (account if provider == "chatgpt.com" else "unspecified")),
+        "framework=" + str(job.get("agent_framework_identifier") or
+                            ("computerusex.chatgpt_http_or_browser" if provider == "chatgpt.com" else "unspecified")),
     ))
 
 
@@ -66,7 +73,7 @@ def _line(job: dict, account: str) -> str:
     return f"{_citation(job)} {preview} | {_target(job, account)} | job={job.get('id')}"
 
 
-def _render(sender) -> str:
+def _collect(sender) -> dict:
     clock = sender.operator_memory_post({"operation": "rhythm_read"})
     queued = _jobs(sender, "queued", 150)
     active = []
@@ -77,10 +84,16 @@ def _render(sender) -> str:
     recent = [row for row in recent if row.get("rhythm_slot_index") is not None or row.get("effect_started_at")]
     recent.sort(key=lambda row: str(row.get("effect_started_at") or row.get("rhythm_claimed_at")
                                     or row.get("completed_at") or row.get("updated_at") or ""), reverse=True)
-    account = _account()
-    lines = ["# ChatGPT.com Chat-mode prompt queue", "",
+    return {"clock": clock, "queued": queued, "recent": recent, "account": _account(),
+            "refreshed_at": datetime.now(timezone.utc).isoformat()}
+
+
+def _render(snapshot: dict) -> str:
+    clock, queued, recent, account = (snapshot[key] for key in ("clock", "queued", "recent", "account"))
+    lines = ["# Unified prompt queue", "",
              "Shared D1 queue; live historical-rhythm clock; `cognilode-prompt-queue follow SHA5` expands a citation.",
              "Upcoming job-to-slot pairings are candidates; dependency readiness and the live gate decide each claim.",
+             f"Last refreshed {snapshot['refreshed_at']} UTC", "",
              f"Tape slot {clock.get('clock', {}).get('next_slot_index')} | next due {clock.get('next_due_at')} | "
              f"maximum gap {clock.get('clock', {}).get('pacing', {}).get('max_gap_ms', 'historical')} ms | "
              f"gate {clock.get('gate_status', {}).get('reason', 'open')}", "", "## Upcoming", ""]
@@ -90,7 +103,7 @@ def _render(sender) -> str:
         lines.append(f"{slot.get('due_at', 'pending slot')} slot={slot.get('slot_index', '?')} "
                      f"priority={job.get('priority', 0)} {_line(job, account)}")
     if not queued:
-        lines.append("No queued ChatGPT jobs.")
+        lines.append("No queued jobs.")
     lines.extend(("", "## Recently sent and in progress", ""))
     for job in recent[:20]:
         sent_at = job.get("effect_started_at") or job.get("rhythm_claimed_at") or job.get("updated_at")
@@ -99,6 +112,111 @@ def _render(sender) -> str:
     if not recent:
         lines.append("No recent sends.")
     return "\n".join(lines) + "\n"
+
+
+def _write_markdown(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                     prefix=".prompt-queue-", delete=False) as stream:
+        stream.write(value)
+        temp = Path(stream.name)
+    temp.replace(path)
+
+
+def _dashboard(snapshot: dict | None, error: str = "") -> str:
+    esc = lambda value: html.escape(str(value or ""), quote=True)
+    head = """<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="15"><title>Prompt queue · Cognilode</title>
+<style>body{font:15px/1.5 system-ui,sans-serif;background:#101820;color:#f0f4f7;margin:0 auto;padding:24px;max-width:1600px}
+a{color:#8fd5ff}h1{margin:0 0 8px}h2{margin-top:32px}.meta{color:#bdcbd4}.alert{color:#ffd2a4}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;vertical-align:top;padding:9px;border-bottom:1px solid #35434c}
+th{position:sticky;top:0;background:#172631}code{font-size:13px}td.preview{max-width:36rem;overflow-wrap:anywhere}
+.scroll{overflow:auto}.state{white-space:nowrap}.small{font-size:12px;color:#bdcbd4}</style><body>"""
+    if not snapshot:
+        return head + "<h1>Prompt queue</h1><p class=alert>Waiting for the first D1 readback. " + esc(error) + "</p></body></html>"
+    clock = snapshot["clock"]
+    status = clock.get("gate_status") or {}
+    rows = [head, "<h1>ChatGPT.com Chat-mode prompt queue</h1>",
+            "<p class=meta>Single shared D1 queue · refreshes every 15 seconds · updated " + esc(snapshot["refreshed_at"]) + "</p>",
+            "<p>Tape slot <strong>" + esc((clock.get("clock") or {}).get("next_slot_index")) +
+            "</strong> · next due " + esc(clock.get("next_due_at")) + " · maximum gap " +
+            esc(((clock.get("clock") or {}).get("pacing") or {}).get("max_gap_ms")) +
+            " ms · gate " + esc(status.get("reason") or "open") + "</p>"]
+    if error:
+        rows.append("<p class=alert>Readback delayed: " + esc(error) + ". Showing the last successful snapshot.</p>")
+    def table(title: str, jobs: list[dict], upcoming: bool) -> None:
+        rows.extend(["<h2>" + title + "</h2>", "<p class=small>" +
+                     ("Slot pairings are candidates until dependency and gate checks pass." if upcoming else
+                      "Claimed, sending, harvesting, and completed prompts; send times are provider-effect timestamps when available.") +
+                     "</p><div class=scroll><table><thead><tr><th>Time / slot</th><th>State</th><th>Prompt</th><th>Target</th><th>Job / conversation</th></tr></thead><tbody>"])
+        slots = clock.get("upcoming_slots") or []
+        for position, job in enumerate(jobs[:30]):
+            slot = slots[position] if upcoming and position < len(slots) else {}
+            when = slot.get("due_at") if upcoming else (job.get("effect_started_at") or job.get("rhythm_claimed_at") or job.get("updated_at"))
+            index = slot.get("slot_index") if upcoming else job.get("rhythm_slot_index")
+            digest = str(job.get("prompt_sha256") or "")
+            cite = digest[:5] if len(digest) == 64 else "?????"
+            preview = " ".join(str(job.get("prompt") or "").split())[:100]
+            job_id = str(job.get("id") or "")
+            link = '<a href="/prompt/' + esc(job_id) + '">' + esc(cite) + '</a>'
+            target = esc(_target(job, snapshot["account"])).replace(" ", "<br>")
+            rows.append("<tr><td>" + esc(when) + "<br><span class=small>slot " + esc(index) +
+                        "</span></td><td class=state>" + esc("queued" if upcoming else job.get("state")) +
+                        "</td><td class=preview>" + link + " · " + esc(preview) +
+                        "</td><td><code>" + target + "</code></td><td><code>" + esc(job_id) +
+                        "</code><br><span class=small>" + esc(job.get("conversation_id")) + "</span></td></tr>")
+        if not jobs:
+            rows.append('<tr><td colspan="5">No jobs in this section.</td></tr>')
+        rows.append("</tbody></table></div>")
+    table("Upcoming prompts", snapshot["queued"], True)
+    table("Recently sent and in progress", snapshot["recent"], False)
+    return "".join(rows) + "</body></html>"
+
+
+def _serve(sender, output: Path, interval: int, port: int) -> None:
+    shared = {"snapshot": None, "error": ""}
+    lock = threading.Lock()
+
+    def refresh() -> None:
+        while True:
+            try:
+                snapshot = _collect(sender)
+                _write_markdown(output, _render(snapshot))
+                with lock:
+                    shared.update(snapshot=snapshot, error="")
+            except Exception as exc:
+                with lock:
+                    shared["error"] = type(exc).__name__ + ": " + str(exc)[:300]
+            time.sleep(max(10, interval))
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            with lock:
+                snapshot, error = shared["snapshot"], shared["error"]
+            if self.path == "/" or self.path == "/index.html":
+                status, content_type, body = 200, "text/html; charset=utf-8", _dashboard(snapshot, error)
+            elif self.path.startswith("/prompt/"):
+                job_id = unquote(self.path[len("/prompt/"):])
+                match = next((job for job in (snapshot["queued"] + snapshot["recent"])
+                              if job.get("id") == job_id), None) if snapshot else None
+                status, content_type = (200, "text/plain; charset=utf-8") if match else (404, "text/plain; charset=utf-8")
+                body = str(match.get("prompt")) if match else "Prompt is outside the current dashboard window. Use cognilode-prompt-queue follow SHA5."
+            else:
+                status, content_type, body = 404, "text/plain; charset=utf-8", "Not found"
+            data = body.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, format, *args):
+            return
+
+    threading.Thread(target=refresh, daemon=True, name="prompt-queue-readback").start()
+    with ThreadingHTTPServer(("127.0.0.1", port), Handler) as server:
+        server.serve_forever(poll_interval=0.5)
 
 
 def _follow(sender, prefix: str) -> int:
@@ -117,25 +235,24 @@ def _follow(sender, prefix: str) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", nargs="?", choices=("show", "watch", "follow"), default="show")
+    parser.add_argument("command", nargs="?", choices=("show", "watch", "follow", "serve"), default="show")
     parser.add_argument("citation", nargs="?")
     parser.add_argument("--interval", type=int, default=60)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--port", type=int, default=8769)
     args = parser.parse_args()
     sender = _sender()
     if args.command == "follow":
         if not args.citation:
             parser.error("follow requires a citation")
         return _follow(sender, args.citation)
+    if args.command == "serve":
+        _serve(sender, args.output or Path.home() / ".local/share/cognilode/prompt-queue-live.md", args.interval, args.port)
+        return 0
     while True:
-        result = _render(sender)
+        result = _render(_collect(sender))
         if args.output:
-            args.output.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=args.output.parent,
-                                             prefix=".prompt-queue-", delete=False) as stream:
-                stream.write(result)
-                temp = Path(stream.name)
-            temp.replace(args.output)
+            _write_markdown(args.output, result)
         else:
             print(result, flush=True)
         if args.command != "watch":

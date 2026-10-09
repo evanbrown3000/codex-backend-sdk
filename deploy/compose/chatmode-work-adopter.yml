@@ -1,0 +1,35 @@
+services:
+  chatmode-work-adopter:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    cpus: 2
+    mem_limit: 2g
+    pids_limit: 256
+    working_dir: /company/codex-backend-sdk
+    entrypoint: ["python3", "/company/codex-backend-sdk/scripts/cognilode-chatmode-work-adopter"]
+    command:
+      - --source
+      - /data/b4pt0r-chatmode
+      - --source
+      - /data/handoffs
+      - --state
+      - /data/work-adopter
+      - --checkout
+      - /company/codex-backend-sdk
+      - --path-map
+      - "${COGNILODE_DATA_ROOT}=/data"
+      - --codex
+      - codex
+      - --aws
+      - /usr/bin/aws
+    env_file:
+      - ${COGNILODE_TASKFLOW_ENV_FILE}
+    environment:
+      HOME: /home/worker
+      CODEX_HOME: /home/worker/.codex
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company
+      - ${COGNILODE_DATA_ROOT}:/data
+      - ${CODEX_AUTH_ROOT}:/home/worker/.codex
+      - ${AWS_AUTH_ROOT}:/home/worker/.aws

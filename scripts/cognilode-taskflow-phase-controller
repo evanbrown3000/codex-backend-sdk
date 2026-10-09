@@ -23,6 +23,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -177,6 +178,15 @@ def verify_plan_revision(plan: Plan) -> None:
     source = Path(plan.source_ref.removeprefix("file:"))
     if sha256_file(source) != plan.sha256:
         raise ValueError("plan source changed since parsing")
+    root = subprocess.run(["git", "-C", str(source.parent), "rev-parse", "--show-toplevel"],
+                          capture_output=True, text=True, timeout=10, check=False)
+    if root.returncode == 0:
+        repo = Path(root.stdout.strip()).resolve()
+        relative = source.resolve().relative_to(repo).as_posix()
+        committed = subprocess.run(["git", "-C", str(repo), "show", f"HEAD:{relative}"],
+                                   capture_output=True, timeout=10, check=False)
+        if committed.returncode != 0 or sha256_bytes(committed.stdout) != plan.sha256:
+            raise ValueError("plan revision is not the committed project instruction")
 
 
 def phase_job_id(plan: Plan, step_id: str, phase: str, attempt: int = 0) -> str:
@@ -360,13 +370,13 @@ def run_secretary(secretary: Path, prompt_path: Path, *, employee: str, manager:
                  "can_mutate_repo":True,"has_workspace_repo":True,"can_shell":True,
                  "supports_artifact_return":True,"quota_cost":"codex","available":True,
                  "effect_capabilities":{"shell":"available","repo":"available"},
-                 "metadata":{"binary":binary}}
+                 "metadata":{"binary":binary,"sandbox_mode":"danger-full-access" if phase == "external_effect" else "workspace-write"}}
     candidates_path = prompt_path.parent / "secretary_candidates.json"
     candidates_path.write_text(json.dumps([candidate],sort_keys=True,indent=2)+"\n",encoding="utf-8")
     command=[str(secretary),"dispatch","--plan-file",str(prompt_path),"--employee",employee,
              "--manager",manager,"--candidates-json",str(candidates_path),"--prefer-installed",
              "--shell","--repo-path",str(repo_path),"--max-attempts","1"]
-    if phase == "external_effect": command.extend(["--repo-mutation","--external-effect","shell"])
+    if phase == "external_effect": command.extend(["--external-effect","shell"])
     command.append("Execute this TaskFlow phase and return a terminal receipt.")
     try:
         cp=subprocess.run(command,text=True,capture_output=True,timeout=int(os.getenv("COGNILODE_TASKFLOW_CODEX_TIMEOUT","3600")),check=False)
@@ -407,6 +417,22 @@ def verify_effect_receipt(path: Path, *, plan: Plan, step: Step, work_sha256: st
             raise ValueError("external effect check is not successful/verifiable")
     body["receipt_sha256"]=sha256_file(path)
     return body
+
+
+def verify_effect_probe(step: Step) -> dict[str, str]:
+    """Independently read the effect with a command authored in the .plan file."""
+    command = str(step.fields.get("effect_probe_command") or "").strip()
+    expected = str(step.fields.get("effect_probe_expected") or "").strip()
+    argv = shlex.split(command)
+    if not argv or not Path(argv[0]).is_absolute() or not expected:
+        raise ValueError("TaskFlow step needs an absolute read-only effect_probe_command and effect_probe_expected")
+    result = subprocess.run(argv, text=True, capture_output=True, timeout=20, check=False)
+    observed = result.stdout.strip()
+    if result.returncode != 0 or observed != expected:
+        raise ValueError(f"independent effect probe failed: exit={result.returncode}, observed={observed[:200]!r}")
+    proof = {"command": command, "expected": expected, "observed": observed, "verified_at": utc()}
+    proof["sha256"] = sha256_bytes(json.dumps(proof, sort_keys=True).encode())
+    return proof
 
 
 def _artifact_from_chat_job(job: Mapping[str, Any]) -> Path | None:
@@ -572,9 +598,10 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
                 raise ValueError("Codex invocation was not verified")
             work=verified_work_attachment(pending,plan)
             effect=verify_effect_receipt(receipt_path,plan=plan,step=step,work_sha256=work["sha256"])
+            probe=verify_effect_probe(step)
         except Exception:
             action["actions"].append({"step":step.step_id,"phase":"external_effect_reconcile","ok":False,"state":"awaiting_readback"}); continue
-        evidence=[{"kind":"external_effect","ref":effect["effect_ref"],"environment":effect["environment"]},{"kind":"external_effect_receipt","ref":effect["receipt_sha256"],"path":str(receipt_path)},{"kind":"chatgpt_work_zip","ref":work["sha256"],"path":work["path"]}]
+        evidence=[{"kind":"external_effect","ref":effect["effect_ref"],"environment":effect["environment"]},{"kind":"external_effect_receipt","ref":effect["receipt_sha256"],"path":str(receipt_path)},{"kind":"chatgpt_work_zip","ref":work["sha256"],"path":work["path"]},{"kind":"independent_effect_probe","ref":probe["sha256"],"observed":probe["observed"],"command":probe["command"]}]
         done=queue.complete(pending,evidence); committed=queue.get(str(pending["id"])) if done.get("ok") else None
         readback_ok=bool(committed and committed.get("state")=="complete")
         action["actions"].append({"step":step.step_id,"phase":"external_effect_reconcile","ok":bool(done.get("ok") and readback_ok),"central_readback_verified":readback_ok,"effect_ref":effect["effect_ref"]})
@@ -596,7 +623,8 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
                 try:
                     if not secretary_succeeded(invocation): raise ValueError("installed Codex invocation did not complete")
                     effect=verify_effect_receipt(effect_receipt,plan=plan,step=step,work_sha256=work["sha256"])
-                    evidence=[{"kind":"external_effect","ref":effect["effect_ref"],"environment":effect["environment"]},{"kind":"external_effect_receipt","ref":effect["receipt_sha256"],"path":str(effect_receipt)},{"kind":"chatgpt_work_zip","ref":work["sha256"],"path":work["path"]}]
+                    probe=verify_effect_probe(step)
+                    evidence=[{"kind":"external_effect","ref":effect["effect_ref"],"environment":effect["environment"]},{"kind":"external_effect_receipt","ref":effect["receipt_sha256"],"path":str(effect_receipt)},{"kind":"chatgpt_work_zip","ref":work["sha256"],"path":work["path"]},{"kind":"independent_effect_probe","ref":probe["sha256"],"observed":probe["observed"],"command":probe["command"]}]
                     done=queue.complete(ejob,evidence)
                     committed=queue.get(str(ejob["id"])) if done.get("ok") else None
                     readback_ok=bool(committed and committed.get("state")=="complete" and any(isinstance(e,dict) and e.get("kind")=="external_effect" and e.get("ref")==effect["effect_ref"] for e in committed.get("effect_evidence") or []))
@@ -612,10 +640,12 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
 
 def main(argv: Sequence[str] | None=None) -> int:
     p=argparse.ArgumentParser(); p.add_argument("--plan",required=True); p.add_argument("--role",default="Principal Platform Systems Engineer")
-    p.add_argument("--secretary",default=str(DEFAULT_SECRETARY)); p.add_argument("--state-root",default=str(DEFAULT_STATE_ROOT)); p.add_argument("--worker-id",default="taskflow-phase-controller")
+    p.add_argument("--secretary",default=str(DEFAULT_SECRETARY)); p.add_argument("--state-root",default=""); p.add_argument("--worker-id",default="taskflow-phase-controller")
     p.add_argument("--manager",default="agent-memory-manager"); p.add_argument("--priority",type=int,default=50); p.add_argument("--external-employee",default="Codex external-effect employee"); p.add_argument("--seed-step",default="")
     args=p.parse_args(argv); plan=parse_plan(Path(args.plan)); queue=QueueClient(load_sender())
-    result=run_once(queue=queue,plan=plan,role=args.role,secretary=Path(args.secretary),state_root=Path(args.state_root),worker_id=args.worker_id,manager=args.manager,priority=args.priority,external_employee=args.external_employee,seed_step=args.seed_step or None)
+    repo_path=Path(plan.source_ref.removeprefix("file:")).parent.parent
+    state_root=Path(args.state_root).resolve() if args.state_root else repo_path/".taskflow-state"
+    result=run_once(queue=queue,plan=plan,role=args.role,secretary=Path(args.secretary),state_root=state_root,worker_id=args.worker_id,manager=args.manager,priority=args.priority,external_employee=args.external_employee,seed_step=args.seed_step or None)
     print(json.dumps(result,indent=2,sort_keys=True))
     return 1 if any(row.get("ok") is False for row in result["actions"]) else 0
 

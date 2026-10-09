@@ -13,6 +13,8 @@ id agent-memory
 [x] AM-0 inherited work
 [ ] AM-5 canonical memory integration
     done_when: verified central readback
+    effect_probe_command: /usr/bin/printf active
+    effect_probe_expected: active
 [ ] AM-6 storage migration
 [ ] AM-7 citation expansion
 [ ] AM-8 foreground rollover
@@ -69,6 +71,31 @@ class FakeQueue:
         raise AssertionError(body)
 
 class Tests(unittest.TestCase):
+    def test_repo_plan_must_match_committed_instruction(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo=Path(td); (repo/'plans').mkdir(); source=repo/'plans'/'p.plan'
+            source.write_text('project P\nid p\n[ ] A example\n',encoding='utf-8')
+            subprocess.run(['git','init','-q',str(repo)],check=True)
+            subprocess.run(['git','-C',str(repo),'add','plans/p.plan'],check=True)
+            subprocess.run(['git','-C',str(repo),'-c','user.name=Test','-c','user.email=test@example.test','commit','-qm','plan'],check=True)
+            c.verify_plan_revision(c.parse_plan(source))
+            source.write_text('project P\nid p\n[ ] A altered\n',encoding='utf-8')
+            with self.assertRaisesRegex(ValueError,'committed project instruction'):
+                c.verify_plan_revision(c.parse_plan(source))
+
+    def test_independent_probe_is_required_and_observed(self):
+        plan=c.parse_plan(PLAN); step=plan.by_id()['AM-5']
+        proof=c.verify_effect_probe(step)
+        self.assertEqual(proof['observed'],'active')
+        self.assertEqual(len(proof['sha256']),64)
+        from dataclasses import replace
+        bad=replace(step,fields={'effect_probe_command':'/usr/bin/printf missing','effect_probe_expected':'active'})
+        with self.assertRaisesRegex(ValueError,'independent effect probe failed'):
+            c.verify_effect_probe(bad)
+        missing=replace(step,fields={})
+        with self.assertRaisesRegex(ValueError,'effect_probe_command'):
+            c.verify_effect_probe(missing)
+
     def test_exact_get_job_and_taskflow_plan_proof(self):
         class Sender:
             def __init__(self): self.calls=[]

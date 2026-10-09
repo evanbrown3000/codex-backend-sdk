@@ -11,3 +11,6 @@ venv/
 .pytest_cache/
 .claude/
 .vscode/
+
+# Local TaskFlow launchpad; D1 and manifest hashes remain authoritative.
+/.taskflow-state/

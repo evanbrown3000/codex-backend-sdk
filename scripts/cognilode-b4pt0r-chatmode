@@ -484,7 +484,8 @@ MAX_TOOL_CONTENT_CHARS = 200000
 MAX_TOTAL_TOOL_CONTENT_CHARS = 4000000
 
 
-def provider_sse_tool_history(raw: bytes, *, expected_sha256: str = "") -> dict:
+def provider_sse_tool_history(raw: bytes, *, expected_sha256: str = "",
+                              terminal_message_id: str = "") -> dict:
     """Extract provider-observed tool messages, retaining their first-seen order.
 
     The stream is authoritative for message identity and content. JSON-pointer
@@ -501,6 +502,7 @@ def provider_sse_tool_history(raw: bytes, *, expected_sha256: str = "") -> dict:
     inherited_operation = "add"
     messages: dict[str, dict] = {}
     order: list[str] = []
+    observed_model_metadata: dict[str, dict[str, str]] = {}
 
     def patch(target, change):
         path = str(change.get("p", change.get("path", "")))
@@ -550,6 +552,14 @@ def provider_sse_tool_history(raw: bytes, *, expected_sha256: str = "") -> dict:
                     if message_id not in messages: order.append(message_id)
                     prior = messages.get(message_id)
                     candidate = copy.deepcopy(message)
+                    if (candidate.get("author") or {}).get("role") == "assistant":
+                        metadata = candidate.get("metadata") or {}
+                        if isinstance(metadata, dict):
+                            fields = {key: metadata[key] for key in
+                                      ("model_slug", "resolved_model_slug", "default_model_slug", "thinking_effort")
+                                      if isinstance(metadata.get(key), str) and metadata[key]}
+                            if fields:
+                                observed_model_metadata.setdefault(message_id, {}).update(fields)
                     if prior and not content_text(candidate.get("content")) and content_text(prior.get("content")):
                         candidate["content"] = prior["content"]
                     messages[message_id] = candidate
@@ -618,8 +628,16 @@ def provider_sse_tool_history(raw: bytes, *, expected_sha256: str = "") -> dict:
             "authorship": "provider-observed",
             "source_content_complete": True,
         })
+    provider_model_receipt = None
+    fields = observed_model_metadata.get(terminal_message_id) if terminal_message_id else None
+    if fields:
+        provider_model_receipt = {"source": "provider_sse_terminal_message",
+                                  "raw_stream_sha256": raw_sha,
+                                  "terminal_assistant_message_id": terminal_message_id,
+                                  **fields}
     return {"raw_stream_sha256": raw_sha, "tool_events": events,
-            "finished_container_exec_results": finished_container_exec_results}
+            "finished_container_exec_results": finished_container_exec_results,
+            "provider_model_receipt": provider_model_receipt}
 
 
 def _provider_sse_bucket() -> str:
@@ -691,10 +709,13 @@ def admit_central_conversation(*, result_id: str, prompt: str, result: dict, att
         raw_path = Path(raw_path_text)
         if raw_path.stat().st_size > MAX_PROVIDER_SSE_BYTES:
             raise CapabilityError("provider_stream_too_large", "provider SSE exceeds bounded ingestion size")
-        tool_history = provider_sse_tool_history(raw_path.read_bytes(), expected_sha256=raw_sha)
+        tool_history = provider_sse_tool_history(
+            raw_path.read_bytes(), expected_sha256=raw_sha,
+            terminal_message_id=str(result.get("terminal_assistant_message_id") or ""))
         raw_source = archive_provider_sse(raw_path, raw_sha)
     else:
-        tool_history = {"raw_stream_sha256": "", "tool_events": [], "finished_container_exec_results": 0}
+        tool_history = {"raw_stream_sha256": "", "tool_events": [],
+                        "finished_container_exec_results": 0, "provider_model_receipt": None}
         raw_source = None
     user_event = {"role": "user", "provider_message_id": "b4pt0r-user:" + result_id,
                   "source_index": -1, "content": prompt, "authorship": "operator-authored",
@@ -738,6 +759,7 @@ def admit_central_conversation(*, result_id: str, prompt: str, result: dict, att
             "raw_sse_source": raw_source,
             "provider_tool_event_count": len(tool_history["tool_events"]),
             "provider_observed_finished_container_exec_results": tool_history["finished_container_exec_results"],
+            "provider_model_receipt": tool_history["provider_model_receipt"],
             "provider_requests_created_by_central_readback": 0,
         },
     }
@@ -791,6 +813,9 @@ def admit_central_conversation(*, result_id: str, prompt: str, result: dict, att
         raise CapabilityError("central_tool_history_readback_mismatch", "central raw stream hash mismatch")
     if raw_source and receipt.get("raw_sse_source") != raw_source:
         raise CapabilityError("central_tool_history_readback_mismatch", "central raw stream source mismatch")
+    if receipt.get("provider_model_receipt") != tool_history["provider_model_receipt"]:
+        raise CapabilityError("central_provider_model_readback_mismatch",
+                              "provider stream model and effort receipt did not survive central readback")
     return {
         "ok": True,
         "stored": admitted.get("stored") is True,
@@ -804,6 +829,7 @@ def admit_central_conversation(*, result_id: str, prompt: str, result: dict, att
         "central_raw_sse_source": raw_source,
         "central_tool_event_count": len(observed_events),
         "central_observed_finished_container_exec_results": tool_history["finished_container_exec_results"],
+        "provider_model_receipt": tool_history["provider_model_receipt"],
         "provider_requests_created_by_readback": 0,
         "url_records": admitted.get("url_records", 0),
     }

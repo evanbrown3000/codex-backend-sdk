@@ -79,6 +79,25 @@ def test_remote_attachment_requires_hash_and_https(monkeypatch, tmp_path):
         module._stage_remote_attachment('http://example.invalid/a.zip', 'a' * 64)
 
 
+def test_legacy_queue_job_stages_missing_local_zip_from_digest(monkeypatch, tmp_path):
+    module = worker()
+    source = tmp_path / 'research.zip'
+    with zipfile.ZipFile(source, 'w') as archive:
+        archive.writestr('research.txt', 'worker packet')
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    monkeypatch.setenv('COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET', 'private-launchpad')
+    requested = []
+
+    def stage(uri, expected):
+        requested.append((uri, expected))
+        return source
+
+    monkeypatch.setattr(module, '_stage_remote_attachment', stage)
+    row = {'ref': 'file:/first-device/research.zip', 'sha256': digest}
+    assert module.attachment_paths({'attachment_refs': [row]}) == [source]
+    assert requested == [(f's3://private-launchpad/taskflow-artifacts/sha256/{digest}.zip', digest)]
+
+
 def test_device_priority_is_configurable_and_not_part_of_send_identity():
     module = worker()
     assert isinstance(module.DEVICE_PRIORITY, int)

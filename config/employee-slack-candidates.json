@@ -361,7 +361,7 @@
       ]
     },
     "Iris Vale": {
-      "org": "durable handoff",
+      "org": "Platform Engineering",
       "role": "Collaboration Systems Engineer",
       "role_variants": [
         {
@@ -370,33 +370,15 @@
           "slack_message": "https://everything-ces8532.slack.com/archives/C0C6V5SQVB8/p1791397852497459"
         },
         {
-          "org": "preferred-route recovery COMPLETE",
-          "role": "Collaboration Systems Engineer",
-          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6V5SQVB8/p1791398209788329"
-        },
-        {
-          "org": "durable handoff",
-          "role": "Collaboration Systems Engineer",
-          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6V5SQVB8/p1791398775295159"
-        },
-        {
           "org": "Automation Engineering / Data Platform",
           "role": "Staff Conversation Recovery Engineer",
           "slack_message": "https://everything-ces8532.slack.com/archives/C0C4JHAT9V3/p1791397355219889"
-        },
-        {
-          "org": "unclaimed Remote Execution/Slack-access leaf",
-          "role": "Collaboration Systems Engineer",
-          "slack_message": "https://everything-ces8532.slack.com/archives/C0C4TACRSRJ/p1791397515466799"
         }
       ],
-      "slack_message": "https://everything-ces8532.slack.com/archives/C0C6V5SQVB8/p1791398775295159",
+      "slack_message": "https://everything-ces8532.slack.com/archives/C0C6V5SQVB8/p1791397852497459",
       "sources": [
         "https://everything-ces8532.slack.com/archives/C0C4JHAT9V3/p1791397355219889",
-        "https://everything-ces8532.slack.com/archives/C0C4TACRSRJ/p1791397515466799",
-        "https://everything-ces8532.slack.com/archives/C0C6V5SQVB8/p1791397852497459",
-        "https://everything-ces8532.slack.com/archives/C0C6V5SQVB8/p1791398209788329",
-        "https://everything-ces8532.slack.com/archives/C0C6V5SQVB8/p1791398775295159"
+        "https://everything-ces8532.slack.com/archives/C0C6V5SQVB8/p1791397852497459"
       ]
     },
     "Jordan Vale": {
@@ -1089,21 +1071,6 @@
         "https://everything-ces8532.slack.com/archives/C0C7RL8PJ80/p1791233915591739"
       ]
     },
-    "Nadia Torres": {
-      "org": "direct execution update, 2026-10-08 12:1x CT.",
-      "role": "Spine Runtime Integration Engineer",
-      "role_variants": [
-        {
-          "org": "direct execution update, 2026-10-08 12:1x CT.",
-          "role": "Spine Runtime Integration Engineer",
-          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6V5SQVB8/p1791480181162389"
-        }
-      ],
-      "slack_message": "https://everything-ces8532.slack.com/archives/C0C6V5SQVB8/p1791480181162389",
-      "sources": [
-        "https://everything-ces8532.slack.com/archives/C0C6V5SQVB8/p1791480181162389"
-      ]
-    },
     "Owen Calder": {
       "org": "Platform Engineering",
       "role": "Runtime Integration Engineer",
@@ -1697,7 +1664,6 @@
       "Leo Hart",
       "Mara Voss",
       "Maya Chen",
-      "Nadia Torres",
       "Owen Calder",
       "Rina Hale",
       "Rowan Hale",
@@ -1803,7 +1769,6 @@
     "proj-remote-execution": [
       "Daniel Reyes",
       "Elliot Mercer",
-      "Iris Vale",
       "Lena Ortiz",
       "Leo Hart",
       "Mara Voss",

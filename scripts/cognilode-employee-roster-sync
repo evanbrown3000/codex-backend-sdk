@@ -31,6 +31,10 @@ LANDING_SNAPSHOTS = Path.home() / ".local/share/cognilode/slack-role-snapshots"
 ROLE = re.compile(r"^(?P<name>[A-Z][a-z]+(?: [A-Z][a-z]+){1,2}) — "
                   r"(?P<role>[^—\n]{8,100}) — (?P<org>[^\n]{4,180})$")
 TITLE = re.compile(r"\b(?:Engineer|Researcher|Scientist|Architect|Manager|Director|Specialist|Lead)\b")
+ORG = re.compile(r"^(?:Platform Engineering|Research Engineering|Data Platform|Infrastructure"
+                 r"|Provider Integrations|Autonomous Systems|Automation Engineering|AI Research"
+                 r"|Operator & Product Experience|Product Experience|Quality Assurance"
+                 r"|Security Engineering|Interaction & Execution Platform)\b")
 MAX_SNAPSHOTS = 500
 MAX_SNAPSHOT_BYTES = 4_000_000
 
@@ -46,7 +50,8 @@ def role_from_message(text: str) -> tuple[str, str, str] | None:
         return None
     org = match["org"]
     # Execution status lines are not role declarations.
-    if re.search(r"\b(?:ACTIVE|execution note|changed shared effect|claim-barrier|\d{1,2}:\d{2})\b", org, re.I):
+    if (not ORG.search(org)
+        or re.search(r"\b(?:ACTIVE|execution note|changed shared effect|claim-barrier|\d{1,2}:\d{2})\b", org, re.I)):
         return None
     return match["name"], match["role"], org
 

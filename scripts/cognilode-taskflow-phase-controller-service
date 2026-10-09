@@ -6,7 +6,10 @@ reconcile/materialize non-ChatGPT phases in the single D1 queue; the hosted
 historical rhythm remains the sole clock/claim path for chatgpt.com jobs.
 """
 from __future__ import annotations
+from datetime import UTC, datetime
 import fcntl
+import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -17,12 +20,95 @@ import time
 
 HERE = Path(__file__).resolve().parent
 CONTROLLER = HERE / "cognilode-taskflow-phase-controller"
+SENDER = HERE / "cognilode-b4pt0r-chatmode"
 STATE_ROOT = Path(os.environ.get("COGNILODE_TASKFLOW_STATE_ROOT", str(Path.home()/".local/share/cognilode/taskflow-phase-controller"))).expanduser()
 LOG = STATE_ROOT / "recurrence.jsonl"
 LOCK = STATE_ROOT / "recurrence.lock"
 INTERVAL = max(10, min(3600, int(os.environ.get("COGNILODE_TASKFLOW_INTERVAL_SECONDS", "30"))))
 RUN_TIMEOUT = max(30, min(7200, int(os.environ.get("COGNILODE_TASKFLOW_RUN_TIMEOUT_SECONDS", "3900"))))
 STOP = False
+
+
+def _time(value):
+    try:
+        result = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return result.astimezone(UTC) if result.tzinfo else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _project_id():
+    with Path(_required("COGNILODE_TASKFLOW_PLAN")).open(encoding="utf-8") as plan:
+        for _, line in zip(range(100), plan):
+            if line.startswith("id "):
+                return line.removeprefix("id ").strip()
+    raise ValueError("TaskFlow plan has no project id")
+
+
+def _queue_post(body):
+    loader = importlib.machinery.SourceFileLoader("taskflow_capacity_sender", str(SENDER))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module.operator_memory_post(body)
+
+
+def capacity_gate(*, now=None, post=None, status_path=None):
+    """Admit one new Codex phase by measured quota and active D1 occupancy.
+
+    Only opt-in TaskFlow instances use this; D1 still owns the queue/leases.
+    Unknown quota permits one worker if no other Codex phase is active.
+    """
+    now = now or datetime.now(UTC)
+    post = post or _queue_post
+    status_path = status_path or Path.home()/".local/share/live/worlds/v1/cognilode/modified_codex/llm_governance/status.json"
+    project = _project_id()
+    remaining = None
+    try:
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        observed = _time(status.get("observed_at"))
+        if (status.get("schema") == "cognilode.modified_codex.llm_governance.v1"
+            and observed and -300 <= (now-observed).total_seconds() <= 900):
+            values = [float(q["remaining_percent"]) for q in status.get("quotas") or []
+                      if isinstance(q, dict) and q.get("provider") == "codex_backend"
+                      and _time(q.get("observed_at"))
+                      and -300 <= (now-_time(q["observed_at"])).total_seconds() <= 3600
+                      and isinstance(q.get("remaining_percent"), (int, float))
+                      and 0 <= q["remaining_percent"] <= 100]
+            if values:
+                remaining = min(values)
+    except (OSError, ValueError, KeyError):
+        pass
+    jobs = {}
+    try:
+        for provider in ("codex.research", "codex.external-effect"):
+            for state in ("claimed", "effect_pending"):
+                result = post({"operation": "list_jobs", "provider": provider,
+                               "state": state, "limit": 100})
+                if not result.get("ok") or result.get("next_cursor"):
+                    raise RuntimeError("active Codex D1 inventory incomplete")
+                for job in result.get("jobs") or []:
+                    jobs[str(job["id"])] = job
+    except Exception as exc:
+        return {"admit": False, "reason": f"active D1 inventory unavailable: {type(exc).__name__}",
+                "quota_remaining_percent": remaining}
+    own_pending = [j for j in jobs.values() if j.get("project") == project
+                   and j.get("state") == "effect_pending" and j.get("taskflow_step")]
+    if own_pending:
+        # Reconcile an already-begun effect without claiming a different step.
+        step = str(sorted(own_pending, key=lambda j: j.get("claimed_at") or "")[0]["taskflow_step"])
+        return {"admit": True, "reason": "reconcile_existing_effect", "seed_step": step,
+                "quota_remaining_percent": remaining, "other_active": len(jobs)-len(own_pending)}
+    other = sum(j.get("project") != project for j in jobs.values())
+    if remaining is not None and remaining <= 5:
+        return {"admit": False, "reason": "observed Codex quota reserve", "quota_remaining_percent": remaining,
+                "other_active": other}
+    capacity = (1 if remaining is None or remaining <= 20 else
+                2 if remaining <= 40 else 3)
+    admit = other < capacity
+    return {"admit": admit, "reason": "capacity_available" if admit else "observed Codex concurrency cap",
+            "quota_remaining_percent": remaining, "other_active": other,
+            "max_active_codex": capacity}
 
 def _stop(_sig, _frame):
     global STOP
@@ -65,6 +151,14 @@ def command():
 
 def run_once():
     started=time.time(); argv=command()
+    if os.environ.get("COGNILODE_TASKFLOW_CODEX_CAPACITY_GATE", "").strip() == "1":
+        gate=capacity_gate()
+        if not gate["admit"]:
+            _emit({"schema":"cognilode.taskflow.recurrence.v1","at":time.time(),
+                   "state":"capacity_deferred", **gate})
+            return
+        if gate.get("seed_step"):
+            argv.extend(["--seed-step", gate["seed_step"]])
     try:
         cp=subprocess.run(argv,text=True,capture_output=True,timeout=RUN_TIMEOUT,check=False)
         row={"schema":"cognilode.taskflow.recurrence.v1","at":time.time(),"duration_s":round(time.time()-started,3),

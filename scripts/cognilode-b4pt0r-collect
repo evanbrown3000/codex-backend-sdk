@@ -194,13 +194,17 @@ def collect(receipt_path: Path, *, allow_provider_read: bool = True) -> dict:
     response_text = sender.message_text(assistant)
     if not prompt or not response_text:
         return {"state": "awaiting_text", "conversation_id": conversation_id}
+    expected_prompt_sha = str(receipt.get("prompt_sha256") or "")
+    if expected_prompt_sha and hashlib.sha256(prompt.encode()).hexdigest() != expected_prompt_sha:
+        return {"state": "prompt_identity_mismatch", "conversation_id": conversation_id}
     downloads = sender.download_interpreter_artifacts(
         session, auth, conversation_id=conversation_id,
         assistant_message_id=str(assistant.get("id") or ""),
         assistant_text=response_text, output_dir=receipt_path.with_name(stem + ".downloads"),
         device_id=device_id,
     )
-    raw = raw_path.read_bytes() if raw_path.is_file() else b""
+    raw_exists = raw_path.is_file()
+    raw = raw_path.read_bytes() if raw_exists else b""
     now = time.time()
     result = {
         **receipt,
@@ -215,9 +219,9 @@ def collect(receipt_path: Path, *, allow_provider_read: bool = True) -> dict:
         "provider_thinking_effort_observed": provider_metadata.get("thinking_effort"),
         "downloaded_files": downloads,
         "completed_at": prior_terminal_at or now,
-        "raw_sha256": hashlib.sha256(raw).hexdigest(),
+        "raw_sha256": hashlib.sha256(raw).hexdigest() if raw_exists else "",
         "raw_bytes": len(raw),
-        "raw_path_host": str(raw_path),
+        "raw_path_host": str(raw_path) if raw_exists else "",
         "provider_summary": {"conversation_id": conversation_id},
         "collection_method": "read_only_exact_branch_hydration",
     }

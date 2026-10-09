@@ -1,0 +1,2 @@
+# Streaming JSON keeps a 360-MiB export shard below the service memory cap.
+ijson==3.5.1

@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""Start the company container stack, then retire host company user units.
+
+This is the one permitted host company service. Docker itself remains the OS
+container engine; company workers run under its restart policy.
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import time
+
+ROOT = Path(__file__).resolve().parents[1]
+COMPOSE = ROOT / "deploy/compose/company-chatmode.yml"
+SELF = "cognilode-company-containers.service"
+
+
+def run(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(args, text=True, capture_output=True, check=check, timeout=120)
+
+
+def migrate_previous_state(source: Path, destination: Path) -> None:
+    if not source.is_dir() or source.resolve() == destination.resolve():
+        return
+    target = destination / "worker"
+    for name in ("b4pt0r-chatmode", "chatmode-queue-worker", "handoffs"):
+        old = source / name
+        new = target / name
+        if old.is_dir():
+            shutil.copytree(old, new, dirs_exist_ok=True, copy_function=shutil.copy2)
+
+
+def retired_units() -> list[str]:
+    installed = run("systemctl", "--user", "list-unit-files", "--no-legend", "--plain", check=False)
+    loaded = run("systemctl", "--user", "list-units", "--all", "--no-legend", "--plain", check=False)
+    names = {line.split(maxsplit=1)[0] for result in (installed, loaded)
+             for line in result.stdout.splitlines() if line.split()}
+    return sorted(name for name in names if name.startswith("cognilode-")
+                  and name.endswith((".service", ".timer", ".socket"))
+                  and name != SELF and "evan-recorder" not in name and "@." not in name)
+
+
+def main() -> int:
+    repos = Path(os.environ.get("COMPANY_REPOS_ROOT", str(Path.home() / "Projects"))).resolve()
+    runtime = Path(os.environ.get("COMPANY_RUNTIME_ROOT", str(Path.home() / ".local/share/cognilode/company-runtime"))).resolve()
+    aws = Path(os.environ.get("AWS_AUTH_ROOT", str(Path.home() / ".aws"))).resolve()
+    for name in ("worker", "shared", "auth", "operator"):
+        (runtime / name).mkdir(parents=True, exist_ok=True)
+    migrate_previous_state(Path(os.environ.get("COMPANY_LEGACY_DATA_ROOT", str(Path.home() / ".local/share/cognilode"))), runtime)
+    env = {**os.environ, "COMPANY_REPOS_ROOT": str(repos), "COMPANY_RUNTIME_ROOT": str(runtime),
+           "AWS_AUTH_ROOT": str(aws), "COMPANY_UID": str(os.getuid()), "COMPANY_GID": str(os.getgid()),
+           "COGNILODE_ENVIRONMENT_ID": os.environ.get("COGNILODE_ENVIRONMENT_ID", "evanpc-company-container")}
+    command = ["docker", "compose", "--project-name", "cognilode-company-runtime", "-f", str(COMPOSE), "up", "-d"]
+    subprocess.run(command, env=env, check=True, timeout=180)
+    deadline = time.monotonic() + 150
+    while time.monotonic() < deadline:
+        if ((runtime / "auth/auth.json").is_file()
+                and (runtime / "operator/operator-bearer").is_file()
+                and (runtime / "shared/http-gate/gate.sock").exists()
+                and (runtime / "shared/http-gate/policy.json").is_file()
+                and (runtime / "shared/provider.sock").exists()):
+            break
+        time.sleep(3)
+    else:
+        raise RuntimeError("container credentials or HTTP gate were not ready; host workers retained")
+    for name in retired_units():
+        run("systemctl", "--user", "disable", "--now", name, check=False)
+    run("docker", "stop", "cognilode-http-gate-http-gate-1", check=False)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

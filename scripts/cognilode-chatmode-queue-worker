@@ -69,11 +69,17 @@ TERMINAL_DELIVERABLE_ABSOLUTE_SECONDS = 10800
 
 
 def sender_prefix() -> list[str]:
-    """Use authentication held on this device for every provider operation."""
+    """Route the single rhythm queue through unified prompting's provider adapter."""
     source = os.environ.get("COGNILODE_CHATMODE_AUTH_SOURCE", "codex").strip().lower()
     if source not in {"codex", "chrome"}:
         raise ValueError("COGNILODE_CHATMODE_AUTH_SOURCE must be codex or chrome")
-    command = [sys.executable, str(SENDER_PATH), "--auth-source", source]
+    unified = os.environ.get("COGNILODE_UNIFIED_PROMPTER", "").strip()
+    if not unified:
+        company_root = Path(os.environ.get("COGNILODE_COMPANY_ROOT", str(Path.home() / "Projects")))
+        unified = str(company_root / "modified-codex-runtime/src/modified_codex/unified_bridge.py")
+    if not Path(unified).is_file():
+        raise RuntimeError("unified prompting transport is unavailable")
+    command = [sys.executable, unified, "transport", "--provider", "chatgpt.com", "--", "--auth-source", source]
     if source == "chrome":
         profile = os.environ.get("COGNILODE_CHATMODE_CHROME_PROFILE", "").strip()
         if profile:
@@ -1849,6 +1855,17 @@ def execute(job: dict, device_id: str = DEVICE_ID) -> None:
 
 
 def health_ready() -> bool:
+    local_ready = SENDER_PATH.is_file() and os.access(SENDER_PATH, os.R_OK)
+    if not local_ready:
+        return False
+    policy_path = Path(os.environ.get("COGNILODE_HTTP_GATE_POLICY_FILE", ""))
+    try:
+        policy = json.loads(policy_path.read_text()) if policy_path.is_file() else {}
+    except (OSError, ValueError):
+        policy = {}
+    if not (policy.get("schema") == "cognilode.http_gate_policy.v1"
+            and policy.get("purposes", {}).get("observability") is True):
+        return local_ready
     try:
         response = subprocess.run(sender_prefix() + ["health"],
                                   capture_output=True, text=True, timeout=30, check=False)

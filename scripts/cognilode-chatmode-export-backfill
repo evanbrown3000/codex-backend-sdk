@@ -321,7 +321,7 @@ def repair_legacy_scope(archive: zipfile.ZipFile, source: AuthenticatedRangeFile
         raise RuntimeError("duplicate scope repair source offset")
     repaired = 0
     with archive.open(info) as member:
-        for offset, conversation in enumerate(ijson.items(member, "item")):
+        for offset, conversation in enumerate(ijson.items(member, "item", use_float=True)):
             if offset not in offsets:
                 if offset > max(offsets):
                     break

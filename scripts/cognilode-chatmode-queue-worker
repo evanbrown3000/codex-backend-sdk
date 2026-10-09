@@ -1393,9 +1393,39 @@ def recover(job: dict, device_id: str = DEVICE_ID) -> None:
         prior_state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
     except (OSError, ValueError):
         prior_state = {}
+    receipt = sender.DEFAULT_OUTPUT_ROOT / (job_stem(job["id"]) + ".sse.receipt.json")
+    if (job.get("migrated_from") == "cloudflare-kv-agent-memory-prompt-job"
+        and job.get("migration_hold_reason") == "legacy_job_may_have_started_provider_effect"):
+        # The old workers did not use this queue's deterministic user-message
+        # ID. Scanning the recent provider index for that invented ID only
+        # burns rate limit and can never establish the old turn's identity.
+        # Keep D1 effect_pending until a real old receipt/export binds it.
+        now = time.time()
+        if now < float(prior_state.get("legacy_identity_next_check_at") or 0):
+            return
+        custody = {}
+        try:
+            custody = (send_custody(job) or {}).get("custody") or {}
+        except Exception:
+            pass
+        local = {}
+        if receipt.is_file():
+            try:
+                local = json.loads(receipt.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+        expected = stable_user_message_id(str(job["id"]))
+        if (custody.get("user_message_id") != expected
+            and local.get("user_message_id") != expected):
+            atomic_json(state_path, {**prior_state, "state": "legacy_identity_missing",
+                "job_id": job["id"], "legacy_identity_next_check_at": now + 6 * 3600,
+                "identity_recovery_sources": ["original_worker_receipt", "privacy_export_conversation",
+                                              "historical_rollout_provider_stream"],
+                "provider_recent_index_skipped": True})
+            event("legacy_identity_missing_provider_scan_suppressed", job_id=job["id"])
+            return
     if terminal_deliverable_candidate(job, value) and time.time() < float(prior_state.get("deliverable_next_collect_at") or 0):
         return
-    receipt = sender.DEFAULT_OUTPUT_ROOT / (job_stem(job["id"]) + ".sse.receipt.json")
     if not receipt.exists():
         try:
             custody = (send_custody(job) or {}).get("custody") or {}

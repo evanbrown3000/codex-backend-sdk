@@ -704,6 +704,33 @@ def test_upload_only_failure_requeues_for_later_rhythm_and_keeps_zip_ledger(monk
     assert requeue['user_message_id'] == module.stable_user_message_id(job['id'])
 
 
+def test_legacy_pending_without_original_send_id_stays_recoverable_without_provider_scan(monkeypatch, tmp_path):
+    module = worker()
+    module.ROOT = tmp_path / 'worker'
+    module.sender.DEFAULT_OUTPUT_ROOT = tmp_path / 'sender'
+    module.sender.DEFAULT_OUTPUT_ROOT.mkdir()
+    job = {'id': 'old-worker-job', 'migrated_from': 'cloudflare-kv-agent-memory-prompt-job',
+           'migration_hold_reason': 'legacy_job_may_have_started_provider_effect'}
+    monkeypatch.setattr(module, 'result_for_job', lambda _id: None)
+    calls = []
+
+    def missing_custody(_job):
+        calls.append('custody')
+        raise module.sender.CapabilityError('central_memory_http_failed', 'send_custody_not_found')
+
+    monkeypatch.setattr(module, 'send_custody', missing_custody)
+    monkeypatch.setattr(module.subprocess, 'run', lambda *a, **k: pytest.fail('legacy provider GET forbidden'))
+    monkeypatch.setattr(module, 'reconcile_ambiguous', lambda *a, **k: pytest.fail('legacy recent-index scan forbidden'))
+
+    module.recover(job)
+    state = json.loads(module.job_state_path(job['id']).read_text())
+    assert state['state'] == 'legacy_identity_missing'
+    assert state['provider_recent_index_skipped'] is True
+    assert state['legacy_identity_next_check_at'] > time.time()
+    module.recover(job)
+    assert calls == ['custody']
+
+
 def test_later_slot_preserves_rejected_receipt_and_unblocks_sender(monkeypatch, tmp_path):
     module = worker()
     module.ROOT = tmp_path / 'worker'

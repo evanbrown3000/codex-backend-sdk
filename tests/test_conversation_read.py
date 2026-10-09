@@ -56,7 +56,7 @@ class ConversationDeltaTests(unittest.TestCase):
             def invoke(reader_id="employee-a"):
                 argv=["conversation-read", "--provider", "chatgpt.com", "--conversation-id",
                       "conversation-1", "--remember", "--reader-id", reader_id,
-                      "--cursor-root", temporary]
+                      "--cursor-root", temporary, "--remember-store", "local"]
                 output=io.StringIO()
                 with mock.patch.object(sys,"argv",argv), mock.patch.object(reader,"read_conversation",return_value=source), \
                      redirect_stdout(output):
@@ -73,6 +73,47 @@ class ConversationDeltaTests(unittest.TestCase):
             refreshed=invoke()
             self.assertEqual(refreshed["cursor_reset_reason"],"source_prefix_changed")
             self.assertEqual(refreshed["new_events"],3)
+
+    def test_shared_remember_follows_employee_across_devices_with_cas(self):
+        state={"cursor":"", "generation":0}
+        source={**self.full}
+        sender=mock.Mock()
+        def post(body):
+            identity={key:body[key] for key in ("reader_id","provider","conversation_id")}
+            if body["operation"] == "get_reader_cursor":
+                return {"ok":True, **identity, **state}
+            if body["operation"] == "advance_reader_cursor":
+                if body["expected_generation"] != state["generation"]:
+                    return {"ok":True, **identity, **state, "advanced":False, "conflict":True}
+                state["generation"]+=1
+                state["cursor"]=body["next_cursor"]
+                return {"ok":True, **identity, **state, "advanced":True, "conflict":False}
+            raise AssertionError(body)
+        sender.operator_memory_post.side_effect=post
+        with tempfile.TemporaryDirectory() as one, tempfile.TemporaryDirectory() as two:
+            def invoke(device):
+                output=io.StringIO()
+                argv=["conversation-read","--provider","chatgpt.com","--conversation-id","conversation-1",
+                      "--remember","--reader-id","employee-a","--cursor-root",device]
+                with mock.patch.object(sys,"argv",argv), mock.patch.object(reader,"_load_script",return_value=sender), \
+                     mock.patch.object(reader,"read_conversation",return_value=source),redirect_stdout(output):
+                    self.assertEqual(reader.main(),0)
+                return json.loads(output.getvalue())
+            self.assertEqual(invoke(one)["new_events"],2)
+            self.assertEqual(invoke(two)["new_events"],0)
+            source={**self.full,"events":self.full["events"] + [
+                {"id":"u2","role":"user","text":"next","occurred_at_utc":""}]}
+            self.assertEqual([event["text"] for event in invoke(two)["events"]],["next"])
+            self.assertEqual(invoke(one)["new_events"],0)
+            self.assertEqual(state["generation"],4)
+            self.assertEqual(list(Path(one).iterdir()),[])
+            self.assertEqual(list(Path(two).iterdir()),[])
+
+    def test_shared_remember_requires_employee_identity(self):
+        argv=["conversation-read","--provider","chatgpt.com","--conversation-id","conversation-1","--remember"]
+        with mock.patch.object(sys,"argv",argv), self.assertRaises(SystemExit) as error:
+            reader.main()
+        self.assertEqual(error.exception.code,2)
 
     def test_job_id_resolves_only_matching_central_provider_readback(self):
         job={"id":"job-1","state":"complete","provider":"chatgpt.com",
@@ -211,7 +252,7 @@ class ConversationDeltaTests(unittest.TestCase):
         sender.operator_memory_post.side_effect = post
         with tempfile.TemporaryDirectory() as temporary:
             argv = ["conversation-read", "--job-id", job["id"], "--remember",
-                    "--cursor-root", temporary]
+                    "--cursor-root", temporary, "--remember-store", "local"]
             full = {"provider":"openai-codex", "conversation_id":cid,
                     "source":"hosted_d1_codex_drive_verified", "events":[
                         {"id":"a1", "role":"assistant", "text":"done", "occurred_at_utc":""}],

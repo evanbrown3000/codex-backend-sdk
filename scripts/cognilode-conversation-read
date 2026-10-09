@@ -323,6 +323,37 @@ def save_remembered_cursor(path: Path, reader_id: str, provider: str,
         tmp.unlink(missing_ok=True)
 
 
+def shared_remembered_cursor(reader_id: str, provider: str, conversation_id: str) -> tuple[str, int]:
+    """Read one employee's cursor from the same D1 store on every device."""
+    remembered_cursor_path(Path("."), reader_id, provider, conversation_id)
+    sender = _load_script(HERE / "cognilode-b4pt0r-chatmode", "cognilode_shared_cursor_reader")
+    result = sender.operator_memory_post({"operation":"get_reader_cursor", "reader_id":reader_id,
+                                          "provider":provider, "conversation_id":conversation_id})
+    if (not result.get("ok") or [result.get("reader_id"), result.get("provider"), result.get("conversation_id")]
+        != [reader_id, provider, conversation_id] or not isinstance(result.get("cursor"), str)
+        or not isinstance(result.get("generation"), int) or result["generation"] < 0):
+        raise ValueError("shared reader cursor identity/readback mismatch")
+    return result["cursor"], result["generation"]
+
+
+def advance_shared_remembered_cursor(reader_id: str, provider: str, conversation_id: str,
+                                     expected_generation: int, cursor: str) -> dict:
+    sender = _load_script(HERE / "cognilode-b4pt0r-chatmode", "cognilode_shared_cursor_writer")
+    result = sender.operator_memory_post({"operation":"advance_reader_cursor", "reader_id":reader_id,
+                                          "provider":provider, "conversation_id":conversation_id,
+                                          "expected_generation":expected_generation, "next_cursor":cursor})
+    if (not result.get("ok") or [result.get("reader_id"), result.get("provider"), result.get("conversation_id")]
+        != [reader_id, provider, conversation_id] or not isinstance(result.get("cursor"), str)
+        or not isinstance(result.get("generation"), int)):
+        raise ValueError("shared reader cursor advance/readback mismatch")
+    if result.get("advanced") is True:
+        if result["cursor"] != cursor or result["generation"] != expected_generation + 1:
+            raise ValueError("shared reader cursor advance did not commit expected state")
+    elif result.get("conflict") is not True:
+        raise ValueError("shared reader cursor advance has no committed or conflict state")
+    return result
+
+
 def render_view(result: dict, output_format: str) -> None:
     if output_format == "json":
         print(json.dumps(result, ensure_ascii=False))
@@ -425,11 +456,15 @@ def main() -> int:
     parser.add_argument("--format", choices=("json", "markdown"), default="json")
     parser.add_argument("--remember", action="store_true",
                         help="show the full conversation once, then only unseen events for this reader")
+    parser.add_argument("--remember-store", choices=("shared", "local"), default="shared",
+                        help="shared D1 cursor follows an employee across devices; local is device-only")
     parser.add_argument("--reader-id", default=os.environ.get("COGNILODE_READER_ID", "default"))
     parser.add_argument("--cursor-root", type=Path, default=Path.home()/".local/state/cognilode/conversation-read-cursors")
     args = parser.parse_args()
     if args.remember and args.since:
         parser.error("--remember and --since cannot be combined")
+    if args.remember and args.remember_store == "shared" and args.reader_id == "default":
+        parser.error("shared --remember requires --reader-id or COGNILODE_READER_ID for the named employee")
     job_link = None
     if args.job_id:
         job_link = resolve_job_conversation(args.job_id, expected_provider=args.provider,
@@ -449,6 +484,24 @@ def main() -> int:
                                  drive_reader=args.drive_reader,
                                  historical_reader=args.historical_reader)
     if args.remember:
+        if args.remember_store == "shared":
+            previous, generation = shared_remembered_cursor(args.reader_id,args.provider,args.conversation_id)
+            source=read()
+            try:
+                result=delta_view(source,previous)
+            except ValueError as exc:
+                if "prefix changed" not in str(exc):
+                    raise
+                result=delta_view(source)
+                result["cursor_reset_reason"]="source_prefix_changed"
+            if job_link: result["queue_job"] = job_link
+            render_view(result,args.format)
+            sys.stdout.flush()
+            committed=advance_shared_remembered_cursor(args.reader_id,args.provider,args.conversation_id,
+                                                        generation,result["next_cursor"])
+            if committed.get("conflict"):
+                print("shared cursor moved concurrently; reread to reconcile unseen events",file=sys.stderr)
+            return 0
         path=remembered_cursor_path(args.cursor_root, args.reader_id, args.provider, args.conversation_id)
         with remembered_cursor_lock(path):
             previous=load_remembered_cursor(path,args.reader_id,args.provider,args.conversation_id)

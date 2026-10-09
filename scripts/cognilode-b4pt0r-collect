@@ -124,7 +124,7 @@ def get_conversation(conversation_id: str, preferred: str):
     raise RuntimeError("; ".join(failures))
 
 
-def collect(receipt_path: Path, *, allow_provider_read: bool = True) -> dict:
+def collect(receipt_path: Path, *, allow_provider_read: bool = False) -> dict:
     receipt = json.loads(receipt_path.read_text())
     if not isinstance(receipt, dict) or not receipt.get("user_message_id"):
         return {"state": "ignored", "receipt": str(receipt_path)}
@@ -250,6 +250,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dir", action="append", default=[])
     parser.add_argument("--limit", type=int, default=40)
+    parser.add_argument("--recursive", action="store_true",
+                        help="include nested project handoff receipt directories")
     parser.add_argument("--receipt", type=Path, default=None,
                         help="recover one exact send receipt without scanning unrelated turns")
     args = parser.parse_args()
@@ -261,10 +263,19 @@ def main() -> int:
         global_state = {}
     global_cooldown_until = float(global_state.get("cooldown_until_epoch") or 0)
     recent_paths = sorted((p for root in roots if root.is_dir()
-                           for p in root.glob("*.sse.receipt.json")), key=lambda p: p.stat().st_mtime, reverse=True)
+                           for p in (root.rglob("*.sse.receipt.json") if args.recursive
+                                     else root.glob("*.sse.receipt.json"))),
+                          key=lambda p: p.stat().st_mtime, reverse=True)
     paths = [args.receipt] if args.receipt and args.receipt.is_file() else ([] if args.receipt else recent_paths)
-    # Do not spend account-wide provider reads while a new Chat-mode send is
-    # still being prepared or streamed. Local terminal records remain eligible.
+    # The container-hosted gate synchronizes this policy from Cognilode.com.
+    # Keep provider read recovery available, but never use it when the central
+    # observability switch is off.
+    policy_path = Path(os.environ.get("COGNILODE_HTTP_GATE_POLICY_FILE", ""))
+    try:
+        policy = json.loads(policy_path.read_text()) if policy_path.is_file() else {}
+    except (OSError, ValueError):
+        policy = {}
+    observability_enabled = policy.get("schema") == "cognilode.http_gate_policy.v1" and policy.get("purposes", {}).get("observability") is True
     active_mutation = False
     for path in recent_paths[:10]:
         try:
@@ -284,8 +295,8 @@ def main() -> int:
             state = {}
         if float(state.get("next_poll_epoch") or 0) > time.time():
             continue
-        allow_provider_read = (not active_mutation and provider_reads == 0
-                               and time.time() >= global_cooldown_until)
+        allow_provider_read = (observability_enabled and not active_mutation
+                               and provider_reads == 0 and time.time() >= global_cooldown_until)
         try:
             outcome = collect(path, allow_provider_read=allow_provider_read)
         except RateLimited as exc:

@@ -1,0 +1,13 @@
+[Unit]
+Description=Start company Docker containers and retire host company workers
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=%h/Projects/codex-backend-sdk/scripts/cognilode-company-container-bootstrap
+TimeoutStartSec=10min
+
+[Install]
+WantedBy=default.target

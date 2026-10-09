@@ -1,0 +1,112 @@
+services:
+  http-gate:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /company/codex-backend-sdk
+    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-http-gate]
+    command:
+      - --socket
+      - /runtime/http-gate/gate.sock
+      - --state
+      - /runtime/http-gate
+      - --fallback-log
+      - /runtime/http-gate/fallback.jsonl
+      - --environment
+      - ${COGNILODE_ENVIRONMENT_ID}
+      - --aws
+      - /usr/bin/aws
+    environment:
+      HOME: /home/worker
+      COGNILODE_HTTP_GATE_BYPASS: "1"
+      PATH: /usr/bin:/usr/local/bin:/bin
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+
+  credential-sync:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /company/codex-backend-sdk
+    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-central-credential-sync]
+    command:
+      - --credential
+      - cognilode/chatmode/codex-auth=/home/worker/.codex/auth.json
+      - --credential
+      - cognilode/http-gate-operator-token=/home/worker/.config/cognilode/operator-bearer
+      - --writer-secret
+      - cognilode/chatmode/codex-auth
+    environment:
+      HOME: /home/worker
+      PATH: /usr/bin:/usr/local/bin:/bin
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/auth:/home/worker/.codex
+      - ${COMPANY_RUNTIME_ROOT}/operator:/home/worker/.config/cognilode
+      - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+
+  provider-transport:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    cpus: 1
+    mem_limit: 2g
+    pids_limit: 192
+    working_dir: /company/codex-backend-sdk
+    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-provider-transport]
+    command: [--socket, /runtime/provider.sock]
+    environment:
+      HOME: /home/worker
+      CODEX_HOME: /home/worker/.codex
+      PYTHONPATH: /company/codex-backend-sdk/gate
+      COGNILODE_HTTP_GATE_SOCKET: /runtime/http-gate/gate.sock
+      COGNILODE_HTTP_GATE_FALLBACK_LOG: /runtime/http-gate/fallback.jsonl
+      COGNILODE_HTTP_GATE_POLICY_FILE: /runtime/http-gate/policy.json
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
+      COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
+      PATH: /usr/bin:/usr/local/bin:/bin
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/auth:/home/worker/.codex
+      - ${COMPANY_RUNTIME_ROOT}/operator:/home/worker/.config/cognilode:ro
+      - ${COMPANY_RUNTIME_ROOT}/worker:/home/worker/.local/share/cognilode
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+    depends_on:
+      - http-gate
+      - credential-sync
+
+  chatmode:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    cpus: 1
+    mem_limit: 2g
+    pids_limit: 192
+    working_dir: /company/codex-backend-sdk
+    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-company-chatmode-runtime]
+    environment:
+      HOME: /home/worker
+      PYTHONPATH: /company/codex-backend-sdk/gate
+      COGNILODE_HTTP_GATE_SOCKET: /runtime/http-gate/gate.sock
+      COGNILODE_HTTP_GATE_FALLBACK_LOG: /runtime/http-gate/fallback.jsonl
+      COGNILODE_HTTP_GATE_POLICY_FILE: /runtime/http-gate/policy.json
+      COGNILODE_PROVIDER_SOCKET: /runtime/provider.sock
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
+      COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
+      COGNILODE_COMPANY_ROOT: /company
+      COGNILODE_B4PT0R_SDK_ROOT: /company/codex-backend-sdk
+      PATH: /usr/bin:/usr/local/bin:/bin
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/operator:/home/worker/.config/cognilode:ro
+      - ${COMPANY_RUNTIME_ROOT}/worker:/home/worker/.local/share/cognilode
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+    depends_on:
+      - provider-transport

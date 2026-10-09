@@ -7,6 +7,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import socket
 import sys
 import threading
 import time
@@ -26,6 +27,18 @@ def emit(kind: str, **fields):
 
 def live_sender_count() -> int | None:
     """Count provider send processes, rather than stale D1 effect-pending rows."""
+    provider_socket = os.environ.get("COGNILODE_PROVIDER_SOCKET", "").strip()
+    if provider_socket:
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(5)
+                connection.connect(provider_socket)
+                connection.sendall(b'{"operation":"active"}\n')
+                with connection.makefile("r") as stream:
+                    count = int(json.loads(stream.readline())["active"])
+            return count if 0 <= count <= 1000 else None
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
     try:
         result = subprocess.run(
             ["pgrep", "-fc", "cognilode-b4pt0r-chatmode --auth-source codex send"],

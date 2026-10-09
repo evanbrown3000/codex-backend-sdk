@@ -124,12 +124,15 @@ def test_provider_stream_requires_paired_builtin_tool_result(tmp_path):
     messages = [
         {'id': 'call-native', 'author': {'role': 'assistant'}, 'recipient': 'functions.exec'},
         {'id': 'result-native', 'author': {'role': 'tool', 'name': 'functions.exec'},
+         'status': 'finished_successfully',
          'metadata': {'parent_id': 'call-native'}},
         {'id': 'call-chatmode', 'author': {'role': 'assistant'}, 'recipient': 'container.exec'},
         {'id': 'result-chatmode', 'author': {'role': 'tool', 'name': 'container.exec'},
+         'status': 'finished_successfully',
          'metadata': {'parent_id': 'call-chatmode'}},
         {'id': 'call-plugin', 'author': {'role': 'assistant'}, 'recipient': 'api_tool.call_tool'},
         {'id': 'result-plugin', 'author': {'role': 'tool', 'name': 'api_tool.call_tool'},
+         'status': 'finished_successfully',
          'metadata': {'parent_id': 'call-plugin'}},
         {'id': 'assistant-claim', 'author': {'role': 'assistant'}, 'recipient': 'all',
          'content': {'parts': ['I ran code in my sandbox.']}},
@@ -145,6 +148,10 @@ def test_provider_stream_requires_paired_builtin_tool_result(tmp_path):
          'call_ref': 'call-native', 'raw_stream_sha256': digest}]
     assert {row['ref'] for row in module.tool_evidence_from_result({'raw_path_host': str(path), 'raw_sha256': digest})} == {'result-native', 'result-chatmode'}
     assert module.tool_evidence_from_result({'raw_path_host': str(path), 'raw_sha256': '0' * 64}) == []
+    failed = [dict(row, status='finished_with_error') if row.get('id') == 'result-chatmode' else row
+              for row in messages]
+    failed_raw = '\n'.join('data: ' + json.dumps({'message': row}) for row in failed).encode()
+    assert [row['ref'] for row in module.provider_tool_evidence(failed_raw)] == ['result-native']
 
 
 def test_provider_stream_reconstructs_tool_messages_from_patches():
@@ -155,7 +162,9 @@ def test_provider_stream_reconstructs_tool_messages_from_patches():
         {'c': 1, 'p': '/message/recipient', 'o': 'replace', 'v': 'functions.exec'},
         {'c': 2, 'p': '', 'o': 'add', 'v': {'message': {
             'id': 'result', 'author': {'role': 'tool', 'name': 'functions.exec'},
+            'status': 'in_progress',
             'metadata': {'parent_id': 'call'}}}},
+        {'c': 3, 'p': '/message/status', 'o': 'replace', 'v': 'finished_successfully'},
     ]
     raw = '\n'.join('data: ' + json.dumps(frame) for frame in frames).encode()
     assert [row['ref'] for row in module.provider_tool_evidence(raw)] == ['result']

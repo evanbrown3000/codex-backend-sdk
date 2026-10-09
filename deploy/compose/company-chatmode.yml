@@ -169,6 +169,7 @@ services:
       COGNILODE_CODEX_SOURCE_COMMIT: 852bc2da4479b353913c894a9ecfc65a9d8764c8
       COGNILODE_CODEX_INSTALL_ROOT: /codex
       COGNILODE_CODEX_RELEASE_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
+      COGNILODE_AWS_CLI: /usr/bin/aws
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
       - ${AWS_AUTH_ROOT}:/root/.aws:ro

@@ -198,9 +198,11 @@ def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, 
                 ref = {"provider": key[0], "conversation_id": key[1],
                        "prompt_sha256": str(source["prompt_sha256"]),
                        "response_sha256": str(source["response_sha256"]),
-                       "source_at_utc": stamp.isoformat()}
+                       "source_at_utc": stamp.isoformat(),
+                       "project_hint": str(index.get("project") or index.get("title") or "")[:160]}
                 proofs[proof_key] = {"index_signature": signature, "source_ref": ref,
                                      "verified_at": time.time()}
+            ref = {**ref, "project_hint": str(index.get("project") or index.get("title") or "")[:160]}
             verified_logical_ids.add(logical_key)
             verified.append(stamp)
             source_refs.append(ref)

@@ -74,7 +74,10 @@ def rpc(process: subprocess.Popen, request_id: int, method: str, params: dict,
         line = process.stdout.readline()
         if not line:
             raise RuntimeError('native AppServer closed response stream')
-        message = json.loads(line)
+        try:
+            message = json.loads(line)
+        except ValueError as error:
+            raise RuntimeError(f'native {method} non_json_reply') from error
         if message.get('id') != request_id:
             continue
         if 'error' in message:

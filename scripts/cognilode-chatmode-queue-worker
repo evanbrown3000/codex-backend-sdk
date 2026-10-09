@@ -84,8 +84,8 @@ def sender_prefix() -> list[str]:
         raise ValueError("COGNILODE_CHATMODE_AUTH_SOURCE must be codex or chrome")
     unified = os.environ.get("COGNILODE_UNIFIED_PROMPTER", "").strip()
     if not unified:
-        company_root = Path(os.environ.get("COGNILODE_COMPANY_ROOT", str(Path.home() / "Projects")))
-        unified = str(company_root / "modified-codex-runtime/src/modified_codex/unified_bridge.py")
+        source_root = Path(os.environ.get("COGNILODE_COMPANY_SOURCE_ROOT", "/runtime/source"))
+        unified = str(source_root / "current/modified-codex-runtime/src/modified_codex/unified_bridge.py")
     if not Path(unified).is_file():
         raise RuntimeError("unified prompting transport is unavailable")
     command = [sys.executable, unified, "transport", "--provider", "chatgpt.com", "--", "--auth-source", source]

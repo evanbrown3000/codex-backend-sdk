@@ -107,6 +107,37 @@ def test_provider_stream_reconstructs_tool_messages_from_patches():
     assert [row['ref'] for row in module.provider_tool_evidence(raw)] == ['result']
 
 
+def test_decisionx_scan_migrates_text_spool_to_source_refs(tmp_path):
+    module = worker()
+    module.DX_HOME = tmp_path
+    episode = {'episode_id': 'episode-1', 'source_sha256': 'a' * 64,
+               'provider': 'chatgpt.com', 'conversation_id': 'conversation-1',
+               'intent_turn': {'text': 'private source text'}}
+    (tmp_path / 'scan.json').write_text(json.dumps({'offset': 3, 'spool': [episode],
+                                                     'last_scan': 1.0}))
+    loaded = module._dx_load()
+    assert loaded['spool'] == [{key: episode[key] for key in
+                                ('episode_id', 'source_sha256', 'provider', 'conversation_id')}]
+    assert 'private source text' not in (tmp_path / 'scan.json').read_text()
+
+
+def test_decisionx_batch_resolves_exact_source_and_drops_changed_episode():
+    module = worker()
+    source = {'provider': 'chatgpt.com', 'conversation_id': 'conversation-1',
+              'events': [{'id': 'u1', 'role': 'user', 'content': 'Instruction'},
+                         {'id': 'a1', 'role': 'assistant', 'content': 'Action'}]}
+    episode = module._dx_extract(source)[0]
+    class Sender:
+        def operator_memory_post(self, request):
+            assert request['operation'] == 'read'
+            return {'ok': True, 'conversation': source}
+    module.sender = Sender()
+    selected, stale = module._dx_resolve([module._dx_ref(episode),
+        {**module._dx_ref(episode), 'source_sha256': '0' * 64}])
+    assert selected == [episode]
+    assert len(stale) == 1
+
+
 def test_sender_receives_queue_selected_model_and_effort(tmp_path):
     module = worker()
     job = {'id': 'job-1', 'model': 'gpt-route-selected', 'reasoning_effort': 'xhigh'}

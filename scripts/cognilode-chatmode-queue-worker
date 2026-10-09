@@ -383,8 +383,43 @@ def _dx_connection():
 def _dx_load():
     path = DX_HOME / "scan.json"
     if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
+        state = json.loads(path.read_text(encoding="utf-8"))
+        # Older scans retained full conversation excerpts in a local spool.
+        # Only source handles and hashes are needed between cycles: source text
+        # stays in the shared conversation store until a dispatch ZIP is built.
+        refs = [_dx_ref(row) for row in state.get("spool") or []]
+        if refs != state.get("spool"):
+            state["spool"] = refs
+            atomic_json(path, state)
+        return state
     return {"offset": 0, "spool": [], "last_scan": 0.0}
+
+
+def _dx_ref(episode):
+    return {key: episode[key] for key in
+            ("episode_id", "source_sha256", "provider", "conversation_id")}
+
+
+def _dx_resolve(refs):
+    """Rehydrate exact episodes from the shared store only for a due batch."""
+    by_conversation = {}
+    selected = []
+    stale = []
+    for ref in refs:
+        key = (ref["provider"], ref["conversation_id"])
+        if key not in by_conversation:
+            result = sender.operator_memory_post({"operation": "read", "provider": key[0],
+                                                  "conversation_id": key[1]})
+            if not result.get("ok"):
+                raise RuntimeError("DecisionX source conversation unavailable for batch")
+            by_conversation[key] = {e["episode_id"]: e for e in
+                                    _dx_extract(result.get("conversation") or {})}
+        episode = by_conversation[key].get(ref["episode_id"])
+        if episode is None or episode["source_sha256"] != ref["source_sha256"]:
+            stale.append(ref)
+        else:
+            selected.append(episode)
+    return selected, stale
 
 def _dx_extract(row):
     events = row.get("events") or []
@@ -465,7 +500,7 @@ def decisionx_batch_pump():
                     old = db.execute("SELECT source_sha,state,retry_after FROM episodes WHERE id=?",(eid,)).fetchone()
                     if old and old[0]==sha and (old[1] in ("done","queued") or old[2]>time.time()): continue
                     if eid in known: continue
-                    pending.append(episode);known.add(eid)
+                    pending.append(_dx_ref(episode));known.add(eid)
                     if len(pending)>=DX_TARGET: break
             cursor += len(rows)
             if not page.get("next_cursor"):
@@ -479,7 +514,15 @@ def decisionx_batch_pump():
             atomic_json(DX_HOME/"scan.json",state)
             event("decisionx_batch_deferred",episodes=len(pending),cursor=cursor)
             return
-        selected = pending[:DX_TARGET]
+        selected, stale = _dx_resolve(pending[:DX_TARGET])
+        if stale:
+            stale_ids = {(e["episode_id"], e["source_sha256"]) for e in stale}
+            pending = [e for e in pending if (e["episode_id"],e["source_sha256"]) not in stale_ids]
+            state["spool"] = pending
+        if len(selected) < DX_MIN and not (end_of_corpus and len(selected) >= 16):
+            atomic_json(DX_HOME/"scan.json",state)
+            event("decisionx_batch_deferred_after_source_change", episodes=len(selected), stale=len(stale))
+            return
         batch = hashlib.sha256("".join(e["episode_id"]+e["source_sha256"]
                                    for e in selected).encode()).hexdigest()[:32]
         srczip = _dx_input_zip(selected,batch)
@@ -511,7 +554,8 @@ def decisionx_batch_pump():
                           attempts=episodes.attempts+1,retry_after=0,
                           batch=excluded.batch,updated=excluded.updated""",
                        (e["episode_id"],e["source_sha256"],batch,now))
-        state["spool"] = pending[len(selected):]
+        selected_ids = {(e["episode_id"],e["source_sha256"]) for e in selected}
+        state["spool"] = [e for e in pending if (e["episode_id"],e["source_sha256"]) not in selected_ids]
         atomic_json(DX_HOME/"scan.json",state)
         event("decisionx_batch_queued",job_id=id_value,episodes=len(selected),
               priority=DX_LOWEST_PRIORITY,idempotent=reply.get("idempotent",False))

@@ -781,17 +781,31 @@ def secretary_succeeded(receipt: Mapping[str, Any]) -> bool:
 
 
 CODEX_SESSION_HEADER = re.compile(r"session id: ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
+CODEX_VERSION_HEADER = re.compile(r"OpenAI Codex v\d+\.\d+\.\d+(?:[-+.][A-Za-z0-9.]+)?")
+CODEX_STARTUP_DIAGNOSTIC = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z (?:ERROR|WARN|INFO|DEBUG) \S")
 
 
 def codex_header_session_id(stderr: str) -> str | None:
-    """Read the Codex CLI's own header, not a response/echoed session ID."""
+    """Read a bounded CLI header after diagnostics, never echoed prompt text."""
     lines = stderr.splitlines()
-    if not lines or not lines[0].startswith("OpenAI Codex v"):
+    header = next((i for i, line in enumerate(lines[:17])
+                   if CODEX_VERSION_HEADER.fullmatch(line)), None)
+    if header is None or any(not CODEX_STARTUP_DIAGNOSTIC.match(line)
+                             for line in lines[:header]):
         return None
-    fences = [index for index, line in enumerate(lines[:80]) if line == "--------"]
-    if len(fences) < 2 or fences[0] != 1:
+    if header + 1 >= len(lines) or lines[header + 1] != "--------":
         return None
-    ids = [match.group(1) for line in lines[fences[0] + 1:fences[1]]
+    end = next((i for i in range(header + 2, min(header + 82, len(lines)))
+                if lines[i] == "--------"), None)
+    if end is None:
+        return None
+    fields = lines[header + 2:end]
+    if sum(line.startswith("workdir: /") for line in fields) != 1:
+        return None
+    if sum(line.startswith("model: ") for line in fields) != 1:
+        return None
+    ids = [match.group(1) for line in fields
            if (match := CODEX_SESSION_HEADER.fullmatch(line))]
     return ids[0] if len(ids) == 1 else None
 

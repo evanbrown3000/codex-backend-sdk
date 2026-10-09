@@ -33,10 +33,16 @@ def secretary_receipt(root: Path, stderr: str, *, conversation_id: str = CID,
 
 
 def header(cid: str = CID) -> str:
-    return f"OpenAI Codex v0.162.0\n--------\nworkdir: /tmp\nsession id: {cid}\n--------\nresponse body\n"
+    return f"OpenAI Codex v0.162.0\n--------\nworkdir: /tmp\nmodel: gpt-6-sol\nsession id: {cid}\n--------\nresponse body\n"
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_bounded_diagnostic_before_real_header(self):
+        diagnostic = "2026-10-09T13:06:22.112977Z ERROR rmcp::transport::worker: transport closed\n"
+        self.assertEqual(c.codex_header_session_id(diagnostic + header()), CID)
+        self.assertIsNone(c.codex_header_session_id("user\n" + header()))
+        self.assertIsNone(c.codex_header_session_id(diagnostic * 17 + header()))
+
     def test_header_bound_receipt_and_old_receipt_omission(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

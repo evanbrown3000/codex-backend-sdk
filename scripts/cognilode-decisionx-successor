@@ -239,8 +239,8 @@ def source_refs(post: Callable[[dict], Mapping], selected: list[dict], bridge: A
 
 def packet(post: Callable[[dict], Mapping], target_job_id: str, *, output_root: Path,
            stock: Mapping[str, Any], limit: int = 12) -> dict:
-    require(stock.get("multi_year_ready") is True and int(stock.get("distinct_complete") or 0) >= 500,
-            "shared Drive-verified multiyear stock below 500")
+    require(int(stock.get("distinct_complete") or 0) >= 500,
+            "shared verified source stock has fewer than 500 complete conversations")
     bridge = load(BRIDGE, "decisionx_successor_bridge")
     builder = load(ROOT_CYCLE, "decisionx_successor_source_builder")
     job, target = target_job_and_read(post, target_job_id)
@@ -295,7 +295,7 @@ PROMPT = """You are a ChatGPT.com Chat-mode DecisionX successor analyst. Use hig
 All heavy computation must run in your own native ChatGPT sandbox. The attached ZIPs
 contain the current rendered conversation, native verifier, source-linked historical
 descriptors, and Drive-verified rendered historical conversations chosen from a shared stock of at
-least 500 independently Drive-verified conversations spanning more than two years.
+least 500 independently source-verified conversations, with measured temporal breadth.
 Read each source's fidelity tier and provenance. Historical S3 rendered text
 does not establish authenticated original media or tool records; neither do
 visible Codex rollouts or privacy-export text projections. Never infer that
@@ -495,8 +495,8 @@ def tick(post: Callable[[dict], Mapping], *, output_root: Path = DEFAULT_ROOT,
                 "distinct_sources": first.get("distinct_sources")}
     bridge = load(BRIDGE, "decisionx_successor_stock_bridge")
     stock = bridge.shared_stock_census(post, minimum=500)
-    if not stock.get("multi_year_ready"):
-        return {"ok": False, "reason": "shared_multiyear_drive_stock_below_500",
+    if int(stock.get("distinct_complete") or 0) < 500:
+        return {"ok": False, "reason": "shared_verified_stock_below_500",
                 "distinct_complete": stock.get("distinct_complete"), "span_days": stock.get("span_days")}
     built = packet(post, target_id, output_root=output_root, stock=stock)
     result = enqueue(post, built, attempt=attempt,

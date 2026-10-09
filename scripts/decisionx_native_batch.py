@@ -64,6 +64,65 @@ def full_sources(source_zips: list[Path]) -> tuple[dict[tuple[str, str], dict], 
     return sources, digests
 
 
+
+def _source_event_id(event: dict, ordinal: int) -> str:
+    return str(event.get("id") or event.get("source_event_id") or event.get("turn_key")
+               or ("ordinal:" + str(event.get("index", ordinal))))
+
+
+def _source_event_text(event: dict) -> str:
+    value = event.get("content")
+    if isinstance(value, dict):
+        value = value.get("text") or value.get("parts") or ""
+    if isinstance(value, list):
+        value = "\n".join(str(x.get("text") or x.get("content") or "")
+                          if isinstance(x, dict) else str(x) for x in value)
+    return str(value or "").strip()
+
+
+def _verify_episode_source(row: dict, full: dict) -> None:
+    """Use original provider turn IDs, not merely matching text on another branch."""
+    events = full.get("events") or []
+    nodes = {}
+    for ordinal, event in enumerate(events):
+        if not isinstance(event, dict):
+            continue
+        key = _source_event_id(event, ordinal)
+        md = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        parent = str(event.get("parent_id") or event.get("parent_node_id")
+                     or event.get("source_parent_id") or md.get("parent_id") or "")
+        nodes[key] = {"role":str(event.get("role") or "").lower(),
+                      "text":_source_event_text(event), "parent":parent}
+    sequence = [row["intent_turn"], *(row.get("action_turns") or [])]
+    if row.get("next_user_turn"):
+        sequence.append(row["next_user_turn"])
+    sequence.extend(row.get("following_action_turns") or [])
+    if row.get("following_user_turn"):
+        sequence.append(row["following_user_turn"])
+    observed = []
+    for turn in sequence:
+        turn_id = str(turn.get("id") or "")
+        original = nodes.get(turn_id)
+        if original is None:
+            raise ValueError("episode refers to an absent original turn ID")
+        if original["role"] != turn.get("role") or original["text"] != str(turn.get("text") or "").strip():
+            raise ValueError("episode source turn ID role/text mismatch")
+        observed.append(turn_id)
+    if row.get("relationship_basis") == "provider_parent_chain":
+        terminal = observed[-1]
+        ancestry, seen = [], set()
+        while terminal in nodes and terminal not in seen:
+            seen.add(terminal)
+            ancestry.append(terminal)
+            terminal = nodes[terminal]["parent"]
+        ancestry.reverse()
+        seq = iter(ancestry)
+        if not all(any(candidate == wanted for candidate in seq) for wanted in observed):
+            raise ValueError("episode joined messages from incompatible branches")
+    elif row.get("relationship_basis") != "chronology_only":
+        raise ValueError("episode lacks a stated temporal relationship basis")
+
+
 def run(source_zip: Path, output_dir: Path, source_zips: list[Path]) -> dict:
     raw_zip = source_zip.read_bytes()
     sources, source_zip_digests = full_sources(source_zips)
@@ -87,24 +146,7 @@ def run(source_zip: Path, output_dir: Path, source_zips: list[Path]) -> dict:
         full = sources.get(key)
         if full is None:
             raise ValueError("episode lacks attached complete source")
-        messages = []
-        for event in full.get("events") or []:
-            role = str(event.get("role") or "").lower()
-            content = event.get("content")
-            if role in {"user", "assistant"} and isinstance(content, str) and content.strip():
-                messages.append((role, content))
-        if ("user", row["intent_turn"]["text"]) not in messages or any(
-                ("assistant", action["text"]) not in messages for action in row["action_turns"]):
-            raise ValueError("episode text is absent from its complete source")
-        if row.get("next_user_turn") and (
-                "user", row["next_user_turn"]["text"]) not in messages:
-            raise ValueError("episode evaluation absent from complete source")
-        if any(("assistant", action["text"]) not in messages
-               for action in row.get("following_action_turns") or []):
-            raise ValueError("adjacent action absent from complete source")
-        if row.get("following_user_turn") and (
-                "user", row["following_user_turn"]["text"]) not in messages:
-            raise ValueError("adjacent evaluation absent from complete source")
+        _verify_episode_source(row, full)
         text = "\n".join([row["intent_turn"]["text"],
                           *(item["text"] for item in row["action_turns"]),
                           (row.get("next_user_turn") or {}).get("text", ""),

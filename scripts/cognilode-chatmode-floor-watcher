@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""Keep the single hosted Chat-mode queue filled without a local turn ceiling."""
+from __future__ import annotations
+
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import sys
+import time
+
+
+def load(path: Path, name: str):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def emit(kind: str, **fields):
+    print(json.dumps({"kind": kind, "at": time.time(), **fields}, sort_keys=True), flush=True)
+
+
+def main() -> int:
+    here = Path(__file__).resolve().parent
+    sender = load(here / "cognilode-b4pt0r-chatmode", "cognilode_floor_sender")
+    worker = load(here / "cognilode-chatmode-queue-worker", "cognilode_floor_worker")
+    next_batch_scan = 0.0
+    while True:
+        try:
+            result = sender.operator_memory_post({"operation": "rhythm_tick"}, timeout=90)
+            claims = result.get("claims") or []
+            if claims or result.get("stop_status") not in (None, "not_due"):
+                emit("hosted_queue_fill", status=result.get("status"), claims=len(claims),
+                     active_before=result.get("active_before"), active_after=result.get("active_after"),
+                     stop_status=result.get("stop_status"), stop_reason=result.get("stop_reason"))
+        except Exception as exc:
+            emit("hosted_queue_fill_retry", error=f"{type(exc).__name__}:{str(exc)[:200]}")
+        if time.monotonic() >= next_batch_scan:
+            next_batch_scan = time.monotonic() + 600
+            try:
+                worker.decisionx_batch_pump()
+            except Exception as exc:
+                emit("decisionx_batch_retry", error=f"{type(exc).__name__}:{str(exc)[:200]}")
+        time.sleep(10)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

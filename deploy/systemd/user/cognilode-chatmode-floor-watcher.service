@@ -1,0 +1,15 @@
+[Unit]
+Description=Refill the hosted ChatGPT Chat-mode queue toward the uncapped ten-turn floor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/Projects/codex-backend-sdk/scripts/cognilode-chatmode-floor-watcher
+Restart=always
+RestartSec=10
+CPUQuota=5%
+MemoryMax=256M
+
+[Install]
+WantedBy=default.target

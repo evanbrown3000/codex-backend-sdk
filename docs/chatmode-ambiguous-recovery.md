@@ -23,6 +23,10 @@ persists the next attempt time and scan offset; it clamps retry intervals to
 Recent-index 429 also closes a worker-wide, persisted rate gate under
 `recent-index-gate.json`. One worker process holds a file lock while it checks
 and updates that gate, so concurrent jobs cannot each send another index GET.
+The gate recognizes a no-conversation-ID 429 even if the sender omits nested
+read events, and consecutive index 429s back off for 60, 120, 240, 480, then
+up to 900 seconds, respecting any longer bounded `Retry-After` advice.
+An index read that succeeds resets this streak.
 During the cooldown, jobs with a known conversation ID may still hydrate that
 exact ID using `--known-only`; jobs without one defer to the shared deadline.
 Other read failures also defer. An index miss only advances a bounded rotating

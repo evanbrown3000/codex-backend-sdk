@@ -249,9 +249,13 @@ def test_recent_index_429_gates_other_jobs_but_allows_known_id_get(monkeypatch, 
 
     def run(command, **_kwargs):
         calls.append(command)
-        if len(calls) == 1:
-            value = {"ok": False, "state": "rate_limited", "retry_after_seconds": 180,
-                     "recovery": {"events": [{"phase": "recent_index", "http_status": 429}]}}
+        index_calls = sum("--known-only" not in call for call in calls)
+        if "--known-only" not in command and index_calls == 3:
+            value = {"ok": False, "state": "not_found_in_recent", "retry_after_seconds": 300,
+                     "recovery": {"events": [{"phase": "recent_index", "candidates": 0}]}}
+        elif "--known-only" not in command:
+            value = {"ok": False, "state": "rate_limited", "retry_after_seconds": 1,
+                     "recovery": {"events": []}}  # No nested event must still gate no-CID reads.
         else:
             value = {"ok": False, "state": "provider_accepted_unfinished",
                      "retry_after_seconds": 60}
@@ -265,8 +269,9 @@ def test_recent_index_429_gates_other_jobs_but_allows_known_id_get(monkeypatch, 
 
     worker.reconcile_ambiguous(job(1))
     gate = json.loads(worker.recent_index_gate_path().read_text())
-    assert gate["retry_after_seconds"] == 180
-    assert 160 <= gate["next_index_at"] - __import__("time").time() <= 180
+    assert gate["retry_after_seconds"] == 1
+    assert gate["consecutive_rate_limits"] == 1
+    assert 50 <= gate["next_index_at"] - __import__("time").time() <= 60
 
     worker.reconcile_ambiguous(job(2))
     assert len(calls) == 1  # One 429 suppresses the next no-ID index scan.
@@ -279,3 +284,17 @@ def test_recent_index_429_gates_other_jobs_but_allows_known_id_get(monkeypatch, 
     worker.reconcile_ambiguous(job(3))
     assert len(calls) == 2
     assert "--known-only" in calls[1]
+
+    gate["next_index_at"] = 0  # Model the next allowed historical worker cycle.
+    worker.atomic_json(worker.recent_index_gate_path(), gate)
+    worker.reconcile_ambiguous(job(4))
+    assert len(calls) == 3
+    next_gate = json.loads(worker.recent_index_gate_path().read_text())
+    assert next_gate["consecutive_rate_limits"] == 2
+    assert 110 <= next_gate["next_index_at"] - __import__("time").time() <= 120
+
+    next_gate["next_index_at"] = 0
+    worker.atomic_json(worker.recent_index_gate_path(), next_gate)
+    worker.reconcile_ambiguous(job(5))
+    cleared = json.loads(worker.recent_index_gate_path().read_text())
+    assert cleared["consecutive_rate_limits"] == 0

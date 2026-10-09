@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
+import platform
 import subprocess
 import time
 
@@ -11,6 +13,27 @@ import time
 PIN = os.environ["COGNILODE_CODEX_SOURCE_COMMIT"]
 SOURCE = Path(os.environ.get("COGNILODE_COMPANY_SOURCE_ROOT", "/runtime/source")) / "current/cognilode-codex"
 RELEASE = Path(os.environ.get("COGNILODE_CODEX_INSTALL_ROOT", "/codex"))
+TARGET = f"{platform.system().lower()}-{platform.machine().lower()}"
+LOOKUP = RELEASE / "metadata" / f"lookup-{PIN}-{TARGET}.json"
+
+
+def build_capacity_bytes() -> int:
+    values = []
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal:"):
+                values.append(int(line.split()[1]) * 1024)
+                break
+    except (OSError, ValueError, IndexError):
+        pass
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            raw = Path(path).read_text().strip()
+            if raw != "max":
+                values.append(int(raw))
+        except (OSError, ValueError):
+            pass
+    return min(values) if values else 0
 
 
 def run_once() -> None:
@@ -25,6 +48,19 @@ def run_once() -> None:
     if (installed.is_file() and os.access(installed, os.X_OK) and
             (RELEASE / "bin/codex").is_file() and
             (RELEASE / "bin/central-rollouts").is_file()):
+        return
+    # Shared custody gets first chance to install the exact pinned release.
+    # An inaccessible bucket must not trigger an independent low-memory build.
+    if not LOOKUP.is_file():
+        return
+    try:
+        lookup = json.loads(LOOKUP.read_text())
+    except (OSError, ValueError):
+        return
+    if lookup.get("pin") != PIN or lookup.get("target") != TARGET or lookup.get("state") != "missing":
+        return
+    minimum = int(os.environ.get("COGNILODE_CODEX_MIN_BUILD_MEMORY_BYTES", str(5 * 1024 ** 3)))
+    if build_capacity_bytes() < minimum:
         return
     env = os.environ.copy()
     env["COGNILODE_CODEX_SOURCE"] = str(SOURCE)

@@ -150,6 +150,23 @@ services:
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
 
+  codex-release-custody:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "0:0"
+    working_dir: /company/codex-backend-sdk
+    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-company-codex-release-custody]
+    environment:
+      HOME: /root
+      COGNILODE_CODEX_SOURCE_COMMIT: 852bc2da4479b353913c894a9ecfc65a9d8764c8
+      COGNILODE_CODEX_INSTALL_ROOT: /codex
+      COGNILODE_CODEX_RELEASE_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${AWS_AUTH_ROOT}:/root/.aws:ro
+      - company_codex_release:/codex
+
   codex-builder:
     image: rust:1.95-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1
     restart: unless-stopped
@@ -163,6 +180,7 @@ services:
       COGNILODE_CODEX_SOURCE_COMMIT: 852bc2da4479b353913c894a9ecfc65a9d8764c8
       COGNILODE_CODEX_INSTALL_ROOT: /codex
       COGNILODE_BUILDER_GENERATION: git-safe-directory-v1
+      COGNILODE_CODEX_MIN_BUILD_MEMORY_BYTES: "5368709120"
       CARGO_TARGET_DIR: /cargo-target
       CARGO_BUILD_JOBS: "4"
     volumes:
@@ -174,6 +192,7 @@ services:
       - company_cargo_git:/usr/local/cargo/git
     depends_on:
       - source-sync
+      - codex-release-custody
 
   site-publisher:
     image: node:22-bookworm

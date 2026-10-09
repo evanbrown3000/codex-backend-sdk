@@ -42,6 +42,28 @@ def test_old_source_collision_gets_versioned_id(monkeypatch):
     assert prior is None
 
 
+def test_contentful_idless_source_has_synthetic_identity_and_no_provider_uri(monkeypatch):
+    monkeypatch.setattr(backfill, "prior_conversation", lambda _: None)
+    source = SimpleNamespace(etag='"snapshot"')
+    info = SimpleNamespace(filename="conversations-148.json")
+    conversation = {"mapping": {"u": {"message": {"author": {"role": "user"},
+                                      "content": {"parts": ["text"]}}}}}
+    cid, original, prior = backfill.source_identity(conversation, info, source, 29)
+    assert cid.startswith("export-source:")
+    assert original is None and prior is None
+    assert backfill.source_identity(conversation, info, source, 29)[0] == cid
+
+
+def test_empty_export_item_is_audited_without_conversation(tmp_path):
+    info = SimpleNamespace(filename="conversations-148.json", CRC=123)
+    source = SimpleNamespace(etag='"snapshot"', size=10)
+    backfill.append_empty_source_receipt(tmp_path, info, source, 29)
+    backfill.append_empty_source_receipt(tmp_path, info, source, 29)
+    rows = (tmp_path / "nonconversation_source_items.jsonl").read_text().splitlines()
+    assert len(rows) == 1
+    assert json.loads(rows[0])["classification"] == "empty_nonconversation_json_object"
+
+
 def test_same_source_id_is_idempotent(monkeypatch):
     expected = {"capture": {"source_conversation_sha256": "current", "export_etag": '"new"'}}
     monkeypatch.setattr(backfill, "prior_conversation", lambda cid: expected)

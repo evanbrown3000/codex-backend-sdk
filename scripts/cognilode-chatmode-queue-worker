@@ -1513,7 +1513,8 @@ def recover(job: dict, device_id: str = DEVICE_ID) -> None:
         if conversation_id and custody.get("user_message_id") == stable_user_message_id(str(job["id"])):
             atomic_json(receipt, {"state": "provider_accepted", "queue_job_id": job["id"],
                 "user_message_id": custody["user_message_id"], "conversation_id": conversation_id,
-                "transport": "codex_desktop_auth_http", "model": job.get("requested_model") or job.get("model") or "gpt-5-6-thinking",
+                "transport": "codex_portable_auth_http" if os.environ.get("COGNILODE_CHATMODE_PORTABLE") == "1" else "codex_desktop_auth_http",
+                "model": job.get("requested_model") or job.get("model") or "gpt-5-6-thinking",
                 "thinking_effort": job.get("reasoning_effort") or "xhigh",
                 "attached_context_files": [], "recovered_from_central_custody": True})
             event("cross_device_receipt_reconstructed", job_id=job["id"], conversation_id=conversation_id)

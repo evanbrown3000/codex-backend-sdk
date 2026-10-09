@@ -21,8 +21,15 @@ def canonical(value) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
 
-def render(row: dict) -> str:
+def render(row: dict, *, include_fidelity: bool = False) -> str:
     lines = [f"# {row['provider']} / {row['conversation_id']}"]
+    if include_fidelity:
+        capture = row.get("capture") or {}
+        lines.extend([
+            "Source fidelity: " + str(row.get("source_fidelity") or "unclassified_text_projection"),
+            "Source kind: " + str(row.get("source_kind") or capture.get("source_kind") or "unknown"),
+            "Source provenance: " + str(row.get("source_provenance") or capture.get("source_provenance") or "unverified"),
+            "Rendered text does not establish original media or tool completeness."])
     for event in row.get("events") or []:
         if event.get("role") in {"user", "assistant", "developer", "system"}:
             lines.append("\n## " + str(event["role"]) + "\n" + str(event.get("content") or ""))
@@ -97,7 +104,8 @@ def run(first: Path, sources: list[Path], out: Path) -> dict:
     (out / "TARGET_RENDERED.md").write_text(render(target))
     with (out / "HISTORICAL_RENDERED.md").open("w") as stream:
         for ref in refs:
-            stream.write(render(historical[(ref["provider"], ref["conversation_id"])]) + "\n\n")
+            stream.write(render(historical[(ref["provider"], ref["conversation_id"])],
+                                include_fidelity=bool(ref.get("source_fidelity"))) + "\n\n")
     (out / "CANDIDATES.json").write_bytes(canonical(candidates))
     compute = {"schema": "cognilode.decisionx.successor_native_compute.v1",
                "input_zip_sha256s": zip_shas,

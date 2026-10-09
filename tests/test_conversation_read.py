@@ -64,6 +64,25 @@ class ConversationDeltaTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "identity mismatch"):
                 reader.read_conversation("gemini.com", "g-1")
 
+    def test_codex_d1_interim_is_explicitly_drive_unverified(self):
+        conversation = {"provider": "openai-codex", "conversation_id": "c-1",
+                        "capture": {"source_kind": "codex_rollout", "source_sha256": "a" * 64,
+                                    "drive_verified": False},
+                        "events": [{"id": "event-1", "role": "user", "content": "work"}]}
+        sender = mock.Mock()
+        sender.operator_memory_post.return_value = {"conversation": conversation}
+        with mock.patch.object(reader, "_load_script", return_value=sender):
+            result = reader.read_conversation("codex-d1", "c-1")
+            self.assertEqual(result["provider"], "openai-codex")
+            self.assertEqual(result["coverage"], "admitted_codex_rollout_events_drive_unverified")
+            self.assertFalse(result["all_provider_events_known"])
+            self.assertEqual(result["source_receipt"]["source_sha256"], "a" * 64)
+            self.assertEqual(sender.operator_memory_post.call_args.args[0]["provider"], "openai-codex")
+            sender.operator_memory_post.return_value = {"conversation": {**conversation, "capture": {
+                **conversation["capture"], "drive_verified": True}}}
+            with self.assertRaisesRegex(ValueError, "source receipt"):
+                reader.read_conversation("codex-d1", "c-1")
+
     def test_deployed_reader_can_import_sibling_and_checkout_package(self):
         with tempfile.TemporaryDirectory() as temporary:
             checkout = Path(temporary)

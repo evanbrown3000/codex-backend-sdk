@@ -523,6 +523,164 @@ def install_taskflow(path: Path, plan: Mapping[str, Any]) -> Mapping[str, Any]:
     return value
 
 
+def enqueue_outcome_gated_successor(
+    post: Callable[[dict[str, Any]], Mapping[str, Any]], *, state: Mapping[str, Any],
+    output_root: Path, bucket: str = "cognilode-conversation-visibility-362928919715-us-west-2",
+    publish: Callable[[Mapping[str, Any]], str] | None = None,
+    controller: Any | None = None, cycle: Any | None = None,
+) -> dict[str, Any]:
+    """Repeat root planning only after every prior action has a verified real effect.
+
+    This adds an outcome attachment to the same D1 historical-rhythm queue. It
+    does not contact a provider, manufacture employee instructions, or create a
+    second clock. The next root sees its old global memory plus actual prior
+    plan/effect outcomes, allowing changed decisions instead of timer replay.
+    """
+    plan_path = Path(str(state.get("plan_path") or ""))
+    if not plan_path.is_file():
+        return {"ok": True, "phase": "complete", "reason": "root_plan_path_unavailable",
+                "provider_requests_created": 0}
+    controller = controller or _load(CONTROLLER, "root_outcome_taskflow_controller")
+    plan = controller.parse_plan(plan_path)
+    controller.verify_plan_revision(plan)
+    step_ids = set(plan.by_id())
+    if (not all(step.checked for step in plan.steps)
+        or step_ids != set(plan.completed_effects)):
+        return {"ok": True, "phase": "complete", "reason": "awaiting_verified_outcomes",
+                "steps_complete": sum(step.checked for step in plan.steps),
+                "steps_total": len(plan.steps), "provider_requests_created": 0}
+    class _Sender:
+        operator_memory_post = staticmethod(post)
+    queue = controller.QueueClient(_Sender)
+    controller.verify_completed_effects(queue, plan, step_ids=step_ids)
+    root_id = str(state.get("root_job_id") or "")
+    previous = queue.get(root_id)
+    if not previous or previous.get("state") != "complete" or previous.get("provider") != "chatgpt.com":
+        raise ValueError("completed root provider job required for successor")
+    memory_sha = str(state.get("root_memory_packet_sha256") or "")
+    if not HEX64.fullmatch(memory_sha):
+        raise ValueError("completed root cycle lacks verified memory packet SHA")
+    memory_refs = [row for row in previous.get("attachment_refs") or []
+                   if isinstance(row, Mapping) and row.get("sha256") == memory_sha]
+    if len(memory_refs) != 1:
+        raise ValueError("original root job lacks its exact memory ZIP attachment")
+    memory_ref = dict(memory_refs[0])
+    if not memory_ref.get("mirrors"):
+        raise ValueError("root memory ZIP requires durable mirror for successor")
+    prior_conversation = str(previous.get("conversation_id") or "")
+    read = post({"operation": "read", "provider": "chatgpt.com",
+                 "conversation_id": prior_conversation})
+    conversation = read.get("conversation") or {}
+    if (not read.get("ok") or conversation.get("conversation_id") != prior_conversation
+        or not any(isinstance(event, Mapping) and event.get("role") == "assistant"
+                   and event.get("source_content_complete") is True
+                   for event in conversation.get("events") or [])):
+        raise ValueError("previous root conversation lacks complete central readback")
+    outcomes: list[dict[str, Any]] = []
+    for step in plan.steps:
+        job_id = plan.completed_effects[step.step_id]
+        effect = queue.get(job_id)
+        if not effect or effect.get("state") != "complete":
+            raise ValueError("completed root step lost its D1 external effect")
+        item = {"step_id": step.step_id, "title": step.title,
+                "hierarchy_scope": step.fields.get("hierarchy_scope", ""),
+                "effect_job_id": job_id, "effect_evidence": effect.get("effect_evidence") or [],
+                "effect_conversation_id": effect.get("conversation_id") or ""}
+        effect_cid = str(item["effect_conversation_id"])
+        if effect_cid:
+            effect_provider = str(effect.get("provider") or "")
+            effect_read = post({"operation": "read", "provider": effect_provider,
+                                "conversation_id": effect_cid})
+            source = effect_read.get("conversation") or {}
+            if (not effect_read.get("ok") or source.get("conversation_id") != effect_cid
+                or not any(isinstance(event, Mapping) and event.get("role") == "assistant"
+                           and event.get("source_content_complete") is True
+                           for event in source.get("events") or [])):
+                raise ValueError("external effect conversation lacks central readback")
+            item["conversation"] = source
+        outcomes.append(item)
+    raw_outcomes = (json.dumps({"schema": "cognilode.root_outcomes.v1",
+                                "prior_root_job_id": root_id,
+                                "prior_root_conversation": conversation,
+                                "plan_sha256": plan.sha256,
+                                "completed_outcomes": outcomes}, sort_keys=True,
+                               separators=(",", ":")) + "\n").encode()
+    plan_bytes = plan_path.read_bytes()
+    outcome_key = _sha(plan.sha256 + "\n" + "\n".join(
+        sorted(plan.completed_effects.values())))
+    directory = output_root / "root-outcomes"
+    directory.mkdir(parents=True, exist_ok=True)
+    outcome_path = directory / (outcome_key + ".zip")
+    if not outcome_path.exists():
+        temporary = outcome_path.with_suffix(".zip.next")
+        with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+            for name, payload in (("COMPLETED_ROOT_PLAN.plan", plan_bytes),
+                                  ("OUTCOMES.json", raw_outcomes)):
+                info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                archive.writestr(info, payload)
+        if not 0 < temporary.stat().st_size <= 20 * 1024 * 1024:
+            temporary.unlink(missing_ok=True)
+            raise ValueError("root outcome ZIP exceeds Chat-mode 20 MiB attachment limit")
+        os.replace(temporary, outcome_path)
+    with zipfile.ZipFile(outcome_path) as archive:
+        if (archive.testzip() is not None
+            or archive.read("COMPLETED_ROOT_PLAN.plan") != plan_bytes
+            or archive.read("OUTCOMES.json") != raw_outcomes):
+            raise ValueError("root outcome ZIP no longer matches verified D1 effects")
+    outcome_sha = sha256(outcome_path.read_bytes()).hexdigest()
+    cycle = cycle or _load(HERE / "cognilode-root-memory-native-cycle", "root_outcome_native_cycle")
+    if publish is None:
+        publish = lambda row: cycle.publish_private(row, bucket=bucket)
+    mirror = publish({"path": str(outcome_path), "sha256": outcome_sha,
+                      "bytes": outcome_path.stat().st_size})
+    if not mirror:
+        raise ValueError("outcome ZIP lacks durable physical mirror")
+    root_plan = controller.parse_plan(cycle.ROOT_PLAN)
+    controller.verify_plan_revision(root_plan)
+    root_step = root_plan.steps[0]
+    successor_id = "root-agent-successor-" + outcome_key[:32]
+    prompt = (
+        "Carry out the attached long-horizon root-agent TaskFlow plan in ChatGPT.com Chat mode. "
+        "Read the physically attached multi-year global/project/role memory ZIP and completed "
+        "root outcome ZIP. The second ZIP contains the prior committed plan, verified external "
+        "effects, and centrally read prior conversations. Revise company, named team, and named "
+        "individual employee plans in light of these actual outcomes and changed circumstances. "
+        "Write plans, not prompts for other agents. End with exactly one "
+        "COGNILODE_ROOT_TASKFLOW_PLAN_JSON_BEGIN / COGNILODE_ROOT_TASKFLOW_PLAN_JSON_END "
+        "block using schema cognilode.root_taskflow_portfolio.v1 and a full report. Return one "
+        "downloadable planning ZIP with EXTERNAL_EFFECT_INSTRUCTIONS.md.\n\n--- FULL PLAN ---\n"
+        + root_plan.text
+    )
+    job = controller.job_base(root_plan, root_step, "chatgpt_sandbox",
+                              provider="chatgpt.com", priority=90, dependencies=[])
+    job.update({"id": successor_id, "prompt": prompt, "prompt_sha256": _sha(prompt),
+                "reasoning_effort": "xhigh", "model": "gpt-5-6-thinking",
+                "assigned_employee": "ChatGPT root agent in chat mode", "role": "root-manager",
+                "attachment_refs": [memory_ref,
+                    {"ref": "file:" + str(outcome_path), "sha256": outcome_sha,
+                     "mirrors": [mirror], "name": "verified-root-outcomes.zip"}]})
+    existing = queue.get(successor_id)
+    if existing:
+        if (existing.get("prompt_sha256") != job["prompt_sha256"]
+            or existing.get("provider") != "chatgpt.com"
+            or [row.get("sha256") for row in existing.get("attachment_refs") or []]
+               != [memory_sha, outcome_sha]):
+            raise ValueError("root successor ID collided with a different D1 job")
+        saved = existing
+    else:
+        result = post({**job, "operation": "enqueue_job", "job_id": successor_id,
+                       "prompt_authority": "taskflow_plan", "source": "root-outcome-recurrence"})
+        saved = result.get("job") or {}
+        if (not result.get("ok") or saved.get("id") != successor_id
+            or saved.get("prompt_sha256") != job["prompt_sha256"]
+            or saved.get("provider") != "chatgpt.com"):
+            raise ValueError("root outcome successor was not durably enqueued in D1")
+    return {"ok": True, "phase": "await_root", "root_job_id": successor_id,
+            "prior_root_job_id": root_id, "outcome_zip_sha256": outcome_sha,
+            "completed_effect_count": len(outcomes), "provider_requests_created": 0}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root-job-id", required=True)

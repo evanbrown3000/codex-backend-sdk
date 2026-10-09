@@ -235,6 +235,11 @@ def test_sender_receives_queue_selected_model_and_effort(tmp_path):
     assert command[command.index('--model') + 1] == 'gpt-route-selected'
     assert command[command.index('--effort') + 1] == 'xhigh'
     assert command[command.index('--attach') + 1] == str(attachment)
+    # D1 persists the queue's model as requested_model, not model.
+    central_job = {'id': 'job-2', 'requested_model': 'gpt-central-selected',
+                   'reasoning_effort': 'xhigh'}
+    central_command = module.sender_command(central_job, tmp_path / 'prompt.txt', [attachment])
+    assert central_command[central_command.index('--model') + 1] == 'gpt-central-selected'
 
 
 def test_only_explicit_preaccept_rejections_can_reenter_rhythm(monkeypatch, tmp_path):

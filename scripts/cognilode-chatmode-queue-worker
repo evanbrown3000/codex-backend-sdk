@@ -904,7 +904,7 @@ def recover(job: dict, device_id: str = DEVICE_ID) -> None:
         if conversation_id and custody.get("user_message_id") == stable_user_message_id(str(job["id"])):
             atomic_json(receipt, {"state": "provider_accepted", "queue_job_id": job["id"],
                 "user_message_id": custody["user_message_id"], "conversation_id": conversation_id,
-                "transport": "codex_desktop_auth_http", "model": job.get("model") or "gpt-5-6-thinking",
+                "transport": "codex_desktop_auth_http", "model": job.get("requested_model") or job.get("model") or "gpt-5-6-thinking",
                 "thinking_effort": job.get("reasoning_effort") or "xhigh",
                 "attached_context_files": [], "recovered_from_central_custody": True})
             event("cross_device_receipt_reconstructed", job_id=job["id"], conversation_id=conversation_id)
@@ -1046,7 +1046,7 @@ def stable_user_message_id(job_id: str) -> str:
 def sender_command(job: dict, prompt_path: Path, attachments: list[Path]) -> list[str]:
     command = [sys.executable, str(SENDER_PATH), "send", "--prompt-file", str(prompt_path),
                "--queue-job-id", str(job["id"]),
-               "--model", str(job.get("model") or "gpt-5-6-thinking"),
+               "--model", str(job.get("requested_model") or job.get("model") or "gpt-5-6-thinking"),
                "--effort", str(job.get("reasoning_effort") or "xhigh"),
                "--timeout", "1800"]
     for path in attachments:

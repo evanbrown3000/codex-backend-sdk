@@ -251,7 +251,7 @@ def enqueue_native_synthesis(post: Callable[[dict[str, Any]], Mapping[str, Any]]
         raise ValueError("root memory native job was not durably enqueued in D1")
     return {"job_id": job_id, "state": saved["state"], "attachment_count": len(refs),
             "prompt_sha256": job["prompt_sha256"], "reasoning_effort": saved.get("reasoning_effort"),
-            "model": saved.get("model")}
+            "model": saved.get("requested_model") or saved.get("model")}
 
 
 def _effect_rows(job: Mapping[str, Any], kind: str) -> list[Mapping[str, Any]]:
@@ -409,7 +409,7 @@ def enqueue_root_planning(post: Callable[[dict[str, Any]], Mapping[str, Any]],
         raise ValueError("root planning job was not durably enqueued in D1")
     return {"job_id": job_id, "state": saved.get("state"), "packet_sha256": digest,
             "reasoning_effort": saved.get("reasoning_effort"),
-            "model": saved.get("model")}
+            "model": saved.get("requested_model") or saved.get("model")}
 
 
 def finalize(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, native_job_id: str,

@@ -7,6 +7,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import threading
 import time
 
 
@@ -27,6 +28,14 @@ def main() -> int:
     sender = load(here / "cognilode-b4pt0r-chatmode", "cognilode_floor_sender")
     worker = load(here / "cognilode-chatmode-queue-worker", "cognilode_floor_worker")
     next_batch_scan = 0.0
+    batch_thread = None
+
+    def scan_batches():
+        try:
+            worker.decisionx_batch_pump()
+        except Exception as exc:
+            emit("decisionx_batch_retry", error=f"{type(exc).__name__}:{str(exc)[:200]}")
+
     while True:
         try:
             result = sender.operator_memory_post({"operation": "rhythm_tick"}, timeout=90)
@@ -37,12 +46,10 @@ def main() -> int:
                      stop_status=result.get("stop_status"), stop_reason=result.get("stop_reason"))
         except Exception as exc:
             emit("hosted_queue_fill_retry", error=f"{type(exc).__name__}:{str(exc)[:200]}")
-        if time.monotonic() >= next_batch_scan:
+        if time.monotonic() >= next_batch_scan and (batch_thread is None or not batch_thread.is_alive()):
             next_batch_scan = time.monotonic() + 600
-            try:
-                worker.decisionx_batch_pump()
-            except Exception as exc:
-                emit("decisionx_batch_retry", error=f"{type(exc).__name__}:{str(exc)[:200]}")
+            batch_thread = threading.Thread(target=scan_batches, daemon=True, name="decisionx-batch-pump")
+            batch_thread.start()
         time.sleep(10)
 
 

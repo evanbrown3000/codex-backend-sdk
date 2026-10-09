@@ -445,10 +445,12 @@ def enqueue_root_planning(post: Callable[[dict[str, Any]], Mapping[str, Any]],
     job_id = "root-agent-" + digest[:32] + f"-a{attempt}"
     prompt = ("Carry out the attached long-horizon root-agent TaskFlow plan in ChatGPT.com Chat mode. "
               "Read the physically attached multi-year global/project/role memory ZIP. "
-              "Write plans for the company, teams, and individual employees, not prompts for them. "
+              "Write a causal portfolio of plans for the company, named teams, and named individual "
+              "employees, not prompts for them. Ground dependencies and effects in the attached memory "
+              "while preserving uncertainty and changing circumstances. "
               "The final in-chat response must contain one exact "
               "COGNILODE_ROOT_TASKFLOW_PLAN_JSON_BEGIN / COGNILODE_ROOT_TASKFLOW_PLAN_JSON_END "
-              "block with schema cognilode.root_taskflow_plan.v1 and a full report. Return one downloadable "
+              "block with schema cognilode.root_taskflow_portfolio.v1 and a full report. Return one downloadable "
               "planning ZIP with EXTERNAL_EFFECT_INSTRUCTIONS.md.\n\n--- FULL PLAN ---\n" + plan.text)
     job = controller.job_base(plan, step, "chatgpt_sandbox", provider="chatgpt.com",
                               priority=90, dependencies=[])
@@ -667,6 +669,8 @@ def tick(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, output_root: Pa
                     "replaced_bad_job_id": root_id, "provider_requests_created": 0}
         _atomic_state(state_path, {"phase": "complete", "native_job_id": state["native_job_id"],
                                    "root_job_id": root_id, "plan_sha256": result["plan_sha256"],
+                                   "plan_path": result.get("plan_path"),
+                                   "root_memory_packet_sha256": result.get("root_memory_packet_sha256"),
                                    "source_set_sha256": state["source_set_sha256"],
                                    "completed_at": datetime.now(timezone.utc).isoformat()})
         return {"ok": True, "phase": "complete", "root_job_id": root_id,

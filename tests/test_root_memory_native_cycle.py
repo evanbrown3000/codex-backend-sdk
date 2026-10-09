@@ -223,6 +223,8 @@ class RootMemoryCycleTests(unittest.TestCase):
             def handoff(_post, **kwargs):
                 handoff_calls.append(kwargs)
                 return {"ok": True, "plan_sha256": "b" * 64,
+                        "plan_path": str(root / "plans" / "root.plan"),
+                        "root_memory_packet_sha256": "c" * 64,
                         "secretary_taskflow_installation": {"ok": True}}
             kwargs = {"output_root": root, "plan_output_root": root / "plans",
                       "prepare_fn": stage, "finalize_fn": finish, "handoff_fn": handoff}
@@ -242,7 +244,10 @@ class RootMemoryCycleTests(unittest.TestCase):
             self.assertEqual(len(prepare_calls), 1)
             self.assertEqual(len(finalize_calls), 1)
             self.assertEqual(len(handoff_calls), 1)
-            self.assertEqual(json.loads((root / "cycle-state.json").read_text())["phase"], "complete")
+            completed = json.loads((root / "cycle-state.json").read_text())
+            self.assertEqual(completed["phase"], "complete")
+            self.assertEqual(completed["plan_path"], str(root / "plans" / "root.plan"))
+            self.assertEqual(completed["root_memory_packet_sha256"], "c" * 64)
 
     def test_500_full_sources_are_batched_and_reconstructed_in_native_script(self):
         selected = cycle.source_selection(FakeBridge(refs()).shared_stock_census(None))

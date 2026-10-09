@@ -358,15 +358,14 @@ from collections import defaultdict
 from contextlib import contextmanager
 
 DX_HOME = ROOT / "decisionx-label-batches"
-DX_TARGET = 32
-DX_EPISODES_PER_SOURCE_PER_SCAN = 1
-DX_MIN = 16
-DX_TAIL_MIN = 8
+DX_TARGET = 128
+DX_EPISODES_PER_SOURCE_PER_SCAN = 4
+DX_MIN = 48
+DX_TAIL_MIN = 32
 DX_INPUT_CHAR_BUDGET = 1_000_000  # physical ZIP limit still applies; native sandbox chunks analysis
 DX_SCAN_INTERVAL_SECONDS = 600
 DX_STOCK_CACHE_SECONDS = 900
-DX_PRIORITY = 20
-DX_FIRST_VERIFIED_PRIORITY = 72
+DX_PRIORITY = -1000000  # human-requested bottom priority for bulk historical labels
 DX_MAX_UNADMITTED_BATCHES = 3
 _DX_STOCK_LOCK = threading.Lock()
 _DX_STOCK_THREAD = None
@@ -502,7 +501,7 @@ def _dx_stock_snapshot():
     global _DX_STOCK_THREAD
     now = time.time()
     with _DX_STOCK_LOCK:
-        ttl = (60 if _DX_STOCK_VALUE is None or not _DX_STOCK_VALUE.get("multi_year_ready")
+        ttl = (60 if _DX_STOCK_VALUE is None or int(_DX_STOCK_VALUE.get("distinct_complete") or 0) < 500
                or _DX_STOCK_VALUE.get("partial_read_errors") else DX_STOCK_CACHE_SECONDS)
         if _DX_STOCK_AT and now - _DX_STOCK_AT < ttl:
             return _DX_STOCK_VALUE
@@ -567,44 +566,95 @@ def _dx_resolve(refs, *, complete_source=None):
     return selected, stale
 
 def _dx_extract(row):
+    """Source-linked, branch-aware overlapping I/A/E and I/A/I episodes.
+
+    Explicit provider parent links govern branch choice when present. Without
+    them, chronology is only a candidate relation, never proof of evaluation.
+    Assistant messages remain claimed actions until external-effect evidence
+    resolves them. Different branches are never spliced into one history.
+    """
     events = row.get("events") or []
-    ordinary = []
-    for ev in events:
+    nodes = []
+    for n, ev in enumerate(events):
+        if not isinstance(ev, dict):
+            continue
         role = str(ev.get("role") or "").lower()
-        if role not in ("user", "assistant"): continue
         value = ev.get("content")
+        if isinstance(value, dict):
+            value = value.get("text") or value.get("parts") or ""
         if isinstance(value, list):
-            value = "\n".join(str(x.get("text") or "") for x in value if isinstance(x, dict))
-        if not isinstance(value, str) or not value.strip(): continue
-        ordinary.append({"id":str(ev.get("id") or ev.get("index") or len(ordinary)),
-                         "role":role, "text":value, "authorship":ev.get("authorship","unverified"),
-                         "time":ev.get("created_at")})
-    episodes = []
-    for idx, u in enumerate(ordinary):
-        if u["role"] != "user": continue
-        later = ordinary[idx+1:]
-        next_user = next((j for j,v in enumerate(later) if v["role"]=="user"),len(later))
-        replies = [v for v in later[:next_user] if v["role"]=="assistant"]
-        if not replies: continue
-        evaluation = later[next_user] if next_user < len(later) else None
-        after_evaluation = later[next_user+1:] if evaluation else []
-        following_user_index = next((j for j,v in enumerate(after_evaluation)
-                                     if v["role"]=="user"),len(after_evaluation))
-        following_actions = [v for v in after_evaluation[:following_user_index]
-                             if v["role"]=="assistant"]
-        following_evaluation = (after_evaluation[following_user_index]
-                                if following_user_index < len(after_evaluation) else None)
-        context = ordinary[max(0, idx-2):idx]
-        source = {"provider":row.get("provider"),"conversation_id":row.get("conversation_id"),
-                  "intent_turn":u,"action_turns":replies,"next_user_turn":evaluation,
-                  "following_action_turns":following_actions,
-                  "following_user_turn":following_evaluation if following_actions else None,
-                  "preceding_context":context}
-        raw = json.dumps(source,sort_keys=True,ensure_ascii=False,separators=(",",":"))
-        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-        anchor = "|".join([str(row.get("provider")),str(row.get("conversation_id")),u["id"]])
-        eid = hashlib.sha256(anchor.encode("utf-8")).hexdigest()[:48]
-        episodes.append({"episode_id":eid,"source_sha256":digest,**source})
+            value = "\n".join(str(x.get("text") or x.get("content") or "")
+                              if isinstance(x, dict) else str(x) for x in value)
+        md = ev.get("metadata") if isinstance(ev.get("metadata"), dict) else {}
+        mid = str(ev.get("id") or ev.get("source_event_id") or ev.get("turn_key")
+                  or ("ordinal:" + str(ev.get("index",n))))
+        parent = str(ev.get("parent_id") or ev.get("parent_node_id")
+                     or ev.get("source_parent_id") or md.get("parent_id") or "")
+        nodes.append({
+            "id":mid, "parent":parent, "role":role,
+            "text":str(value or "").strip(), "authorship":ev.get("authorship","unverified"),
+            "time":ev.get("created_at") or ev.get("observed_at"), "ordinal":n,
+            "provider_effects":ev.get("effect_evidence") or ev.get("external_effects") or []
+        })
+    graph = {x["id"]:x for x in nodes}
+    linked = [x for x in nodes if x["parent"] and x["parent"] in graph
+              and x["parent"] != x["id"]]
+    paths = []
+    if linked:
+        parents = {x["parent"] for x in linked}
+        leaves = [x for x in nodes if x["id"] not in parents]
+        for leaf in leaves:
+            path,seen,node = [],set(),leaf
+            while node and node["id"] not in seen:
+                seen.add(node["id"])
+                path.append(node)
+                node=graph.get(node["parent"])
+            if node is not None:  # Cyclic or ambiguous parent pointers are not evidence.
+                continue
+            if len(path) > 1:
+                paths.append(list(reversed(path)))
+        # An incomplete graph cannot justify following a cross-branch user turn.
+        if not paths:
+            return []
+    else:
+        paths=[nodes]
+    episodes, emitted = [],set()
+    for path in paths:
+        ordinary = [x for x in path if x["role"] in ("user","assistant") and x["text"]]
+        for idx,u in enumerate(ordinary):
+            if u["role"]!="user":continue
+            later=ordinary[idx+1:]
+            end=next((j for j,v in enumerate(later) if v["role"]=="user"),len(later))
+            replies=[v for v in later[:end] if v["role"]=="assistant"]
+            if not replies:continue
+            following=later[end] if end<len(later) else None
+            after=later[end+1:] if following else []
+            following_end=next((j for j,v in enumerate(after) if v["role"]=="user"),len(after))
+            next_actions=[v for v in after[:following_end] if v["role"]=="assistant"]
+            next_user=after[following_end] if next_actions and following_end<len(after) else None
+            ancestor=ordinary[max(0,idx-2):idx]
+            convert=lambda v: (None if v is None else {key:v[key] for key in
+                ("id","role","text","authorship","time","provider_effects")})
+            source={
+                "provider":row.get("provider"),"conversation_id":row.get("conversation_id"),
+                "intent_turn":convert(u),
+                "action_turns":[convert(v) for v in replies],
+                "next_user_turn":convert(following),
+                "following_action_turns":[convert(v) for v in next_actions],
+                "following_user_turn":convert(next_user),
+                "preceding_context":[convert(v) for v in ancestor],
+                "relationship_basis":"provider_parent_chain" if linked else "chronology_only",
+                "source_capture":(row.get("capture") or {})
+            }
+            raw=json.dumps(source,sort_keys=True,ensure_ascii=False,separators=(",",":"))
+            digest=hashlib.sha256(raw.encode("utf-8")).hexdigest()
+            identity="|".join([str(row.get("provider")),str(row.get("conversation_id")),
+                u["id"],replies[0]["id"],following["id"] if following else "terminal",
+                next_actions[0]["id"] if next_actions else "no-successor-action"])
+            eid=hashlib.sha256(identity.encode()).hexdigest()[:48]
+            if (eid,digest) in emitted:continue
+            emitted.add((eid,digest))
+            episodes.append({"episode_id":eid,"source_sha256":digest,**source})
     return episodes
 
 def _dx_input_zip(episodes, batch):
@@ -723,9 +773,8 @@ def _dx_reconcile_unproved_done(db):
 
 
 def _dx_batch_priority(db):
-    """Advance one verified first batch, then use low-priority quota-sensitive work."""
-    prior = db.execute("SELECT 1 FROM verified_dispatches LIMIT 1").fetchone()
-    return DX_PRIORITY if prior else DX_FIRST_VERIFIED_PRIORITY
+    """Bulk labeling never preempts higher-value provider work."""
+    return DX_PRIORITY
 
 
 def _dx_diversified_source_refs(refs):
@@ -774,7 +823,11 @@ def decisionx_batch_pump():
     if stock is None:
         return
     state["last_scan"] = time.time()
-    if not stock.get("multi_year_ready"):
+    # A genuine 500+ conversation corpus is substantive even when the available
+    # source horizon is shorter than two years. Coverage remains visible to the
+    # model and sampling allocator; an arbitrary age threshold must not shut
+    # down the entire labeling capability.
+    if int(stock.get("distinct_complete") or 0) < 500:
         atomic_json(DX_HOME / "scan.json", state)
         event("decisionx_batch_deferred_shared_stock", distinct_complete=stock.get("distinct_complete"),
               span_days=stock.get("span_days"))
@@ -813,7 +866,7 @@ def decisionx_batch_pump():
         # Pre-gate scans may have advanced the cursor past rare providers and
         # years. The first genuinely verified dispatch starts at the head of
         # the diversified stock, rather than inheriting that stale offset.
-        cursor = (0 if _dx_batch_priority(db) == DX_FIRST_VERIFIED_PRIORITY
+        cursor = (0 if db.execute("SELECT 1 FROM verified_dispatches LIMIT 1").fetchone() is None
                   else int(state.get("offset") or 0) % len(source_refs))
         end_of_corpus = False
         # The verified stock itself supplies stable source handles. Select one

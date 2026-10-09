@@ -281,7 +281,11 @@ def drive_lag(state_root: Path, archive_etag: str, state: dict,
                 receipt = json.loads(line)
                 if receipt.get("archive_etag") != archive_etag:
                     raise RuntimeError("backpressure ledger contains another export snapshot")
-                rows[receipt["stored_conversation_id"]] = receipt["d1_exact_verified_at"]
+                # First-version receipts predate the explicit variant field;
+                # those 56 IDs were admitted under the original CID. The one
+                # collision was deferred and has an explicit variant receipt.
+                stored_id = receipt.get("stored_conversation_id") or receipt["conversation_id"]
+                rows[stored_id] = receipt["d1_exact_verified_at"]
     verified = 0
     if drive_db.exists():
         db = sqlite3.connect(f"file:{drive_db}?mode=ro", uri=True)

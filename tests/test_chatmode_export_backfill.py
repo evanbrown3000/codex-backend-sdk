@@ -66,6 +66,18 @@ def test_drive_lag_counts_only_this_export_and_later_drive_proof(tmp_path):
     assert backfill.drive_lag(tmp_path, '"etag"', {"admitted": 1}, db_path)["pending_drive"] == 0
 
 
+def test_drive_lag_reads_legacy_receipt_without_stored_id(tmp_path):
+    row = {"archive_etag": '"etag"', "conversation_id": "original",
+           "d1_exact_verified_at": "2026-10-09T14:00:00+00:00"}
+    (tmp_path / "d1_exact_receipts.jsonl").write_text(json.dumps(row) + "\n")
+    db_path = tmp_path / "writer.sqlite3"
+    with sqlite3.connect(db_path) as db:
+        db.execute("""CREATE TABLE d1_drive_admissions(provider TEXT,conversation_id TEXT,
+            verified_at TEXT)""")
+    assert backfill.drive_lag(tmp_path, '"etag"', {"admitted": 1}, db_path) == {
+        "d1_receipts": 1, "drive_verified_after_d1": 0, "pending_drive": 1}
+
+
 def test_high_water_pauses_before_remote_zip_request(monkeypatch, tmp_path):
     url_file = tmp_path / "url"
     url_file.write_text("https://chatgpt.com/backend-api/estuary/content?private\n")

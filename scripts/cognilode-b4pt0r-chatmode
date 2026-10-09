@@ -1876,11 +1876,16 @@ def reconcile_queue_job(args: argparse.Namespace) -> dict:
     try:
         previous = old_record.get("result") if isinstance(old_record.get("result"), dict) else old_receipt
         known = str(previous.get("conversation_id") or old_receipt.get("conversation_id") or "")
+        if getattr(args, "known_only", False) and not known:
+            return {"ok": False, "state": "recent_index_deferred", "queue_job_id": queue_job_id,
+                    "user_message_id": expected_user_id, "retry_after_seconds": 60,
+                    "next_offset": args.scan_offset,
+                    "recovery": {"ambiguous_replay_suppressed": True, "events": []}}
         found, session, auth, device_id = discover_recent_turn(
             args, session, auth, device_id, user_message_id=expected_user_id,
             known_conversation_id=known, offset=args.scan_offset, limit=args.max_candidates,
         )
-        if known and not found.get("accepted") and found.get("state") not in {"rate_limited", "read_transient"}:
+        if known and not getattr(args, "known_only", False) and not found.get("accepted") and found.get("state") not in {"rate_limited", "read_transient"}:
             fallback, session, auth, device_id = discover_recent_turn(
                 args, session, auth, device_id, user_message_id=expected_user_id,
                 offset=args.scan_offset, limit=args.max_candidates,
@@ -1984,6 +1989,8 @@ def main(argv: list[str] | None = None) -> int:
     reconcile.add_argument("--output-dir")
     reconcile.add_argument("--scan-offset", type=int, default=0)
     reconcile.add_argument("--max-candidates", type=int, default=12)
+    reconcile.add_argument("--known-only", action="store_true",
+                           help="hydrate a known conversation ID without reading the recent index")
     args = parser.parse_args(argv)
     try:
         if args.command == "health":

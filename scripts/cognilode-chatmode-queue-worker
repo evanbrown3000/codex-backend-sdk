@@ -81,6 +81,29 @@ def job_state_path(job_id: str) -> Path:
     return ROOT / "jobs" / (hashlib.sha256(job_id.encode()).hexdigest() + ".json")
 
 
+def recent_index_gate_path() -> Path:
+    return ROOT / "recent-index-gate.json"
+
+
+def known_conversation_for_job(job_id: str) -> str:
+    """A known-ID hydration can proceed while recent-index reads cool down."""
+    stem = job_stem(job_id)
+    for suffix in (".sse.receipt.json", ".json"):
+        path = sender.DEFAULT_OUTPUT_ROOT / (stem + suffix)
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(value, dict):
+            result = value.get("result") if isinstance(value.get("result"), dict) else value
+            if result.get("queue_job_id") not in (None, job_id):
+                continue
+            conversation_id = str(result.get("conversation_id") or "")
+            if conversation_id:
+                return conversation_id
+    return ""
+
+
 def selected_for_device(job: dict, device_id: str = DEVICE_ID) -> bool:
     return (job.get("provider") == "chatgpt.com"
             and job.get("rhythm_tape_sha256")
@@ -599,12 +622,38 @@ def reconcile_ambiguous(job: dict, device_id: str = DEVICE_ID) -> None:
     command = [sys.executable, str(SENDER_PATH), "reconcile", "--queue-job-id", job_id,
                "--prompt-file", str(prompt_path), "--scan-offset",
                str(int(prior.get("reconcile_scan_offset") or 0))]
-    try:
-        response = subprocess.run(command, text=True, capture_output=True, timeout=240, check=False)
-        recovered = json.loads(response.stdout) if response.stdout.strip().startswith("{") else {}
-    except Exception as exc:
-        response = None
-        recovered = {"state": "read_transport_failure", "error": f"{type(exc).__name__}: {str(exc)[:180]}"}
+    ROOT.mkdir(parents=True, exist_ok=True)
+    with (ROOT / "recent-index-gate.lock").open("a+") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        gate_path = recent_index_gate_path()
+        try:
+            gate = json.loads(gate_path.read_text(encoding="utf-8")) if gate_path.is_file() else {}
+        except (OSError, ValueError):
+            gate = {}
+        index_next_at = float(gate.get("next_index_at") or 0)
+        if time.time() < index_next_at:
+            if known_conversation_for_job(job_id):
+                command.append("--known-only")
+            else:
+                atomic_json(state_path, {**prior, "state": "effect_pending_read_recovery", "job_id": job_id,
+                                         "reconcile_next_at": index_next_at,
+                                         "reconcile_provider_state": "recent_index_shared_cooldown"})
+                return
+        try:
+            response = subprocess.run(command, text=True, capture_output=True, timeout=240, check=False)
+            recovered = json.loads(response.stdout) if response.stdout.strip().startswith("{") else {}
+        except Exception as exc:
+            response = None
+            recovered = {"state": "read_transport_failure", "error": f"{type(exc).__name__}: {str(exc)[:180]}"}
+        events = (recovered.get("recovery") or {}).get("events") or []
+        if recovered.get("state") == "rate_limited" and any(
+            event.get("phase") == "recent_index" and event.get("http_status") == 429
+            for event in events if isinstance(event, dict)
+        ):
+            index_delay = max(60, min(900, float(recovered.get("retry_after_seconds") or 60)))
+            atomic_json(gate_path, {"next_index_at": time.time() + index_delay,
+                                    "retry_after_seconds": recovered.get("retry_after_seconds"),
+                                    "source_job_id": job_id, "observed_at": time.time()})
     delay = max(60, min(900, float(recovered.get("retry_after_seconds") or 300)))
     atomic_json(state_path, {**prior, "state": "effect_pending_read_recovery", "job_id": job_id,
                              "reconcile_next_at": now + delay,

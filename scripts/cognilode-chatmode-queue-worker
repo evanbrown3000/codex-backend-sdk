@@ -17,6 +17,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -469,11 +470,39 @@ def _dx_input_zip(episodes, batch):
         raise ValueError("DecisionX batch exceeds attachment limit")
     return path
 
+
+def _dx_retire_completed_inputs(limit=20):
+    """Remove transport copies only after D1 confirms the label result was admitted."""
+    folder = DX_HOME / "input"
+    if not folder.is_dir(): return 0
+    retired = 0
+    for path in sorted(folder.glob("*.zip"))[:limit]:
+        batch = path.stem
+        if path.is_symlink() or not re.fullmatch(r"[0-9a-f]{32}", batch): continue
+        try:
+            with zipfile.ZipFile(path) as archive:
+                manifest = json.loads(archive.read("manifest.json"))
+            if manifest.get("batch_id") != batch: continue
+            result = sender.operator_memory_post({"operation": "get_job", "job_id": "decisionx-iae-" + batch})
+            job = result.get("job") or {}
+            evidence = job.get("effect_evidence") or []
+            if job.get("state") != "complete" or not any(
+                isinstance(item, dict) and item.get("kind") == "decisionx_label_admission"
+                for item in evidence
+            ): continue
+            path.unlink()
+            retired += 1
+        except (OSError, KeyError, ValueError, zipfile.BadZipFile):
+            continue
+    return retired
+
 def decisionx_batch_pump():
     """Incrementally create MULTI-episode Chat-mode jobs in the ONE hosted D1 queue."""
     state = _dx_load()
     if time.time() - float(state.get("last_scan") or 0) < 240: return
     state["last_scan"] = time.time()
+    retired = _dx_retire_completed_inputs()
+    if retired: event("decisionx_transport_inputs_retired", count=retired)
     with _dx_connection() as db:
         pending = list(state.get("spool") or [])
         known = {e["episode_id"] for e in pending}

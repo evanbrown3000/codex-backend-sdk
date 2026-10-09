@@ -138,6 +138,31 @@ def test_decisionx_batch_resolves_exact_source_and_drops_changed_episode():
     assert len(stale) == 1
 
 
+def test_decisionx_transport_input_retired_only_after_central_admission(tmp_path):
+    module = worker()
+    module.DX_HOME = tmp_path
+    folder = tmp_path / 'input'
+    folder.mkdir()
+    complete = 'a' * 32
+    queued = 'b' * 32
+    for batch in (complete, queued):
+        with zipfile.ZipFile(folder / f'{batch}.zip', 'w') as archive:
+            archive.writestr('manifest.json', json.dumps({'batch_id': batch}))
+            archive.writestr('episodes.jsonl', 'source conversation text')
+    class Sender:
+        def operator_memory_post(self, request):
+            assert request['operation'] == 'get_job'
+            batch = request['job_id'].removeprefix('decisionx-iae-')
+            if batch == complete:
+                return {'job': {'state': 'complete', 'effect_evidence': [
+                    {'kind': 'decisionx_label_admission', 'ref': 'verified'}]}}
+            return {'job': {'state': 'queued', 'effect_evidence': []}}
+    module.sender = Sender()
+    assert module._dx_retire_completed_inputs() == 1
+    assert not (folder / f'{complete}.zip').exists()
+    assert (folder / f'{queued}.zip').exists()
+
+
 def test_sender_receives_queue_selected_model_and_effort(tmp_path):
     module = worker()
     job = {'id': 'job-1', 'model': 'gpt-route-selected', 'reasoning_effort': 'xhigh'}

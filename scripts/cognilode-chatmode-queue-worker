@@ -1725,6 +1725,17 @@ def sender_command(job: dict, prompt_path: Path, attachments: list[Path]) -> lis
                "--model", str(job.get("requested_model") or job.get("model") or "gpt-5-6-thinking"),
                "--effort", str(job.get("reasoning_effort") or "xhigh"),
                "--timeout", "1800"]
+    # DecisionX follow-ups must target the actual existing Chat-mode conversation
+    # and its observed parent. The sender performs a read-before-send on that
+    # exact provider branch and refuses a stale expected parent.
+    conversation_id = str(job.get("conversation_id") or "").strip()
+    parent_message_id = str(job.get("parent_message_id") or "").strip()
+    if parent_message_id and not conversation_id:
+        raise ValueError("Chat-mode parent_message_id without conversation_id")
+    if conversation_id:
+        command.extend(["--conversation-id", conversation_id])
+        if parent_message_id:
+            command.extend(["--parent-message-id", parent_message_id])
     for path in attachments:
         command.extend(["--attach", str(path)])
     return command

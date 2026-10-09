@@ -133,6 +133,7 @@ def test_expired_source_promotes_candidate_but_old_drive_lag_still_pauses(monkey
                  "position": 6, "deferred": []}
     (state_root / "cursor.json").write_text(json.dumps(old_state))
     monkeypatch.setattr(backfill.sender, "new_session", lambda *a: object())
+    monkeypatch.setattr(backfill, "verify_candidate_account", lambda *a: None)
 
     class Expired(Exception):
         response = SimpleNamespace(status_code=403)
@@ -208,3 +209,24 @@ def test_source_retry_after_skips_next_timer_network_read(monkeypatch, tmp_path)
     monkeypatch.setattr(backfill, "AuthenticatedRangeFile", lambda *a, **kw: (_ for _ in ()).throw(
         AssertionError("provider read before Retry-After")))
     assert backfill.run(url_file, maximum=1, state_root=root)["state"] == "provider_retry_after"
+
+
+def test_replacement_source_requires_same_authenticated_email(monkeypatch):
+    import io
+    import zipfile
+
+    def archive(email):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as out:
+            out.writestr("user.json", json.dumps({"email": email, "id": "distinct-user-id"}))
+        buffer.seek(0)
+        return buffer
+
+    monkeypatch.setattr(backfill.sender, "identity", lambda session: {
+        "user_email": "current@example.com", "account_id": "different-account-id"})
+    backfill.verify_candidate_account(archive("CURRENT@example.com"), object())
+    try:
+        backfill.verify_candidate_account(archive("other@example.com"), object())
+        assert False, "another account's export must not be promoted"
+    except RuntimeError as exc:
+        assert "different account" in str(exc)

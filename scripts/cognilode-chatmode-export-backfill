@@ -359,6 +359,25 @@ def archived_drive_lag(state_root: Path, drive_db: Path = DRIVE_DB) -> int:
     return total
 
 
+def verify_candidate_account(source: AuthenticatedRangeFile, session) -> None:
+    """Fence replacement ZIP to the account that owns this authenticated session.
+
+    Export `user.json.id` is a user ID and need not equal the ChatGPT account
+    ID. The email does match for the observed source; never publish it to logs.
+    """
+    auth_email = str(sender.identity(session).get("user_email") or "").strip().casefold()
+    if not auth_email:
+        raise RuntimeError("authenticated account email unavailable for export identity fence")
+    with zipfile.ZipFile(source) as archive:
+        info = archive.getinfo("user.json")
+        if info.file_size > 16384:
+            raise RuntimeError("export user identity member exceeds bound")
+        user = json.loads(archive.read(info))
+    export_email = str(user.get("email") or "").strip().casefold() if isinstance(user, dict) else ""
+    if not export_email or export_email != auth_email:
+        raise RuntimeError("replacement export belongs to a different account")
+
+
 def run(url_file: Path, *, maximum: int, state_root: Path = STATE_ROOT) -> dict:
     if url_file.stat().st_mode & 0o077:
         raise RuntimeError("signed export URL file must be private (0600)")
@@ -410,8 +429,12 @@ def run(url_file: Path, *, maximum: int, state_root: Path = STATE_ROOT) -> dict:
                 raise RuntimeError("unexpected replacement export URL origin or path") from exc
             replacement = AuthenticatedRangeFile(session, candidate, retry_hook=defer_source_retry)
             if state is not None and (state["archive_etag"], state["archive_bytes"]) != (replacement.etag, replacement.size):
+                verify_candidate_account(replacement, session)
                 promote(state_root, url_file, candidate_file, state, url, candidate, replacement, exc)
                 state = None
+            elif state is None:
+                verify_candidate_account(replacement, session)
+                _atomic_bytes(url_file, (candidate + "\n").encode())
             else:
                 # A renewed link to identical source bytes needs no new cursor.
                 _atomic_bytes(url_file, (candidate + "\n").encode())

@@ -367,6 +367,7 @@ DX_SCAN_INTERVAL_SECONDS = 600
 DX_STOCK_CACHE_SECONDS = 900
 DX_PRIORITY = 20
 DX_FIRST_VERIFIED_PRIORITY = 72
+DX_MAX_UNADMITTED_BATCHES = 3
 _DX_STOCK_LOCK = threading.Lock()
 _DX_STOCK_THREAD = None
 _DX_STOCK_VALUE = None
@@ -788,6 +789,18 @@ def decisionx_batch_pump():
         if released: event("decisionx_cancelled_batch_refs_released", episodes=released)
         unproved = _dx_reconcile_unproved_done(db)
         if unproved: event("decisionx_unproved_done_released", episodes=unproved)
+        outstanding = db.execute(
+            "SELECT COUNT(DISTINCT batch) FROM episodes WHERE state='queued' AND batch IS NOT NULL"
+        ).fetchone()[0]
+        if outstanding >= DX_MAX_UNADMITTED_BATCHES:
+            # Let real native labeling and central descriptor admission tell us
+            # whether these source slices are useful before allocating more
+            # ChatGPT turns.  The D1 queue, not this local database, remains
+            # the authority for job state; _dx_reconcile_queued refreshes it.
+            atomic_json(DX_HOME / "scan.json", state)
+            event("decisionx_batch_deferred_backpressure", outstanding=outstanding,
+                  limit=DX_MAX_UNADMITTED_BATCHES)
+            return
         # Retained handles may have been written by older episode-only scans.
         # A native batch reads one complete conversation per candidate; do not
         # spend one ChatGPT slot labeling the same source twice.

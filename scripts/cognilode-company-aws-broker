@@ -21,6 +21,7 @@ ROLE_ARN = os.environ.get('COGNILODE_AWS_BROKER_ROLE_ARN', '').strip()
 REGION = os.environ.get('AWS_DEFAULT_REGION', 'us-west-2')
 ACCOUNT = os.environ.get('COGNILODE_AWS_ACCOUNT_ID', '').strip()
 BUCKET = os.environ.get('COGNILODE_AWS_ARTIFACT_BUCKET', '').strip()
+MEMORY_BUCKET = os.environ.get('COGNILODE_AWS_MEMORY_BUCKET', '').strip()
 AWS = os.environ.get('COGNILODE_AWS_CLI', '/usr/bin/aws')
 ALLOWED_PURPOSES = frozenset({'artifact-read', 'artifact-write', 'secrets-read', 'secrets-write'})
 CACHE: dict[str, tuple[float, dict]] = {}
@@ -29,13 +30,15 @@ LOCK = threading.RLock()
 
 def policy(purpose: str) -> str:
     if purpose.startswith('artifact-'):
-        if not BUCKET or '/' in BUCKET:
-            raise RuntimeError('artifact bucket is not configured')
+        buckets = [BUCKET, MEMORY_BUCKET]
+        if any(not bucket or '/' in bucket for bucket in buckets):
+            raise RuntimeError('company S3 buckets are not configured')
         actions = ['s3:GetObject', 's3:ListBucket']
         if purpose == 'artifact-write':
             actions.append('s3:PutObject')
         statements = [{'Effect': 'Allow', 'Action': actions,
-            'Resource': [f'arn:aws:s3:::{BUCKET}', f'arn:aws:s3:::{BUCKET}/*']}]
+            'Resource': [item for bucket in buckets for item in
+                         (f'arn:aws:s3:::{bucket}', f'arn:aws:s3:::{bucket}/*')]}]
     else:
         if not ACCOUNT.isdigit() or len(ACCOUNT) != 12:
             raise RuntimeError('AWS account is not configured')

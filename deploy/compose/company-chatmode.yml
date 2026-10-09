@@ -325,6 +325,29 @@ services:
     depends_on:
       - credential-sync
 
+  aws-broker:
+    profiles: [aws-broker]
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /runtime
+    entrypoint: [python3, /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-aws-broker]
+    environment:
+      HOME: /home/worker
+      AWS_DEFAULT_REGION: us-west-2
+      AWS_EC2_METADATA_DISABLED: "false"
+      COGNILODE_AWS_BROKER_SOCKET: /runtime/aws-broker/broker.sock
+      COGNILODE_AWS_BROKER_ROLE_ARN: ${COGNILODE_AWS_BROKER_ROLE_ARN:-}
+      COGNILODE_AWS_ACCOUNT_ID: ${COGNILODE_AWS_ACCOUNT_ID:-362928919715}
+      COGNILODE_AWS_ARTIFACT_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
+      COGNILODE_AWS_MEMORY_BUCKET: cognilode-conversation-visibility-362928919715-us-west-2
+      COGNILODE_AWS_CLI: /usr/bin/aws
+    volumes:
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+    depends_on:
+      - source-sync
+
   remote-shell:
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped

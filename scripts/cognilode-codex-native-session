@@ -35,6 +35,26 @@ def sha(path: Path) -> str:
     return h.hexdigest()
 
 
+def require_native_executable(path: Path) -> None:
+    """A launcher script hash cannot bind the executable it may later switch."""
+    with path.open("rb") as binary:
+        head = binary.read(4096)
+    macho = (b"\xfe\xed\xfa\xce",b"\xce\xfa\xed\xfe",
+             b"\xfe\xed\xfa\xcf",b"\xcf\xfa\xed\xfe",
+             b"\xca\xfe\xba\xbe",b"\xbe\xba\xfe\xca")
+    native = head.startswith(b"\x7fELF") or any(head.startswith(magic) for magic in macho)
+    if head.startswith(b"MZ") and len(head) >= 64:
+        offset = int.from_bytes(head[60:64],"little")
+        if offset >= len(head):
+            with path.open("rb") as binary:
+                binary.seek(offset)
+                native = binary.read(4) == b"PE\0\0"
+        else:
+            native = head[offset:offset+4] == b"PE\0\0"
+    if not native:
+        raise ValueError("Codex executable must be a direct native release binary, not a mutable launcher")
+
+
 def post(body: dict[str, Any]) -> dict[str, Any]:
     source = HERE/"cognilode-b4pt0r-chatmode"
     loader = importlib.machinery.SourceFileLoader("cognilode_codex_native_session_sender", str(source))
@@ -95,6 +115,7 @@ def verify_registration(*, session_id: str, environment_id: str, rollout_path: P
         raise ValueError("Codex CLI header session ID mismatch")
     if not os.access(binary_path, os.X_OK):
         raise ValueError("native Codex binary is not executable")
+    require_native_executable(binary_path)
     if not instruction_bundle_path.read_bytes():
         raise ValueError("instruction bundle is empty")
     return {"session_id":session_id,"environment_id":environment_id,
@@ -132,6 +153,7 @@ def activate(args: argparse.Namespace) -> dict[str, Any]:
     if os.environ.get("COGNILODE_REMOTE_ENVIRONMENT_ID") not in (None,args.environment_id):
         raise ValueError("local environment ID differs from native release host")
     binary_sha = sha(args.binary_path)
+    require_native_executable(args.binary_path)
     bundle_sha = sha(args.instruction_bundle_path)
     system_sha = sha(args.system_instructions_path)
     developer_sha = sha(args.developer_instructions_path)

@@ -20,9 +20,15 @@ scripts/cognilode-codex-native-session register \
   --rollout-path /absolute/path/to/rollout.jsonl \
   --stderr-path /absolute/path/to/codex.stderr \
   --source-receipt-path /absolute/path/to/receipt.json \
-  --binary-path /absolute/path/to/codex-cognilode \
+  --binary-path /absolute/path/to/versioned/codex-native-binary \
   --instruction-bundle-path /absolute/path/to/instructions.json
 ```
+
+`--binary-path` must name the versioned native ELF, Mach-O, or PE executable
+itself. A shell launcher can switch targets while keeping the same hash, so
+the client refuses it for new registrations, activation, and resume. An older
+provisional locator registered with a launcher remains readable but cannot
+be resumed through this client.
 
 Once a modified Codex release has independently exercised both role
 replacements and a native same-session continuation, activate its instruction
@@ -31,7 +37,7 @@ release on the registered host:
 ```sh
 scripts/cognilode-codex-native-session activate \
   --session-id SESSION_UUID --environment-id ENVIRONMENT_ID \
-  --binary-path /absolute/path/to/codex-cognilode \
+  --binary-path /absolute/path/to/versioned/codex-native-binary \
   --instruction-bundle-path /absolute/path/to/instructions.json \
   --system-instructions-path /absolute/path/to/system.txt \
   --developer-instructions-path /absolute/path/to/developer.txt \

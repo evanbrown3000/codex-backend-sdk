@@ -221,6 +221,10 @@ def heartbeat(device_id: str, active: int) -> None:
         "estimated_cost": 0, "cost_remaining": 1,
         "devices": [{"id": device_id, "available": ready, "chatgpt_eligible": True, "priority": 100}],
     }})
+    sender.operator_memory_post({"operation": "rhythm_device_heartbeat", "device": {
+        "id": device_id, "available": ready, "chatgpt_eligible": True, "priority": 100,
+        "network_route": os.environ.get("COGNILODE_CHATMODE_NETWORK_ROUTE", "home"),
+    }})
     event("heartbeat", device_id=device_id, available=ready, active=active)
 
 

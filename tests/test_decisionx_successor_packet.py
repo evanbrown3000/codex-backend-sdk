@@ -219,6 +219,46 @@ def test_complete_but_invalid_provider_zip_records_shared_rejection_then_retries
                             state_root=tmp_path / "handoff-state")
     assert rejected["phase"] == "provider_result_rejected"
     assert rejected["rejection_segment_id"] in stored
+    repeated = handoff.tick(post, job_id=job["id"], output_root=tmp_path,
+                            state_root=tmp_path / "handoff-state")
+    assert repeated["phase"] == "provider_result_rejected"
+    assert repeated["rejection_segment_id"] == rejected["rejection_segment_id"]
     deferred = upstream.tick(post, output_root=output, root_state_path=root_state)
     assert deferred["phase"] == "retry_deferred"
     assert deferred["job_state"] == "provider_result_rejected"
+
+
+def test_three_spaced_completed_job_validation_failures_write_d1_retry_receipt(tmp_path, monkeypatch):
+    job = {"id": "decisionx-successor-uncertain", "state": "complete",
+           "conversation_id": "chat-uncertain", "effect_evidence": []}
+    stored = {}
+    def post(body):
+        if body["operation"] == "get_job":
+            return {"ok": True, "job": job}
+        if body["operation"] == "read_segment":
+            row = stored.get(body["segment_id"])
+            return {"ok": bool(row), "segment": row, "error": None if row else "segment_not_found"}
+        if body["operation"] == "append_segments":
+            for row in body["segments"]:
+                stored[row["segment_id"]] = row
+            return {"ok": True}
+        raise AssertionError(body)
+    def inconclusive(*_args, **_kwargs):
+        raise ValueError("uploaded historical source no longer matches complete Drive readback")
+    monkeypatch.setattr(handoff, "handoff", inconclusive)
+    state_root = tmp_path / "handoff-state"
+    for count in (1, 2):
+        result = handoff.tick(post, job_id=job["id"], output_root=tmp_path,
+                              state_root=state_root)
+        assert result["phase"] == "validation_retry"
+        assert result["observations"] == count
+        retry_path = next(state_root.glob("*.validation.json"))
+        value = json.loads(retry_path.read_text())
+        value["last_counted_at"] = "2024-01-01T00:00:00+00:00"
+        retry_path.write_text(json.dumps(value))
+    rejected = handoff.tick(post, job_id=job["id"], output_root=tmp_path,
+                            state_root=state_root)
+    assert rejected["phase"] == "provider_result_rejected"
+    assert rejected["observations"] == 3
+    assert stored[rejected["rejection_segment_id"]]["metadata"]["reason"].startswith(
+        "handoff_validation_unrecoverable:")

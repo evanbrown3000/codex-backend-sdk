@@ -8,7 +8,7 @@ and the existing TaskFlow installer have been independently checked.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 from hashlib import sha256
 import importlib.machinery
 import importlib.util
@@ -34,6 +34,10 @@ MAX_ZIP_BYTES = 20 * 1024 * 1024
 
 class InvalidProviderDeliverable(ValueError):
     """A complete provider turn returned a permanently unusable work product."""
+
+
+class TransientHandoffError(ValueError):
+    """A shared read, mirror, or installer may become available on a later tick."""
 
 
 def load(path: Path, name: str) -> Any:
@@ -139,7 +143,7 @@ def stage_zip(ref: Mapping[str, Any], *, stage_remote: Callable[[str, str], Path
                 return path
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
             continue
-    raise ValueError("physical ZIP missing or changed on this device and mirrors")
+    raise TransientHandoffError("physical ZIP missing or changed on this device and mirrors")
 
 
 def provider_job(post: Callable[[dict[str, Any]], Mapping[str, Any]], job_id: str) -> tuple[dict, dict]:
@@ -151,20 +155,20 @@ def provider_job(post: Callable[[dict[str, Any]], Mapping[str, Any]], job_id: st
         or job.get("reason") != "source_linked_successor_from_verified_historical_IAE"
         or (job.get("decisionx") or {}).get("reasoning_effort") != "xhigh"
         or not job.get("rhythm_tape_sha256")):
-        raise ValueError("completed historical-rhythm Chat-mode DecisionX job required")
+        raise TransientHandoffError("completed historical-rhythm Chat-mode DecisionX job required")
     cid = str(job.get("conversation_id") or "")
     evidence = job.get("effect_evidence") or []
     if not cid or not all(any(isinstance(row, Mapping) and row.get("kind") == kind and row.get("ref") == cid
                               for row in evidence)
                           for kind in ("provider_conversation", "central_conversation_readback")):
-        raise ValueError("provider turn and central readback not proven")
+        raise TransientHandoffError("provider turn and central readback not proven")
     if not any(isinstance(row, Mapping) and row.get("kind") == "provider_observed_native_exec"
                and row.get("raw_stream_sha256") for row in evidence):
         raise InvalidProviderDeliverable("successful provider-native container execution not observed")
     read = post({"operation": "read", "provider": "chatgpt.com", "conversation_id": cid})
     central = read.get("conversation") or {}
     if not read.get("ok") or central.get("conversation_id") != cid or central.get("provider") != "chatgpt.com":
-        raise ValueError("exact provider conversation not independently reread")
+        raise TransientHandoffError("exact provider conversation not independently reread")
     if not any(isinstance(row, Mapping) and row.get("role") == "assistant"
                and row.get("source_content_complete") is True and str(row.get("content") or "").strip()
                for row in central.get("events") or []):
@@ -174,13 +178,16 @@ def provider_job(post: Callable[[dict[str, Any]], Mapping[str, Any]], job_id: st
 
 def verify_shared_gates(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, minimum: int = 500) -> dict:
     root = load(HERE / "cognilode-root-plan-handoff", "dx_advice_stock_census")
-    stock = root.shared_stock_census(post, minimum=minimum)
+    try:
+        stock = root.shared_stock_census(post, minimum=minimum)
+    except ValueError as exc:
+        raise TransientHandoffError("shared Drive stock read unavailable") from exc
     if not stock.get("multi_year_ready"):
-        raise ValueError("complete Drive-verified multi-year conversation stock below threshold")
+        raise TransientHandoffError("complete Drive-verified multi-year conversation stock below threshold")
     index = post({"operation": "decisionx_candidates", "q": "agent", "limit": 1})
     if (not index.get("ok") or index.get("ready") is not True
         or int(index.get("distinct_sources") or 0) < minimum):
-        raise ValueError("shared DecisionX descriptor index below threshold")
+        raise TransientHandoffError("shared DecisionX descriptor index below threshold")
     return {"complete_drive_sources": stock["distinct_complete"],
             "multi_year_span_days": stock["span_days"],
             "descriptor_sources": int(index["distinct_sources"])}
@@ -286,7 +293,7 @@ def verify_output(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapp
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
             continue
     if not mirrored:
-        raise ValueError("returned ZIP shared mirror failed independent SHA readback")
+        raise TransientHandoffError("returned ZIP shared mirror failed independent SHA readback")
     path = stage_zip(artifacts[0], stage_remote=stage_remote)
     try:
         with zipfile.ZipFile(path) as archive:
@@ -328,12 +335,12 @@ def verify_output(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapp
     target_job_result = post({"operation": "get_job", "job_id": target_id})
     target_job = target_job_result.get("job") or {}
     if not target_job_result.get("ok") or target_job.get("id") != target_id:
-        raise ValueError("target D1 job read unavailable")
+        raise TransientHandoffError("target D1 job read unavailable")
     target_read = post({"operation": "read", "provider": target_job.get("provider"),
                         "conversation_id": target_job.get("conversation_id")})
     target = target_read.get("conversation") or {}
     if not target_read.get("ok"):
-        raise ValueError("target shared conversation read unavailable")
+        raise TransientHandoffError("target shared conversation read unavailable")
     if (target_job.get("state") != "complete"
         or (target.get("provider"), target.get("conversation_id")) !=
            (target_job.get("provider"), target_job.get("conversation_id"))
@@ -429,7 +436,10 @@ def handoff(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, job_id: str,
     if install is None:
         root = load(HERE / "cognilode-root-plan-handoff", "dx_advice_taskflow_installer")
         install = root.install_taskflow
-    committed = commit_and_install(plan, job=job, output_root=output_root, install=install)
+    try:
+        committed = commit_and_install(plan, job=job, output_root=output_root, install=install)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise TransientHandoffError("TaskFlow plan commit or installer not yet verified") from exc
     return {"ok": True, "provider_requests_created": 0, "job_id": job_id,
             "provider_conversation_id": job["conversation_id"],
             "work_product_sha256": artifact_sha,
@@ -479,6 +489,19 @@ def tick(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, job_id: str,
     if job.get("state") != "complete":
         return {"ok": True, "phase": "waiting_provider", "job_id": job_id,
                 "job_state": job.get("state"), "provider_requests_created": 0}
+    rejection_id = "decisionx.handoff_rejected." + digest(job_id.encode())
+    rejection_read = post({"operation": "read_segment", "segment_id": rejection_id})
+    existing_rejection = rejection_read.get("segment") or {}
+    if (rejection_read.get("ok") and existing_rejection.get("segment_id") == rejection_id
+        and existing_rejection.get("kind") == "decisionx_handoff_rejection"
+        and (existing_rejection.get("metadata") or {}).get("job_id") == job_id):
+        return {"ok": False, "phase": "provider_result_rejected", "job_id": job_id,
+                "conversation_id": job.get("conversation_id"),
+                "rejection_segment_id": rejection_id,
+                "reason": (existing_rejection.get("metadata") or {}).get("reason"),
+                "provider_requests_created": 0}
+    if rejection_read.get("error") not in {None, "segment_not_found"}:
+        raise TransientHandoffError("shared rejection receipt read unavailable")
     marker = state_root / (digest(job_id.encode())[:24] + ".json")
     if marker.is_file():
         try:
@@ -505,6 +528,46 @@ def tick(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, job_id: str,
                 "conversation_id": job.get("conversation_id"),
                 "rejection_segment_id": segment_id, "reason": str(exc),
                 "provider_requests_created": 0}
+    except TransientHandoffError:
+        raise
+    except ValueError as exc:
+        # Some completed-job validation failures might reflect a delayed D1
+        # projection. Require three separated observations of the same failure
+        # before a new provider job can be scheduled, and record the decision
+        # centrally so another device sees the same retry cause.
+        state_root.mkdir(parents=True, exist_ok=True)
+        retry_path = state_root / (digest(job_id.encode())[:24] + ".validation.json")
+        reason = str(exc)[:500]
+        reason_sha = digest(reason.encode())
+        now = datetime.now(timezone.utc)
+        prior = json.loads(retry_path.read_text(encoding="utf-8")) if retry_path.is_file() else {}
+        count = int(prior.get("count") or 0) if prior.get("reason_sha256") == reason_sha else 0
+        previous_at = None
+        try:
+            previous_at = datetime.fromisoformat(str(prior.get("last_counted_at") or "").replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        if previous_at is None or (now - previous_at).total_seconds() >= 1800:
+            count += 1
+            counted_at = now.isoformat()
+        else:
+            counted_at = prior["last_counted_at"]
+        value = {"schema": "cognilode.decisionx.handoff_validation_retry.v1",
+                 "job_id": job_id, "reason_sha256": reason_sha, "reason": reason,
+                 "count": count, "last_counted_at": counted_at}
+        temp = retry_path.with_suffix(".next")
+        temp.write_bytes(canonical(value))
+        os.replace(temp, retry_path)
+        if count < 3:
+            return {"ok": False, "phase": "validation_retry", "job_id": job_id,
+                    "reason": reason, "observations": count,
+                    "provider_requests_created": 0}
+        receipt_reason = "handoff_validation_unrecoverable: " + reason
+        segment_id = record_rejection(post, job, receipt_reason)
+        return {"ok": False, "phase": "provider_result_rejected", "job_id": job_id,
+                "conversation_id": job.get("conversation_id"),
+                "rejection_segment_id": segment_id, "reason": receipt_reason,
+                "observations": count, "provider_requests_created": 0}
     info = installed["secretary_taskflow_installation"]
     marker_value = {"schema": "cognilode.decisionx.successor_handoff.v1",
                     "job_id": job_id, "plan_path": installed["plan_path"],

@@ -64,6 +64,7 @@ SAFE_PREPARE_SERVER_RETRIES = 2
 SAFE_404_RETRIES = 1
 SAFE_RECONCILE_POLLS = 4
 MAX_RETRY_AFTER_SECONDS = 900.0
+MAX_RETURNED_ARTIFACT_BYTES = 2_500_000_000
 
 
 def _retry_after_seconds(headers: dict | None, *, now: float | None = None) -> float:
@@ -1231,24 +1232,49 @@ def download_interpreter_artifacts(
         download_url = str(metadata.get("download_url") or "").strip()
         if not download_url.startswith("https://"):
             raise CapabilityError("provider_download_failed", f"download metadata omitted HTTPS URL for {sandbox_path}")
-        response = session.get(download_url, headers=headers, timeout=180)
+        response = session.get(download_url, headers=headers, timeout=1800, stream=True)
         if response.status_code >= 300:
-            raise CapabilityError("provider_download_failed", f"artifact download HTTP {response.status_code}: {response.text[:500]}")
-        raw = response.content
+            detail = str(getattr(response, "text", "") or "")[:500]
+            _safe_close(response)
+            raise CapabilityError("provider_download_failed", f"artifact download HTTP {response.status_code}: {detail}")
+        length = next((str(value) for key, value in
+                       (getattr(response, "headers", {}) or {}).items()
+                       if str(key).lower() == "content-length"), "")
+        if length.isdigit() and int(length) > MAX_RETURNED_ARTIFACT_BYTES:
+            _safe_close(response)
+            raise CapabilityError("provider_download_too_large", "provider artifact exceeds result limit")
         destination.parent.mkdir(parents=True, exist_ok=True)
         temp_destination = destination.with_name(destination.name + ".part")
-        with temp_destination.open("wb") as handle:
-            handle.write(raw)
-            handle.flush()
-            os.fsync(handle.fileno())
-        temp_destination.replace(destination)
+        temp_destination.unlink(missing_ok=True)
+        size = 0
+        digest = hashlib.sha256()
+        try:
+            with temp_destination.open("xb") as handle:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    size += len(chunk)
+                    if size > MAX_RETURNED_ARTIFACT_BYTES:
+                        raise CapabilityError("provider_download_too_large", "provider artifact exceeds result limit")
+                    handle.write(chunk)
+                    digest.update(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if not size or (length.isdigit() and size != int(length)):
+                raise CapabilityError("provider_download_incomplete", "provider artifact length differs")
+            temp_destination.replace(destination)
+        except Exception:
+            temp_destination.unlink(missing_ok=True)
+            raise
+        finally:
+            _safe_close(response)
         downloads.append({
             "name": destination.name,
             "source_name": name,
             "sandbox_path": sandbox_path,
             "path": str(destination),
-            "size": len(raw),
-            "sha256": hashlib.sha256(raw).hexdigest(),
+            "size": size,
+            "sha256": digest.hexdigest(),
             "source": "chatgpt_interpreter_download",
         })
     return downloads

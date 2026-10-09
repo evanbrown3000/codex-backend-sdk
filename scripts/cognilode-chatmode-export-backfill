@@ -498,6 +498,9 @@ def run(url_file: Path, *, maximum: int, state_root: Path = STATE_ROOT) -> dict:
             source = replacement
             url = candidate
             old_pending = archived_drive_lag(state_root)
+        if state is not None and (state.get("archive_etag") != source.etag or
+                                  state.get("archive_bytes") != source.size):
+            raise RuntimeError("new archive identity requires prior cursor reconciliation")
         if state is None and old_pending >= PENDING_HIGH_WATER:
             return {"state": "drive_lag_backpressure", "pending_drive": old_pending,
                     "archived_pending_drive": old_pending,
@@ -525,10 +528,7 @@ def run(url_file: Path, *, maximum: int, state_root: Path = STATE_ROOT) -> dict:
             maximum = min(maximum, PENDING_HIGH_WATER - lag["pending_drive"])
         else:
             maximum = min(maximum, PENDING_HIGH_WATER - old_pending)
-        if state is not None:
-            if state.get("archive_etag") != source.etag or state.get("archive_bytes") != source.size:
-                raise RuntimeError("new archive identity requires prior cursor reconciliation")
-        else:
+        if state is None:
             state = {"schema": "cognilode.chatmode.privacy_export_backfill.v1",
                      "archive_etag": source.etag, "archive_bytes": source.size,
                      "last_completed_shard": None, "next_shard": None, "position": 0,

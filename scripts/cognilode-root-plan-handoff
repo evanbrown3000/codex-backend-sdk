@@ -26,6 +26,7 @@ HERE = Path(__file__).resolve().parent
 SENDER = HERE / "cognilode-b4pt0r-chatmode"
 CONTROLLER = HERE / "cognilode-taskflow-phase-controller"
 INSTALLER = HERE / "cognilode-taskflow-install-project"
+QUEUE_WORKER = HERE / "cognilode-chatmode-queue-worker"
 BEGIN = "COGNILODE_ROOT_TASKFLOW_PLAN_JSON_BEGIN"
 END = "COGNILODE_ROOT_TASKFLOW_PLAN_JSON_END"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -128,7 +129,8 @@ def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, 
 
 
 def verify_root_memory_packet(job: Mapping[str, Any], central: Mapping[str, Any],
-                              stock: Mapping[str, Any], *, minimum: int = 500) -> str:
+                              stock: Mapping[str, Any], *, minimum: int = 500,
+                              stage_remote: Callable[[str, str], Path] | None = None) -> str:
     """Ensure the root actually received multi-layer memory from the shared stock."""
     expected_refs = {(str(row["provider"]), str(row["conversation_id"]),
                       str(row["prompt_sha256"]), str(row["response_sha256"]))
@@ -139,9 +141,21 @@ def verify_root_memory_packet(job: Mapping[str, Any], central: Mapping[str, Any]
             continue
         path = Path(str(attachment["ref"])[5:])
         digest = str(attachment.get("sha256") or "")
-        if (not HEX64.fullmatch(digest) or not path.is_file()
-            or sha256(path.read_bytes()).hexdigest() != digest
+        if (not HEX64.fullmatch(digest)
             or not any(isinstance(row, Mapping) and row.get("sha256") == digest for row in uploads)):
+            continue
+        if not path.is_file() or sha256(path.read_bytes()).hexdigest() != digest:
+            if stage_remote is None:
+                stage_remote = _load(QUEUE_WORKER, "root_plan_attachment_stager")._stage_remote_attachment
+            for mirror in attachment.get("mirrors") or []:
+                try:
+                    candidate = stage_remote(str(mirror), digest)
+                    if candidate.is_file() and sha256(candidate.read_bytes()).hexdigest() == digest:
+                        path = candidate
+                        break
+                except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                    continue
+        if not path.is_file() or sha256(path.read_bytes()).hexdigest() != digest:
             continue
         try:
             with zipfile.ZipFile(path) as archive:

@@ -181,6 +181,15 @@ class RootPlanHandoffTests(unittest.TestCase):
             self.assertEqual(source.stdout, installed[0][0].read_text())
             self.assertEqual(result["provider_requests_created"], 0)
             self.assertEqual(result["root_memory_packet_sha256"], packet_sha)
+            job["attachment_refs"][0]["ref"] = "file:/missing/on/other-device/root-memory.zip"
+            mirror = "s3://private-bucket/taskflow-artifacts/sha256/" + packet_sha + ".zip"
+            job["attachment_refs"][0]["mirrors"] = [mirror]
+            used = []
+            staged = bridge.verify_root_memory_packet(job, central,
+                bridge.shared_stock_census(d1, minimum=2), minimum=2,
+                stage_remote=lambda url, digest: (used.append((url, digest)) or packet))
+            self.assertEqual(staged, packet_sha)
+            self.assertEqual(used, [(mirror, packet_sha)])
             central["provider_structured_uploads"] = []
             with self.assertRaises(ValueError):
                 bridge.handoff(d1, job_id="root-job", output_root=Path(directory),

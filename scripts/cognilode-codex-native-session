@@ -116,6 +116,64 @@ def register(args: argparse.Namespace) -> dict[str, Any]:
     return result
 
 
+def activate(args: argparse.Namespace) -> dict[str, Any]:
+    """Hash actual release/evidence bytes before lifting the provisional gate."""
+    locator = post({"operation":"get_codex_native_session","session_id":args.session_id})
+    if not locator.get("ok"):
+        return locator
+    session = locator["session"]
+    if session.get("environment_id") != args.environment_id:
+        raise ValueError("native release belongs to another environment")
+    paths = (args.binary_path,args.instruction_bundle_path,args.system_instructions_path,
+             args.developer_instructions_path,args.release_manifest_path,
+             args.behavior_receipt_path)
+    if any(not path.is_absolute() or not path.is_file() for path in paths):
+        raise ValueError("native release evidence path missing or relative")
+    if os.environ.get("COGNILODE_REMOTE_ENVIRONMENT_ID") not in (None,args.environment_id):
+        raise ValueError("local environment ID differs from native release host")
+    binary_sha = sha(args.binary_path)
+    bundle_sha = sha(args.instruction_bundle_path)
+    system_sha = sha(args.system_instructions_path)
+    developer_sha = sha(args.developer_instructions_path)
+    release_text = args.release_manifest_path.read_text(encoding="utf-8")
+    behavior_text = args.behavior_receipt_path.read_text(encoding="utf-8")
+    try:
+        release = json.loads(release_text)
+        behavior = json.loads(behavior_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("native instruction release evidence is malformed") from exc
+    if (release.get("schema") != "cognilode.codex.native_instruction_release.v1"
+        or release.get("binary_sha256") != binary_sha
+        or release.get("bundle_sha256") != bundle_sha
+        or release.get("system_sha256") != system_sha
+        or release.get("developer_sha256") != developer_sha
+        or release.get("behavior_receipt_sha256") != sha(args.behavior_receipt_path)
+        or behavior.get("schema") != "cognilode.codex.native_instruction_behavior.v1"
+        or behavior.get("binary_sha256") != binary_sha
+        or behavior.get("system_replacement_observed") is not True
+        or behavior.get("developer_replacement_observed") is not True
+        or behavior.get("same_session_resume_observed") is not True
+        or not UUID.fullmatch(str(behavior.get("observed_session_id") or ""))):
+        raise ValueError("native instruction release bytes do not support activation")
+    if binary_sha != session.get("binary_sha256") or not session.get("source_admitted"):
+        raise ValueError("registered native binary or central source is not verified")
+    proof = {"schema":"cognilode.codex.native_instruction_release.v1",
+             "binary_sha256":binary_sha,"bundle_sha256":bundle_sha,
+             "system_sha256":system_sha,"developer_sha256":developer_sha}
+    result = post({"operation":"activate_codex_native_instructions",
+        "session_id":args.session_id,"environment_id":args.environment_id,
+        "binary_sha256":binary_sha,"instruction_bundle_sha256":bundle_sha,
+        "instruction_release_sha256":sha(args.release_manifest_path),
+        "replacement_proof":proof,"release_manifest_text":release_text,
+        "behavior_receipt_text":behavior_text})
+    stored = result.get("session") or {}
+    if (not result.get("ok") or stored.get("instruction_status") != "release_verified"
+        or stored.get("instruction_release_sha256") != sha(args.release_manifest_path)
+        or stored.get("instruction_bundle_sha256") != bundle_sha):
+        raise ValueError("shared native instruction activation/readback differs")
+    return result
+
+
 def atomic_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
     with tempfile.NamedTemporaryFile("w",encoding="utf-8",dir=path.parent,
@@ -258,6 +316,15 @@ def main() -> int:
     reg.add_argument("--source-receipt-path",type=Path,required=True)
     reg.add_argument("--binary-path",type=Path,required=True)
     reg.add_argument("--instruction-bundle-path",type=Path,required=True)
+    activation=sub.add_parser("activate")
+    activation.add_argument("--session-id",required=True)
+    activation.add_argument("--environment-id",required=True)
+    activation.add_argument("--binary-path",type=Path,required=True)
+    activation.add_argument("--instruction-bundle-path",type=Path,required=True)
+    activation.add_argument("--system-instructions-path",type=Path,required=True)
+    activation.add_argument("--developer-instructions-path",type=Path,required=True)
+    activation.add_argument("--release-manifest-path",type=Path,required=True)
+    activation.add_argument("--behavior-receipt-path",type=Path,required=True)
     resolve=sub.add_parser("resolve")
     resolve.add_argument("--session-id",required=True)
     run=sub.add_parser("resume")
@@ -278,6 +345,7 @@ def main() -> int:
     timer.add_argument("--state-root",type=Path,default=DEFAULT_STATE)
     args=parser.parse_args()
     if args.command=="register": result=register(args)
+    elif args.command=="activate": result=activate(args)
     elif args.command=="resolve": result=post({"operation":"get_codex_native_session","session_id":args.session_id})
     elif args.command=="resume": result=resume(args)
     elif args.command=="confirm": result=confirm_result(args.result)

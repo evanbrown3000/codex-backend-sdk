@@ -6,7 +6,10 @@ session ID to that environment, rollout path, CLI stderr header, executable,
 and system/developer instruction bundle. Registration can be provisional while
 the shared D1/Drive conversation ingester catches up. The session becomes
 resumable only when D1 records the exact rollout SHA as a complete,
-Drive-verified `openai-codex` conversation.
+Drive-verified `openai-codex` conversation **and** a release activation binds
+the actual system/developer replacement files, modified binary, and another
+centrally observed same-session behavior test. A rollout-derived fingerprint
+alone leaves `instruction_status=provisional` and `resume_ready=false`.
 
 Register after the first native turn, using the real Codex CLI stderr and
 original JSONL (the first event must be matching `session_meta`):
@@ -20,6 +23,34 @@ scripts/cognilode-codex-native-session register \
   --binary-path /absolute/path/to/codex-cognilode \
   --instruction-bundle-path /absolute/path/to/instructions.json
 ```
+
+Once a modified Codex release has independently exercised both role
+replacements and a native same-session continuation, activate its instruction
+release on the registered host:
+
+```sh
+scripts/cognilode-codex-native-session activate \
+  --session-id SESSION_UUID --environment-id ENVIRONMENT_ID \
+  --binary-path /absolute/path/to/codex-cognilode \
+  --instruction-bundle-path /absolute/path/to/instructions.json \
+  --system-instructions-path /absolute/path/to/system.txt \
+  --developer-instructions-path /absolute/path/to/developer.txt \
+  --release-manifest-path /absolute/path/to/release.json \
+  --behavior-receipt-path /absolute/path/to/behavior.json
+```
+
+`release.json` must have schema
+`cognilode.codex.native_instruction_release.v1`, with SHA-256 fields
+`binary_sha256`, `bundle_sha256`, `system_sha256`, `developer_sha256`, and
+`behavior_receipt_sha256`. `behavior.json` must have schema
+`cognilode.codex.native_instruction_behavior.v1`, the exact binary hash,
+`system_replacement_observed=true`, `developer_replacement_observed=true`,
+`same_session_resume_observed=true`, an `observed_session_id` distinct from
+the target, `terminal_rollout_sha256`, and `initial_event_count`. The Site
+independently requires that observed session's terminal rollout and increased
+event count in D1/Drive before accepting activation. The CLI hashes the
+actual local files and sends their exact release/evidence bytes; free-form
+digest claims are insufficient.
 
 On that same environment, resume with an operation ID that is stable across
 retries. The local script verifies all registered hashes and the environment

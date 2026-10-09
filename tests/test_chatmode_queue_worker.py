@@ -228,6 +228,31 @@ def test_decisionx_batch_waits_for_500_drive_verified_multi_year_sources(tmp_pat
     assert json.loads((tmp_path / 'scan.json').read_text())['spool'] == []
 
 
+def test_decisionx_does_not_keep_allocating_turns_before_native_batch_admission(tmp_path):
+    module = worker()
+    module.DX_HOME = tmp_path
+    module._dx_stock_snapshot = lambda: {
+        'multi_year_ready': True, 'distinct_complete': 500, 'span_days': 730,
+        'verified_source_refs': [{'provider': 'openai-codex',
+                                  'conversation_id': f'c-{i}'} for i in range(500)]}
+    module._dx_retire_completed_inputs = lambda: 0
+    class Sender:
+        @staticmethod
+        def operator_memory_post(body):
+            assert body['operation'] == 'get_job'
+            return {'ok': True, 'job': {'state': 'queued'}}
+    module.sender = Sender()
+    with module._dx_connection() as db:
+        for i in range(module.DX_MAX_UNADMITTED_BATCHES):
+            db.execute("INSERT INTO episodes(id,source_sha,state,attempts,retry_after,batch,updated) "
+                       "VALUES(?,?,'queued',1,0,?,0)",
+                       (f'e-{i}', 'a'*64, f'batch-{i}'))
+    module.decisionx_batch_pump()
+    assert (tmp_path / 'scan.json').exists()
+    with module._dx_connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM episodes").fetchone()[0] == module.DX_MAX_UNADMITTED_BATCHES
+
+
 def test_decisionx_ready_stock_enqueues_one_xhigh_chatmode_job_with_full_source_zip(tmp_path):
     module = worker()
     module.DX_HOME = tmp_path

@@ -162,6 +162,7 @@ services:
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
       COGNILODE_CODEX_SOURCE_COMMIT: 852bc2da4479b353913c894a9ecfc65a9d8764c8
       COGNILODE_CODEX_INSTALL_ROOT: /codex
+      COGNILODE_BUILDER_GENERATION: git-safe-directory-v1
       CARGO_TARGET_DIR: /cargo-target
       CARGO_BUILD_JOBS: "4"
     volumes:

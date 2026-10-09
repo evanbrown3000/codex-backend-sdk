@@ -55,6 +55,31 @@ def _verified_codex_drive_join(capture: dict, conversation_id: str) -> bool:
     )
 
 
+def _verified_historical_drive_join(capture: dict, conversation_id: str,
+                                    event_count: int) -> bool:
+    """Keep imported export-format text distinct from authenticated live turns."""
+    source_sha = capture.get("source_sha256")
+    return bool(
+        capture.get("source_kind") == "historical_s3_rendered"
+        and capture.get("source_provenance") == "chatgpt_export_render_format_unverified_origin"
+        and capture.get("source_complete") is True
+        and capture.get("source_response_complete") is True
+        and capture.get("drive_verified") is True
+        and isinstance(source_sha, str) and SHA256_RE.fullmatch(source_sha)
+        and capture.get("drive_source_sha256") == source_sha
+        and isinstance(capture.get("s3_compressed_sha256"), str)
+        and SHA256_RE.fullmatch(capture["s3_compressed_sha256"])
+        and isinstance(capture.get("drive_object_sha256"), str)
+        and SHA256_RE.fullmatch(capture["drive_object_sha256"])
+        and isinstance(capture.get("drive_readback_rows_sha256"), str)
+        and SHA256_RE.fullmatch(capture["drive_readback_rows_sha256"])
+        and isinstance(capture.get("drive_verified_at"), str)
+        and bool(capture["drive_verified_at"].strip())
+        and capture.get("drive_conversation_id") == conversation_id
+        and capture.get("source_event_count") == event_count
+    )
+
+
 def _load_script(path: Path, name: str) -> Any:
     if not path.is_file():
         raise FileNotFoundError(f"conversation reader unavailable: {path}")
@@ -173,7 +198,7 @@ def read_conversation(provider: str, conversation_id: str, *, drive_reader: Path
                 "source": "s3_dynamodb_historical_stock", "events": events,
                 "coverage": result["coverage"], "all_provider_events_known": False,
                 "source_receipt": result["source_receipt"], "rendered_sha256": result["rendered_sha256"]}
-    if provider in {"chatgpt", "chatgpt.com", "gemini.com", "anthropic.com", "claude.com", "codex-d1"}:
+    if provider in {"chatgpt", "chatgpt.com", "chatgpt-export-format", "gemini.com", "anthropic.com", "claude.com", "codex-d1"}:
         hosted_provider = ({"chatgpt": "chatgpt.com", "codex-d1": "openai-codex"}.get(provider, provider))
         sender = _load_script(HERE / "cognilode-b4pt0r-chatmode", "cognilode_conversation_sender_read")
         result = sender.operator_memory_post({
@@ -195,6 +220,9 @@ def read_conversation(provider: str, conversation_id: str, *, drive_reader: Path
             })
         d1_codex = provider == "codex-d1"
         capture = conversation.get("capture") or {}
+        historical_export = provider == "chatgpt-export-format"
+        if historical_export and not _verified_historical_drive_join(capture, conversation_id, len(raw)):
+            raise ValueError("historical export-format D1 source or Drive join is incomplete")
         if d1_codex and not (
             _verified_codex_drive_join(capture, conversation_id)
             or (capture.get("source_kind") == "codex_rollout"
@@ -208,16 +236,19 @@ def read_conversation(provider: str, conversation_id: str, *, drive_reader: Path
             events, coverage = _codex_d1_messages(raw, capture)
             if capture.get("drive_verified") is True:
                 coverage = coverage.replace("drive_unverified", "drive_verified")
+        elif historical_export:
+            coverage = "complete_imported_render_drive_verified_origin_unverified"
         return {"provider": hosted_provider, "conversation_id": conversation_id,
-                "source": (("hosted_d1_codex_drive_verified" if capture.get("drive_verified") is True
-                            else "hosted_d1_codex_interim") if d1_codex else "hosted_conversation_service"),
+                "source": ("historical_export_format_d1_drive_verified" if historical_export else
+                           (("hosted_d1_codex_drive_verified" if capture.get("drive_verified") is True
+                             else "hosted_d1_codex_interim") if d1_codex else "hosted_conversation_service")),
                 "events": events,
                 # This store certifies the admitted prompt/response hashes, but
                 # does not claim that every provider-side branch was ingested.
                 "coverage": coverage,
-                "all_provider_events_known": (False if d1_codex else all(row.get("source_content_complete") is True
+                "all_provider_events_known": (False if d1_codex or historical_export else all(row.get("source_content_complete") is True
                                                  for row in raw)),
-                **({"source_receipt": capture} if d1_codex else {})}
+                **({"source_receipt": capture} if d1_codex or historical_export else {})}
 
     if provider in {"codex", "openai-codex", "modified_codex", "modified-codex"}:
         # The Drive reader shares the installed Memory Stock reconciliation

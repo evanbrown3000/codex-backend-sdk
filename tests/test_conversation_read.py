@@ -295,6 +295,38 @@ class ConversationDeltaTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "identity mismatch"):
                 reader.read_conversation("gemini.com", "g-1")
 
+    def test_imported_chatgpt_export_read_keeps_unverified_origin_and_drive_fence(self):
+        cid = "8452f74b-bf54-400b-9626-ba99c4578fd6"
+        capture = {"source_kind": "historical_s3_rendered",
+                   "source_provenance": "chatgpt_export_render_format_unverified_origin",
+                   "source_complete": True, "source_response_complete": True,
+                   "source_sha256": "a" * 64, "drive_source_sha256": "a" * 64,
+                   "s3_compressed_sha256": "b" * 64,
+                   "drive_object_sha256": "c" * 64,
+                   "drive_readback_rows_sha256": "d" * 64,
+                   "drive_verified": True, "drive_verified_at": "2026-10-09T10:00:00Z",
+                   "drive_conversation_id": cid, "source_event_count": 2}
+        conversation = {"provider": "chatgpt-export-format", "conversation_id": cid,
+                        "capture": capture, "events": [
+                            {"id": "u1", "role": "user", "content": "question",
+                             "created_at": "2024-09-04T04:28:11Z"},
+                            {"id": "a1", "role": "assistant", "content": "answer",
+                             "created_at": "2024-09-04T04:28:12Z"}]}
+        sender = mock.Mock()
+        sender.operator_memory_post.return_value = {"conversation": conversation}
+        with mock.patch.object(reader, "_load_script", return_value=sender):
+            full = reader.read_conversation("chatgpt-export-format", cid)
+            self.assertEqual(full["source"], "historical_export_format_d1_drive_verified")
+            self.assertEqual(full["events"][0]["occurred_at_utc"], "2024-09-04T04:28:11Z")
+            self.assertFalse(full["all_provider_events_known"])
+            self.assertIn("origin_unverified", full["coverage"])
+            self.assertEqual(full["source_receipt"], capture)
+            sender.operator_memory_post.assert_called_with(
+                {"operation": "read", "provider": "chatgpt-export-format", "conversation_id": cid})
+            capture["drive_source_sha256"] = "e" * 64
+            with self.assertRaisesRegex(ValueError, "Drive join is incomplete"):
+                reader.read_conversation("chatgpt-export-format", cid)
+
     def test_codex_d1_interim_is_explicitly_drive_unverified(self):
         conversation = {"provider": "openai-codex", "conversation_id": "c-1",
                         "capture": {"source_kind": "codex_rollout", "source_sha256": "a" * 64,

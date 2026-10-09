@@ -47,6 +47,29 @@ def test_local_terminal_with_central_readback_needs_no_provider_read(tmp_path, m
     assert json.loads((tmp_path / f"{stem}.collected.json").read_text())["complete"] is True
 
 
+def test_completed_local_receipt_upgrades_tool_history_without_provider_read(tmp_path, monkeypatch):
+    stem = 'b4pt0r-chatmode-upgrade'
+    raw = tmp_path / f'{stem}.sse'
+    raw.write_text('provider stream')
+    receipt_path = tmp_path / f'{stem}.sse.receipt.json'
+    receipt_path.write_text(json.dumps({'user_message_id':'user-id','raw_path_host':str(raw)}))
+    collected = tmp_path / f'{stem}.collected.json'
+    collected.write_text(json.dumps({'complete':True,'prompt':'Do the work','result':{
+        'terminal_assistant_text':'Done','raw_sha256':'a'*64,
+        'central_conversation_store':{'ok':True,'central_readback_verified':True}}}))
+    monkeypatch.setattr(collector, 'get_conversation', lambda *args: pytest.fail('provider read was attempted'))
+    observed = []
+    def admit(**kwargs):
+        observed.append(kwargs)
+        return {'ok':True,'central_readback_verified':True,'central_tool_event_count':2}
+    monkeypatch.setattr(collector.sender, 'admit_central_conversation', admit)
+    result = collector.collect(receipt_path, allow_provider_read=False)
+    assert result['state'] == 'central_tool_history_upgraded'
+    assert observed[0]['result']['raw_path_host'] == str(raw)
+    assert json.loads(collected.read_text())['result']['central_conversation_store']['central_tool_event_count'] == 2
+    assert collector.collect(receipt_path, allow_provider_read=False)['state'] == 'already_collected'
+
+
 def test_local_terminal_rejects_tampered_artifact(tmp_path):
     stem = "b4pt0r-chatmode-tampered"
     receipt_path = tmp_path / f"{stem}.sse.receipt.json"

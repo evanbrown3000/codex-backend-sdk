@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Exchange one pinned Codex release through private S3 custody.
+
+The large Rust build runs only on a capable environment. Smaller identical
+company containers install the content-verified release from the same pin.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import subprocess
+import tempfile
+import time
+
+
+PIN = os.environ["COGNILODE_CODEX_SOURCE_COMMIT"]
+if not re.fullmatch(r"[0-9a-f]{40}", PIN):
+    raise ValueError("Codex source pin must be a full Git commit")
+ROOT = Path(os.environ.get("COGNILODE_CODEX_INSTALL_ROOT", "/codex"))
+BUCKET = os.environ.get("COGNILODE_CODEX_RELEASE_BUCKET",
+                        "cognilode-ephemeral-artifacts-362928919715-us-west-2")
+TARGET = f"{platform.system().lower()}-{platform.machine().lower()}"
+PREFIX = f"codex-releases/{PIN}/{TARGET}"
+RELEASE = ROOT / "releases" / PIN
+LOOKUP = ROOT / "metadata" / f"lookup-{PIN}-{TARGET}.json"
+
+
+def aws(*args: str, timeout: int = 120) -> subprocess.CompletedProcess:
+    binary = shutil.which("aws")
+    if not binary:
+        raise RuntimeError("AWS CLI is unavailable in company container")
+    return subprocess.run([binary, "s3api", *args], capture_output=True,
+                          text=True, timeout=timeout, check=False)
+
+
+def digest(path: Path) -> str:
+    value = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            value.update(chunk)
+    return value.hexdigest()
+
+
+def checksum(hexdigest: str) -> str:
+    return base64.b64encode(bytes.fromhex(hexdigest)).decode("ascii")
+
+
+def marker(state: str) -> None:
+    LOOKUP.parent.mkdir(parents=True, exist_ok=True)
+    temporary = LOOKUP.with_name(LOOKUP.name + f".{os.getpid()}.tmp")
+    temporary.write_text(json.dumps({"pin": PIN, "target": TARGET,
+                                     "state": state, "at": time.time()}) + "\n")
+    temporary.replace(LOOKUP)
+
+
+def remote_manifest() -> dict | None:
+    with tempfile.TemporaryDirectory(prefix="codex-release-manifest-") as temporary:
+        path = Path(temporary) / "manifest.json"
+        result = aws("get-object", "--bucket", BUCKET, "--key", PREFIX + "/manifest.json",
+                     str(path), "--output", "json")
+        if result.returncode:
+            if "NoSuchKey" in result.stderr or "404" in result.stderr:
+                return None
+            raise RuntimeError("private Codex release manifest lookup failed")
+        value = json.loads(path.read_text(encoding="utf-8"))
+    if (value.get("schema") != "cognilode.codex-release.v1" or
+            value.get("source_commit") != PIN or value.get("target") != TARGET):
+        raise RuntimeError("private Codex release manifest identity mismatch")
+    for name in ("codex", "central-rollouts"):
+        item = value.get("files", {}).get(name, {})
+        if not re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256") or "")) or int(item.get("size") or 0) <= 0:
+            raise RuntimeError("private Codex release manifest is incomplete")
+    return value
+
+
+def link_release() -> None:
+    (ROOT / "bin").mkdir(parents=True, exist_ok=True)
+    for name in ("codex", "central-rollouts"):
+        temporary = ROOT / "bin" / ("." + name + "-next")
+        temporary.unlink(missing_ok=True)
+        temporary.symlink_to(f"../releases/{PIN}/{name}")
+        temporary.replace(ROOT / "bin" / name)
+
+
+def install_remote(manifest: dict) -> None:
+    if RELEASE.joinpath("codex").is_file() and RELEASE.joinpath("central-rollouts").is_file():
+        link_release()
+        return
+    RELEASE.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".download-", dir=RELEASE.parent) as temporary:
+        stage = Path(temporary) / "release"
+        stage.mkdir()
+        for name in ("codex", "central-rollouts"):
+            path = stage / name
+            result = aws("get-object", "--bucket", BUCKET, "--key", PREFIX + "/" + name,
+                         str(path), "--output", "json", timeout=1800)
+            expected = manifest["files"][name]
+            if result.returncode or not path.is_file() or path.stat().st_size != expected["size"] or digest(path) != expected["sha256"]:
+                raise RuntimeError("private Codex release download checksum mismatch")
+            path.chmod(0o755)
+        (stage / "source-commit").write_text(PIN + "\n")
+        (stage / "SHA256SUMS").write_text("".join(
+            f"{manifest['files'][name]['sha256']}  {name}\n" for name in ("codex", "central-rollouts")))
+        if not RELEASE.exists():
+            stage.rename(RELEASE)
+    link_release()
+    print(f"Codex release installed from private custody {PIN}", flush=True)
+
+
+def publish_local() -> None:
+    files = {name: RELEASE / name for name in ("codex", "central-rollouts")}
+    if not all(path.is_file() for path in files.values()):
+        return
+    manifest = {"schema": "cognilode.codex-release.v1", "source_commit": PIN,
+                "target": TARGET, "files": {name: {"sha256": digest(path), "size": path.stat().st_size}
+                                          for name, path in files.items()}}
+    existing = remote_manifest()
+    if existing:
+        if existing != manifest:
+            raise RuntimeError("immutable private Codex release differs from local build")
+        return
+    for name, path in files.items():
+        hexdigest = manifest["files"][name]["sha256"]
+        result = aws("put-object", "--bucket", BUCKET, "--key", PREFIX + "/" + name,
+                     "--body", str(path), "--server-side-encryption", "AES256",
+                     "--checksum-sha256", checksum(hexdigest), "--metadata", "sha256=" + hexdigest,
+                     timeout=1800)
+        if result.returncode:
+            raise RuntimeError("private Codex release binary publication failed")
+    with tempfile.TemporaryDirectory(prefix="codex-release-publish-") as temporary:
+        path = Path(temporary) / "manifest.json"
+        path.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
+        result = aws("put-object", "--bucket", BUCKET, "--key", PREFIX + "/manifest.json",
+                     "--body", str(path), "--server-side-encryption", "AES256",
+                     "--content-type", "application/json")
+        if result.returncode:
+            raise RuntimeError("private Codex release manifest publication failed")
+    if remote_manifest() != manifest:
+        raise RuntimeError("private Codex release manifest readback mismatch")
+    print(f"Codex release published to private custody {PIN}", flush=True)
+
+
+def run_once() -> None:
+    if LOOKUP.is_file():
+        try:
+            previous = json.loads(LOOKUP.read_text())
+            if (previous.get("pin") == PIN and previous.get("target") == TARGET and
+                    previous.get("state") in ("local-ready", "downloaded") and
+                    time.time() - float(previous.get("at", 0)) < 86400 and
+                    RELEASE.joinpath("codex").is_file() and
+                    RELEASE.joinpath("central-rollouts").is_file()):
+                return
+        except (OSError, ValueError, TypeError):
+            pass
+    if RELEASE.joinpath("codex").is_file() and RELEASE.joinpath("central-rollouts").is_file():
+        publish_local()
+        link_release()
+        marker("local-ready")
+        return
+    manifest = remote_manifest()
+    if manifest:
+        install_remote(manifest)
+        marker("downloaded")
+    else:
+        marker("missing")
+
+
+if __name__ == "__main__":
+    while True:
+        try:
+            run_once()
+        except Exception as error:
+            marker("unavailable")
+            print(f"Codex release custody pending: {type(error).__name__}: {error}", flush=True)
+        time.sleep(max(60, int(os.environ.get("COGNILODE_CODEX_CUSTODY_INTERVAL", "300"))))

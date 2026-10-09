@@ -317,6 +317,7 @@ class RootPlanHandoffTests(unittest.TestCase):
             self.assertEqual(verified, [{"A"}, {"A"}])
             self.assertEqual(result["phase"], "await_root")
             self.assertEqual(result["root_job_id"], again["root_job_id"])
+            self.assertEqual(result["root_job_kind"], "outcome_successor")
             self.assertEqual(sum(row["operation"] == "enqueue_job" for row in called), 1)
             successor = saved[result["root_job_id"]]
             self.assertEqual(successor["provider"], "chatgpt.com")
@@ -327,6 +328,16 @@ class RootPlanHandoffTests(unittest.TestCase):
                 payload = json.loads(archive.read("OUTCOMES.json"))
                 self.assertEqual(payload["completed_outcomes"][0]["effect_job_id"], effect_id)
                 self.assertEqual(payload["prior_root_conversation"]["conversation_id"], "root-chat")
+            retry_state = dict(state, prior_root_job_id="root-job",
+                               root_job_id=result["root_job_id"])
+            with mock.patch.object(controller, "verify_completed_effects", return_value=None):
+                retried = bridge.enqueue_outcome_gated_successor(
+                    post, state=retry_state, output_root=root, controller=controller, cycle=cycle,
+                    publish=lambda row: "s3://private/" + row["sha256"] + ".zip", attempt=1)
+            self.assertNotEqual(retried["root_job_id"], result["root_job_id"])
+            self.assertEqual(retried["prior_root_job_id"], "root-job")
+            self.assertEqual(retried["root_attempt"], 1)
+            self.assertEqual(sum(row["operation"] == "enqueue_job" for row in called), 2)
 
     def test_handoff_does_not_write_or_send_from_tiny_stock(self):
         row = full("openai-codex", "only-one", 0)

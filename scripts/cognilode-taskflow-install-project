@@ -46,7 +46,12 @@ def prepare(args: argparse.Namespace) -> dict[str, str]:
         raise ValueError("AWS CLI is not executable")
     if not args.codex_bin.is_file() or not os.access(args.codex_bin, os.X_OK):
         raise ValueError("installed Codex binary is not executable")
-    state_root = args.state_root or Path.home() / ".local/share/cognilode/taskflow" / args.instance
+    # The research Codex employee runs with a workspace-write sandbox. Its
+    # manifest ZIP and receipt must therefore live under the project checkout.
+    project_root = args.plan.resolve().parent.parent
+    state_root = args.state_root or project_root / ".taskflow-state" / args.instance
+    if not state_root.expanduser().resolve().is_relative_to(project_root.resolve()):
+        raise ValueError("TaskFlow state root must be inside the project's Codex workspace")
     values = {
         "COGNILODE_TASKFLOW_PLAN": str(args.plan.resolve()),
         "COGNILODE_TASKFLOW_RESEARCH_EMPLOYEE": args.research_employee,

@@ -84,6 +84,68 @@ def test_missing_original_cli_header_cannot_create_a_new_codex_turn():
         sender.assert_not_called()
 
 
+def test_failed_multidevice_effect_waits_for_independent_chatgpt_device():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        binary = root / "codex"
+        binary.write_text("binary identity")
+        binary.chmod(0o700)
+        original_incomplete_run(root, binary)
+        (root / "EXTERNAL_EFFECT_RESULT.json").write_text(json.dumps({
+            "schema": "cognilode.taskflow.external_effect.v1",
+            "status": "failed", "effect_kind": "multi-device-chat-mode-failover",
+        }))
+        (root / "codex-resume-state.json").write_text(json.dumps({
+            "attempts": 1, "last_attempt_at": c.time.time(),
+            "state": "effect_unverified",
+        }))
+        plan = c.Plan("project", "Project", "a" * 64, "plan", (c.Step("STEP-1", "Effect", False, 0),))
+        sender = mock.Mock()
+        sender.operator_memory_post.return_value = {"gate": {"devices": [
+            {"id": "evanpc", "available": True, "chatgpt_eligible": True,
+             "network_route": "home"},
+            {"id": "evanpc-gemini", "available": True, "chatgpt_eligible": False,
+             "network_route": "home"},
+        ]}}
+        with mock.patch.object(c, "load_sender", return_value=sender), \
+             mock.patch.object(c.subprocess, "run") as codex:
+            result = c.resume_pending_codex_effect(
+                pending={"id": "tf-" + "1" * 40}, plan=plan, step=plan.steps[0],
+                run_dir=root, repo_path=root, receipt_path=root / "secretary_receipt.json",
+                work_sha256="b" * 64)
+            repeated = c.resume_pending_codex_effect(
+                pending={"id": "tf-" + "1" * 40}, plan=plan, step=plan.steps[0],
+                run_dir=root, repo_path=root, receipt_path=root / "secretary_receipt.json",
+                work_sha256="b" * 64)
+        assert result == repeated == {"state": "waiting_for_independent_chatgpt_device", "attempts": 1}
+        sender.operator_memory_post.assert_called_once_with({"operation": "rhythm_read"})
+        codex.assert_not_called()
+        assert json.loads((root / "codex-resume-state.json").read_text())["attempts"] == 1
+
+
+def test_unrelated_failed_effect_does_not_require_another_device():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        binary = root / "codex"
+        binary.write_text("binary identity")
+        binary.chmod(0o700)
+        original_incomplete_run(root, binary)
+        (root / "EXTERNAL_EFFECT_RESULT.json").write_text(json.dumps({
+            "schema": "cognilode.taskflow.external_effect.v1",
+            "status": "failed", "effect_kind": "deployment",
+        }))
+        plan = c.Plan("project", "Project", "a" * 64, "plan", (c.Step("STEP-1", "Effect", False, 0),))
+        with mock.patch.object(c, "load_sender") as sender, \
+             mock.patch.object(c.subprocess, "run", side_effect=subprocess.TimeoutExpired("codex", 1)) as codex:
+            result = c.resume_pending_codex_effect(
+                pending={"id": "tf-" + "1" * 40}, plan=plan, step=plan.steps[0],
+                run_dir=root, repo_path=root, receipt_path=root / "secretary_receipt.json",
+                work_sha256="b" * 64)
+        sender.assert_not_called()
+        codex.assert_called_once()
+        assert result["state"] == "ambiguous_resume"
+
+
 def test_pending_external_effect_keeps_original_revision_after_plan_rollover():
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)

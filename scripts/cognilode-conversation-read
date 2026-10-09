@@ -87,8 +87,8 @@ def read_conversation(provider: str, conversation_id: str, *, drive_reader: Path
                 "source": "s3_dynamodb_historical_stock", "events": events,
                 "coverage": result["coverage"], "all_provider_events_known": False,
                 "source_receipt": result["source_receipt"], "rendered_sha256": result["rendered_sha256"]}
-    if provider in {"chatgpt", "chatgpt.com", "gemini.com", "anthropic.com", "claude.com"}:
-        hosted_provider = "chatgpt.com" if provider == "chatgpt" else provider
+    if provider in {"chatgpt", "chatgpt.com", "gemini.com", "anthropic.com", "claude.com", "codex-d1"}:
+        hosted_provider = ({"chatgpt": "chatgpt.com", "codex-d1": "openai-codex"}.get(provider, provider))
         sender = _load_script(HERE / "cognilode-b4pt0r-chatmode", "cognilode_conversation_sender_read")
         result = sender.operator_memory_post({
             "operation": "read", "provider": hosted_provider, "conversation_id": conversation_id,
@@ -107,13 +107,21 @@ def read_conversation(provider: str, conversation_id: str, *, drive_reader: Path
                 "id": str(row.get("id") or index), "role": str(row.get("role") or "unknown"),
                 "text": row["content"], "occurred_at_utc": row.get("created_at") or "",
             })
+        d1_codex = provider == "codex-d1"
+        capture = conversation.get("capture") or {}
+        if d1_codex and (capture.get("source_kind") != "codex_rollout"
+                         or capture.get("drive_verified") is not False
+                         or not capture.get("source_sha256")):
+            raise ValueError("Codex D1 interim source receipt is incomplete")
         return {"provider": hosted_provider, "conversation_id": conversation_id,
-                "source": "hosted_conversation_service", "events": events,
+                "source": ("hosted_d1_codex_interim" if d1_codex else "hosted_conversation_service"),
+                "events": events,
                 # This store certifies the admitted prompt/response hashes, but
                 # does not claim that every provider-side branch was ingested.
-                "coverage": "admitted_events_only",
-                "all_provider_events_known": all(row.get("source_content_complete") is True
-                                                 for row in raw)}
+                "coverage": ("admitted_codex_rollout_events_drive_unverified" if d1_codex else "admitted_events_only"),
+                "all_provider_events_known": (False if d1_codex else all(row.get("source_content_complete") is True
+                                                 for row in raw)),
+                **({"source_receipt": capture} if d1_codex else {})}
 
     if provider in {"codex", "openai-codex", "modified_codex", "modified-codex"}:
         # The Drive reader shares the installed Memory Stock reconciliation

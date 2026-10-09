@@ -162,6 +162,33 @@ def test_reconcile_writes_normal_result_and_central_readback(monkeypatch, tmp_pa
     assert session.posts == 0
 
 
+def test_known_only_reconcile_never_falls_back_to_recent_index(monkeypatch, tmp_path):
+    mod = load_script("cognilode-b4pt0r-chatmode")
+    monkeypatch.setattr(mod, "DEFAULT_OUTPUT_ROOT", tmp_path / "output")
+    mod.DEFAULT_OUTPUT_ROOT.mkdir()
+    job_id = "known-only-job"
+    stem = "b4pt0r-chatmode-job-" + hashlib.sha256(job_id.encode()).hexdigest()[:24]
+    (mod.DEFAULT_OUTPUT_ROOT / (stem + ".sse.receipt.json")).write_text(json.dumps({
+        "queue_job_id": job_id, "conversation_id": "known-cid"}), encoding="utf-8")
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("queued prompt", encoding="utf-8")
+    session = GetOnlySession([])
+    monkeypatch.setattr(mod, "codex_identity", lambda: (session, {}, "device"))
+    calls = []
+    def discover(*_args, **kwargs):
+        calls.append(kwargs.get("known_conversation_id"))
+        return ({"state": "not_found_in_recent", "accepted": False,
+                 "retry_after_seconds": 300, "next_offset": 0, "events": []}, session, {}, "device")
+    monkeypatch.setattr(mod, "discover_recent_turn", discover)
+    result = mod.reconcile_queue_job(argparse.Namespace(
+        queue_job_id=job_id, prompt_file=str(prompt), output_dir="",
+        auth_source="codex", chrome_profile="/unused", impersonate="unused",
+        scan_offset=0, max_candidates=12, known_only=True))
+    assert result["state"] == "not_found_in_recent"
+    assert calls == ["known-cid"]
+    assert session.posts == 0
+
+
 def test_worker_recovery_uses_only_reconcile_and_cools_down(monkeypatch, tmp_path):
     worker = load_script("cognilode-chatmode-queue-worker")
     monkeypatch.setattr(worker, "ROOT", tmp_path / "worker")
@@ -210,3 +237,45 @@ def test_worker_terminal_recovery_reaches_completion_without_send(monkeypatch, t
     assert observed["commands"][0][2] == "reconcile"
     assert observed["receipts"] == [("uncertain-job", "conv-recovered")]
     assert observed["completed"] == [("uncertain-job", "conv-recovered")]
+
+
+def test_recent_index_429_gates_other_jobs_but_allows_known_id_get(monkeypatch, tmp_path):
+    worker = load_script("cognilode-chatmode-queue-worker")
+    monkeypatch.setattr(worker, "ROOT", tmp_path / "worker")
+    sender_root = tmp_path / "sender"
+    sender_root.mkdir()
+    monkeypatch.setattr(worker.sender, "DEFAULT_OUTPUT_ROOT", sender_root)
+    calls = []
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        if len(calls) == 1:
+            value = {"ok": False, "state": "rate_limited", "retry_after_seconds": 180,
+                     "recovery": {"events": [{"phase": "recent_index", "http_status": 429}]}}
+        else:
+            value = {"ok": False, "state": "provider_accepted_unfinished",
+                     "retry_after_seconds": 60}
+        return subprocess.CompletedProcess(command, 0, json.dumps(value), "")
+
+    monkeypatch.setattr(worker.subprocess, "run", run)
+    def job(number):
+        prompt = f"queued prompt {number}"
+        return {"id": f"job-{number}", "prompt": prompt,
+                "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest()}
+
+    worker.reconcile_ambiguous(job(1))
+    gate = json.loads(worker.recent_index_gate_path().read_text())
+    assert gate["retry_after_seconds"] == 180
+    assert 160 <= gate["next_index_at"] - __import__("time").time() <= 180
+
+    worker.reconcile_ambiguous(job(2))
+    assert len(calls) == 1  # One 429 suppresses the next no-ID index scan.
+    second = json.loads(worker.job_state_path("job-2").read_text())
+    assert second["reconcile_provider_state"] == "recent_index_shared_cooldown"
+
+    stem = worker.job_stem("job-3")
+    (sender_root / (stem + ".sse.receipt.json")).write_text(json.dumps({
+        "queue_job_id": "job-3", "conversation_id": "known-conversation"}), encoding="utf-8")
+    worker.reconcile_ambiguous(job(3))
+    assert len(calls) == 2
+    assert "--known-only" in calls[1]

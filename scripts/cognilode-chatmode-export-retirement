@@ -56,7 +56,7 @@ def receipts(path: Path):
 def verify_one(row: dict, archive_etag: str, db: sqlite3.Connection):
     if row["archive_etag"] != archive_etag:
         raise RuntimeError("receipt belongs to another export snapshot")
-    cid = row["stored_conversation_id"]
+    cid = row.get("stored_conversation_id") or row["conversation_id"]
     result = sender.operator_memory_post({"operation": "read", "provider": "chatgpt-export-format",
                                           "conversation_id": cid})
     remote = result.get("conversation") or {}
@@ -110,7 +110,8 @@ def run(root: Path, db_path: Path, limit: int):
         while position < len(rows) and checked < limit:
             if not verify_one(rows[position], state["archive_etag"], db):
                 return {"state": "drive_readback_pending", "position": position,
-                        "total": len(rows), "stored_conversation_id": rows[position]["stored_conversation_id"]}
+                        "total": len(rows), "stored_conversation_id":
+                        rows[position].get("stored_conversation_id") or rows[position]["conversation_id"]}
             position += 1
             checked += 1
             write_private(checkpoint_path, {"archive_etag": state["archive_etag"], "position": position,

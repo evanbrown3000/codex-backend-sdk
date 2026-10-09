@@ -55,3 +55,8 @@ def test_completion_requires_terminal_central_readback_and_exact_zip(tmp_path):
     assert module.validated_result({**value, "assistant_terminal": False}) is None
     assert module.validated_result({**value, "central_conversation_store": {"central_readback_verified": False}}) is None
     assert module.validated_result({**value, "downloaded_files": [{"path": str(path), "sha256": "0" * 64, "name": "work.zip"}]}) is None
+    missing = tmp_path / "missing-instructions.zip"
+    with zipfile.ZipFile(missing, "w") as archive:
+        archive.writestr("report.txt", "incomplete handoff")
+    assert module.validated_result({**value, "downloaded_files": [{"path": str(missing),
+        "sha256": hashlib.sha256(missing.read_bytes()).hexdigest(), "name": missing.name}]}) is None

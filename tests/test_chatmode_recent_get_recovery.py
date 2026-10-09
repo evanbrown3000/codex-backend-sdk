@@ -205,7 +205,8 @@ def test_worker_recovery_uses_only_reconcile_and_cools_down(monkeypatch, tmp_pat
            "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest()}
     worker.reconcile_ambiguous(job)
     state = json.loads(worker.job_state_path(job["id"]).read_text())
-    assert calls[0][2] == "reconcile"
+    assert calls[0][calls[0].index("reconcile")] == "reconcile"
+    assert calls[0][2:4] == ["--auth-source", "codex"]
     assert "send" not in calls[0]
     assert state["reconcile_scan_offset"] == 12
     assert 100 <= state["reconcile_next_at"] - __import__("time").time() <= 120
@@ -234,7 +235,8 @@ def test_worker_terminal_recovery_reaches_completion_without_send(monkeypatch, t
     job = {"id": "uncertain-job", "prompt": prompt,
            "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest()}
     worker.reconcile_ambiguous(job)
-    assert observed["commands"][0][2] == "reconcile"
+    assert observed["commands"][0][observed["commands"][0].index("reconcile")] == "reconcile"
+    assert observed["commands"][0][2:4] == ["--auth-source", "codex"]
     assert observed["receipts"] == [("uncertain-job", "conv-recovered")]
     assert observed["completed"] == [("uncertain-job", "conv-recovered")]
 

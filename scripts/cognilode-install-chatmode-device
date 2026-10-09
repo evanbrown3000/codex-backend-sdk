@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import importlib.machinery
 import importlib.util
 import json
@@ -36,6 +37,16 @@ def _run(argv: list[str], *, timeout: int = 45) -> str:
     return result.stdout
 
 
+def _ensure_unattended_user_service() -> None:
+    username = getpass.getuser()
+    query = ["loginctl", "show-user", username, "--property=Linger", "--value"]
+    if _run(query).strip().lower() == "yes":
+        return
+    _run(["loginctl", "enable-linger", username])
+    if _run(query).strip().lower() != "yes":
+        raise RuntimeError("systemd user lingering is not enabled; worker would stop after logout")
+
+
 def install(args: argparse.Namespace) -> dict:
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", args.device_id):
         raise ValueError("device ID must be 1-80 letters, digits, dots, underscores, or hyphens")
@@ -43,6 +54,8 @@ def install(args: argparse.Namespace) -> dict:
         raise ValueError("device priority must be 0-1000")
     if args.network_route not in {"home", "mobile"}:
         raise ValueError("network route must be home or mobile")
+    if args.auth_source == "chrome" and args.chrome_profile and not args.chrome_profile.is_dir():
+        raise RuntimeError("Chrome profile does not exist on this device")
     if not args.aws_cli.is_file() or not os.access(args.aws_cli, os.X_OK):
         raise RuntimeError("AWS CLI is not executable on this device")
     if not (SCRIPTS / "cognilode-b4pt0r-chatmode").is_file():
@@ -50,7 +63,10 @@ def install(args: argparse.Namespace) -> dict:
 
     # These checks use credentials already held on this device. The installer
     # never copies a ChatGPT session or cloud credential through the queue.
-    health = json.loads(_run([str(SCRIPTS / "cognilode-b4pt0r-chatmode"), "health"], timeout=90))
+    auth_args = ["--auth-source", args.auth_source]
+    if args.auth_source == "chrome" and args.chrome_profile:
+        auth_args.extend(["--chrome-profile", str(args.chrome_profile)])
+    health = json.loads(_run([str(SCRIPTS / "cognilode-b4pt0r-chatmode"), *auth_args, "health"], timeout=90))
     if health.get("ok") is not True:
         raise RuntimeError("local ChatGPT/Codex identity is not healthy")
     sender = _load("cognilode_device_installer_sender", SCRIPTS / "cognilode-b4pt0r-chatmode")
@@ -76,7 +92,10 @@ def install(args: argparse.Namespace) -> dict:
         "COGNILODE_AWS_CLI": str(args.aws_cli),
         "COGNILODE_CHATMODE_DEVICE_PRIORITY": str(args.priority),
         "COGNILODE_CHATMODE_NETWORK_ROUTE": args.network_route,
+        "COGNILODE_CHATMODE_AUTH_SOURCE": args.auth_source,
     }
+    if args.auth_source == "chrome" and args.chrome_profile:
+        env_values["COGNILODE_CHATMODE_CHROME_PROFILE"] = str(args.chrome_profile)
     if any("\n" in value or "\r" in value for value in env_values.values()):
         raise ValueError("environment value contains a newline")
     config.write_text("".join(f"{key}={value}\n" for key, value in env_values.items()), encoding="utf-8")
@@ -87,6 +106,7 @@ def install(args: argparse.Namespace) -> dict:
     unit_path = Path.home() / ".config/systemd/user/cognilode-chatmode-queue-worker@.service"
     unit_path.parent.mkdir(parents=True, exist_ok=True)
     unit_path.write_text(template, encoding="utf-8")
+    _ensure_unattended_user_service()
     _run(["systemctl", "--user", "daemon-reload"])
     unit = f"cognilode-chatmode-queue-worker@{args.device_id}.service"
     _run(["systemctl", "--user", "enable", "--now", unit])
@@ -108,6 +128,8 @@ def main() -> int:
     parser.add_argument("--device-id", required=True)
     parser.add_argument("--priority", type=int, default=50)
     parser.add_argument("--network-route", choices=("home", "mobile"), default="home")
+    parser.add_argument("--auth-source", choices=("codex", "chrome"), default="codex")
+    parser.add_argument("--chrome-profile", type=Path)
     parser.add_argument("--bucket", default="cognilode-conversation-visibility-362928919715-us-west-2")
     parser.add_argument("--aws-cli", type=Path, default=Path("/usr/bin/aws"))
     parser.add_argument("--probe-sha256", default="")

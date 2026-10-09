@@ -3,6 +3,7 @@ from importlib.util import module_from_spec, spec_from_loader
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,24 @@ loader = SourceFileLoader("b4pt0r_collector_test", str(SCRIPT))
 spec = spec_from_loader(loader.name, loader)
 collector = module_from_spec(spec)
 loader.exec_module(collector)
+
+
+def test_second_device_collector_uses_its_own_chrome_profile(monkeypatch, tmp_path):
+    profile = tmp_path / "local-profile"
+    profile.mkdir()
+    monkeypatch.setenv("COGNILODE_CHATMODE_AUTH_SOURCE", "chrome")
+    monkeypatch.setenv("COGNILODE_CHATMODE_CHROME_PROFILE", str(profile))
+    seen = []
+    class Session:
+        def get(self, *_args, **_kwargs):
+            return SimpleNamespace(status_code=200, json=lambda: {"mapping": {}})
+    monkeypatch.setattr(collector.sender, "new_session", lambda p, _i: (seen.append(p), Session())[1])
+    monkeypatch.setattr(collector.sender, "identity", lambda _s: {"access_token": "local"})
+    monkeypatch.setattr(collector.sender, "device_id_from_cookies", lambda _s: "local-device")
+    monkeypatch.setattr(collector.sender, "app_headers", lambda *_a, **_kw: {})
+    _conversation, _session, _auth, device_id = collector.get_conversation("c-1", "unknown")
+    assert seen == [profile]
+    assert device_id == "local-device"
 
 
 def test_exact_terminal_requires_final_assistant_after_exact_user():

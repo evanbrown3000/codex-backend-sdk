@@ -54,7 +54,12 @@ def _complete_source(index: Mapping[str, Any], read: Mapping[str, Any]) -> datet
     if not read.get("ok") or (source.get("provider"), source.get("conversation_id")) != (index.get("provider"), index.get("conversation_id")):
         return None
     capture = source.get("capture") or {}
-    if capture.get("drive_verified") is not True or capture.get("source_response_complete") is not True:
+    if (capture.get("drive_verified") is not True or capture.get("source_response_complete") is not True
+        or not HEX64.fullmatch(str(capture.get("source_sha256") or ""))
+        or capture.get("drive_source_sha256") != capture.get("source_sha256")
+        or not HEX64.fullmatch(str(capture.get("drive_object_sha256") or ""))
+        or not str(capture.get("drive_verified_at") or "").strip()
+        or capture.get("drive_conversation_id") != source.get("conversation_id")):
         return None
     events = source.get("events") or []
     if not isinstance(events, list) or len(events) < 2 or not all(

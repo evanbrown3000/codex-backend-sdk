@@ -1,0 +1,671 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import http.server
+import json
+import os
+import subprocess
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(os.environ.get("COGNILODE_PROVIDER_SENTINEL_ROOT", "/home/evan/.local/share/cognilode/provider-conversation-sentinel"))
+STATE = ROOT / "state.json"
+EVENTS = ROOT / "events.jsonl"
+CAPTURES = ROOT / "captures"
+LATEST = ROOT / "latest"
+CLI = Path(os.environ.get("COGNILODE_OPERATOR_CLI", "/home/evan/Projects/cognilode-cloudflare-pages-site/operator/cognilode-cli.py"))
+ENV_FILE = Path(os.environ.get("COGNILODE_OPERATOR_ENV_FILE", "/home/evan/.config/cognilode/remote-shell-evanpc.env"))
+MAX_AGE_SECONDS = int(os.environ.get("COGNILODE_PROVIDER_SENTINEL_MAX_AGE_SECONDS", "1800"))
+INTERVAL_SECONDS = int(os.environ.get("COGNILODE_PROVIDER_SENTINEL_INTERVAL_SECONDS", "180"))
+CODEX_SESSIONS = Path(os.environ.get("COGNILODE_CODEX_SESSIONS", "/home/evan/.codex/sessions"))
+DOWNLOADS = Path(os.environ.get("COGNILODE_DOWNLOADS", "/home/evan/Downloads"))
+OPERATOR_PANEL_PROJECTION = Path(os.environ.get(
+    "HOP_CONVERSATION_RESEARCH_PATH",
+    "/home/evan/.local/share/live/worlds/v1/cognilode/human_operator_panel/conversation-research/current.json",
+))
+
+TARGETS = [
+    {"id": "chatgpt.com", "kind": "agent", "label": "ChatGPT.com", "agent_id": "chatgpt.web.default"},
+    {"id": "codex", "kind": "operator_conversations", "label": "Codex", "query": "codex"},
+    {"id": "modified-codex", "kind": "agent", "label": "Modified Codex", "agent_id": "codex.luna.operator"},
+    {"id": "gemini.com", "kind": "agent", "label": "Gemini.com", "agent_id": "gemini.web.guest"},
+    {"id": "claude.com", "kind": "agent", "label": "Claude.com", "agent_id": "claude.web.default"},
+    {"id": "anthropic.com", "kind": "agent", "label": "Anthropic.com", "agent_id": "anthropic.web.default"},
+]
+
+
+def utc(ts: float | None = None) -> str:
+    return datetime.fromtimestamp(time.time() if ts is None else ts, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def load_env() -> dict[str, str]:
+    env = os.environ.copy()
+    if ENV_FILE.exists():
+        for raw in ENV_FILE.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            env.setdefault(key.strip(), value.strip().strip("'\""))
+    return env
+
+
+def emit(event: dict[str, Any]) -> None:
+    ROOT.mkdir(parents=True, exist_ok=True)
+    row = {"schema": "cognilode.provider_conversation_sentinel.event.v1", "at": utc(), **event}
+    with EVENTS.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def stable_id(value: Any) -> str:
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode()
+    return hashlib.sha256(raw).hexdigest()[:32]
+
+
+def write_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def text_from_row(row: dict[str, Any]) -> str:
+    for key in ("text", "content", "message", "summary", "title"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    parts = row.get("parts")
+    if isinstance(parts, list):
+        texts = [part for part in parts if isinstance(part, str) and part.strip()]
+        if texts:
+            return "\n".join(texts)
+    return ""
+
+
+def attachments_from_row(row: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for key in ("attachments", "files", "downloads", "downloadable_files"):
+        value = row.get(key)
+        if isinstance(value, list):
+            out.extend([item for item in value if isinstance(item, dict)])
+        elif isinstance(value, dict):
+            out.append(value)
+    for key in ("download_url", "file_id", "path"):
+        value = row.get(key)
+        if value:
+            out.append({key: value})
+    return out
+
+
+def capture_record(target: dict[str, Any], source: str, conversation_id: str, rows: list[dict[str, Any]], raw: Any, *, dispatch: dict[str, Any] | None = None) -> dict[str, Any]:
+    prompts: list[dict[str, Any]] = []
+    responses: list[dict[str, Any]] = []
+    interim: list[dict[str, Any]] = []
+    downloads: list[dict[str, Any]] = []
+    uploads: list[dict[str, Any]] = []
+    for idx, row in enumerate(rows):
+        role = str(row.get("role") or row.get("author_role") or row.get("type") or "").lower()
+        text = text_from_row(row)
+        item = {"index": idx, "role": role, "at": row.get("created_at") or row.get("updated_at") or row.get("response_at"), "text": text, "raw_keys": sorted(row.keys())}
+        files = attachments_from_row(row)
+        if files:
+            item["attachments"] = files
+            downloads.extend(files)
+            if role in {"user", "human"}:
+                uploads.extend(files)
+        if role in {"user", "human", "prompt"}:
+            prompts.append(item)
+        elif role in {"assistant", "model", "agent", "response"} or row.get("response_at") or row.get("assistant_at"):
+            responses.append(item)
+        elif text:
+            interim.append(item)
+    if dispatch:
+        prompts.append({
+            "index": -1,
+            "role": "sentinel-dispatch",
+            "at": dispatch.get("created_at"),
+            "text": dispatch.get("prompt_text", ""),
+            "prompt_sha256": dispatch.get("prompt_sha256"),
+        })
+    missing: list[str] = []
+    if not prompts:
+        missing.append("prompt")
+    if not responses:
+        missing.append("response")
+    return {
+        "schema": "cognilode.provider_conversation_capture.v1",
+        "captured_at": utc(),
+        "target_id": target["id"],
+        "target_label": target.get("label"),
+        "source": source,
+        "conversation_id": conversation_id,
+        "conversation_sha256": stable_id({"target": target["id"], "conversation_id": conversation_id, "rows": rows}),
+        "prompt_rows": prompts,
+        "structured_uploads": uploads,
+        "interim_summaries": interim,
+        "response_rows": responses,
+        "downloadable_files": downloads,
+        "raw": raw,
+        "capture_gaps": missing,
+    }
+
+
+def store_capture(record: dict[str, Any]) -> None:
+    target_id = str(record["target_id"]).replace("/", "_")
+    conversation_id = str(record["conversation_id"]).replace("/", "_")
+    stamp = record["captured_at"].replace(":", "").replace("-", "")
+    path = CAPTURES / target_id / f"{stamp}-{conversation_id}-{record['conversation_sha256'][:12]}.json"
+    write_json(path, record)
+    latest_dir = LATEST / target_id
+    latest_dir.mkdir(parents=True, exist_ok=True)
+    write_json(latest_dir / f"{conversation_id}.json", record)
+    emit({
+        "event": "conversation_captured",
+        "target_id": record["target_id"],
+        "conversation_id": record["conversation_id"],
+        "source": record["source"],
+        "prompt_rows": len(record["prompt_rows"]),
+        "response_rows": len(record["response_rows"]),
+        "downloadable_files": len(record["downloadable_files"]),
+        "capture_gaps": record["capture_gaps"],
+    })
+
+
+def save_state(state: dict[str, Any]) -> None:
+    ROOT.mkdir(parents=True, exist_ok=True)
+    tmp = STATE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(STATE)
+
+
+def load_state() -> dict[str, Any]:
+    if not STATE.exists():
+        return {"schema": "cognilode.provider_conversation_sentinel.state.v1", "targets": {}, "pending": []}
+    try:
+        return json.loads(STATE.read_text(encoding="utf-8"))
+    except Exception:
+        return {"schema": "cognilode.provider_conversation_sentinel.state.v1", "targets": {}, "pending": []}
+
+
+def publish_operator_panel_projection(state: dict[str, Any]) -> None:
+    records: list[dict[str, Any]] = []
+    for ordinal, target in enumerate(TARGETS, 1):
+        target_id = str(target["id"])
+        row = state.get("targets", {}).get(target_id, {})
+        remediation = row.get("remediation") if isinstance(row.get("remediation"), dict) else {}
+        receipt = remediation.get("receipt") if isinstance(remediation.get("receipt"), dict) else {}
+        caveats: list[str] = []
+        if not row.get("fresh"):
+            caveats.append("Does not yet have ten provider responses inside the freshness window.")
+        if row.get("capture_gaps"):
+            caveats.append("Capture gaps: " + ", ".join(str(gap) for gap in row.get("capture_gaps", [])))
+        if row.get("error"):
+            caveats.append(str(row.get("error"))[:240])
+        if receipt.get("disposition"):
+            caveats.append("Remediation: " + str(receipt.get("disposition")))
+        records.append({
+            "conversation_id": target_id,
+            "source_ordinal": ordinal,
+            "updated_at": row.get("checked_at") or state.get("updated_at") or utc(),
+            "original_title": str(target.get("label") or target_id),
+            "descriptive_title": f"{target.get('label') or target_id} provider sentinel",
+            "abstract": (
+                f"Provider sentinel status for {target.get('label') or target_id}: "
+                f"source={row.get('source') or 'unavailable'}, fresh={bool(row.get('fresh'))}, "
+                f"captures_written={int(row.get('captures_written') or 0)}."
+            ),
+            "value_score": 100 if row.get("fresh") else 40 if row.get("ok") else 15,
+            "feature_families": [
+                {"name": "fresh provider response visibility", "percent": 100 if row.get("fresh") else 0},
+                {"name": "automatic capture materialization", "percent": 100 if row.get("captures_written") else 0},
+                {"name": "automatic remediation dispatch", "percent": 100 if remediation.get("dispatch_attempted") else 0},
+            ],
+            "keywords": [target_id, str(row.get("source") or "unavailable"), str(receipt.get("disposition") or "no-remediation")],
+            "search_terms": [target_id, str(target.get("label") or target_id), "provider sentinel", "conversation capture"],
+            "why_read": "Live provider-conversation automation state, not a static manual export.",
+            "caveats": caveats,
+            "provider_sentinel": row,
+        })
+    projection = {
+        "schema": "cognilode.conversation_abstract_collection.v1",
+        "latest_batch_id": "provider-conversation-sentinel-live-" + (state.get("updated_at") or utc()).replace(":", "").replace("-", ""),
+        "canonical_store": "provider_conversation_sentinel_live_projection",
+        "source_batches": [{"source": "provider-conversation-sentinel", "updated_at": state.get("updated_at") or utc()}],
+        "cross_conversation_findings": [
+            "Live Codex local-session capture is available.",
+            "ChatGPT protected-browser custody is queued until a protected CDP endpoint is restored.",
+            "Gemini, Claude, Anthropic, and Modified Codex are queued for account-parallel browser recovery because the operator connector is unavailable.",
+        ],
+        "dynamodb_role": "local_live_projection",
+        "records": records,
+        "provider_sentinel_state": state,
+    }
+    write_json(OPERATOR_PANEL_PROJECTION, projection)
+
+
+def cli_call(args: list[str], *, timeout: int = 45) -> dict[str, Any]:
+    env = load_env()
+    completed = subprocess.run(
+        ["python3", str(CLI), *args],
+        cwd=str(CLI.parent),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+    )
+    text = completed.stdout.strip()
+    if completed.returncode != 0:
+        raise RuntimeError((completed.stderr or text or f"operator cli exit {completed.returncode}")[:1200])
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"operator cli returned non-json: {exc}: {text[:500]}") from exc
+
+
+def parse_time(value: Any) -> float:
+    if isinstance(value, (int, float)) and value > 0:
+        return float(value / 1000 if value > 10_000_000_000 else value)
+    if not value:
+        return 0.0
+    text = str(value).replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def row_time(row: dict[str, Any]) -> float:
+    for key in ("response_at", "assistant_at", "updated_at", "updated_at_utc", "ended_at_utc", "latest_at", "created_at"):
+        ts = parse_time(row.get(key))
+        if ts:
+            return ts
+    return 0.0
+
+
+def canonical_rows(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, dict):
+        return []
+    for key in ("items", "records", "conversations", "messages", "turns", "history", "segments"):
+        rows = value.get(key)
+        if isinstance(rows, list):
+            return [row for row in rows if isinstance(row, dict)]
+    nested = value.get("structuredContent")
+    if isinstance(nested, dict):
+        rows = canonical_rows(nested)
+        if rows:
+            return rows
+    nested = value.get("result")
+    if isinstance(nested, dict):
+        rows = canonical_rows(nested)
+        if rows:
+            return rows
+    content = value.get("content")
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if not isinstance(text, str) or not text.strip().startswith("{"):
+                continue
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            rows = canonical_rows(parsed)
+            if rows:
+                return rows
+    return []
+
+
+def conversation_id_from_row(row: dict[str, Any], fallback: str) -> str:
+    for key in ("conversation_id", "thread_id", "id", "job_id", "request_id", "path"):
+        value = row.get(key)
+        if value:
+            return str(value)
+    return fallback
+
+
+def materialize_listed_conversations(target: dict[str, Any], listed: dict[str, Any], *, max_items: int = 10) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    rows = listed.get("rows") or []
+    for idx, row in enumerate(rows[:max_items]):
+        conversation_id = conversation_id_from_row(row, f"{target['id']}-{idx}")
+        read_raw: Any = {"listed_row": row}
+        read_rows = [row]
+        try:
+            if target["kind"] == "agent":
+                read_raw = cli_call(["conversation-read", target["agent_id"], conversation_id, "--max-chars", "200000"], timeout=90)
+                rr = canonical_rows(read_raw)
+                if rr:
+                    read_rows = rr
+            elif target["kind"] == "operator_conversations":
+                read_raw = cli_call(["call", "agent_conversation_read", json.dumps({"conversation_id": conversation_id, "max_chars": 200000})], timeout=90)
+                rr = canonical_rows(read_raw)
+                if rr:
+                    read_rows = rr
+            elif target["kind"] == "operator_history":
+                read_raw = row
+        except Exception as exc:
+            read_raw = {"listed_row": row, "read_error": {"type": type(exc).__name__, "message": str(exc)[:1000]}}
+        record = capture_record(target, listed.get("source", "unknown"), conversation_id, read_rows, read_raw)
+        store_capture(record)
+        records.append(record)
+    return records
+
+
+def codex_rollout_rows(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts = event.get("timestamp")
+                typ = event.get("type")
+                payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                if typ == "response_item":
+                    item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
+                    role = str(item.get("role") or item.get("type") or "").lower()
+                    content = item.get("content")
+                    text = ""
+                    if isinstance(content, list):
+                        parts: list[str] = []
+                        for part in content:
+                            if isinstance(part, dict):
+                                value = part.get("text") or part.get("content")
+                                if isinstance(value, str):
+                                    parts.append(value)
+                            elif isinstance(part, str):
+                                parts.append(part)
+                        text = "\n".join(parts)
+                    elif isinstance(content, str):
+                        text = content
+                    rows.append({"role": role or "response_item", "created_at": ts, "text": text, "raw_type": typ, "raw_keys": sorted(item.keys())})
+                elif typ in {"event_msg", "turn_context"}:
+                    text = payload.get("message") or payload.get("last_agent_message") or payload.get("user_message") or ""
+                    role = "assistant" if payload.get("last_agent_message") else "interim"
+                    if text:
+                        rows.append({"role": role, "created_at": ts, "text": text, "raw_type": typ})
+    except FileNotFoundError:
+        pass
+    return rows
+
+
+def list_codex_local_sessions(limit: int = 10) -> dict[str, Any]:
+    files = sorted((p for p in CODEX_SESSIONS.glob("**/rollout-*.jsonl") if p.is_file()), key=lambda p: p.stat().st_mtime, reverse=True)[:limit]
+    rows: list[dict[str, Any]] = []
+    for path in files:
+        rows.append({
+            "conversation_id": path.stem,
+            "path": str(path),
+            "updated_at": utc(path.stat().st_mtime),
+            "role": "assistant",
+            "text": f"Local Codex rollout {path.name}",
+        })
+    return {"source": "codex_local_sessions", "raw": {"files": [str(p) for p in files]}, "rows": rows}
+
+
+def materialize_codex_local_sessions(target: dict[str, Any], listed: dict[str, Any]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for row in listed.get("rows", [])[:10]:
+        path = Path(str(row.get("path", "")))
+        conversation_id = conversation_id_from_row(row, path.stem)
+        rows = codex_rollout_rows(path) or [row]
+        raw = {"path": str(path), "mtime": row.get("updated_at")}
+        record = capture_record(target, "codex_local_sessions", conversation_id, rows, raw)
+        store_capture(record)
+        records.append(record)
+    return records
+
+
+def list_download_exports(target: dict[str, Any], patterns: list[str], limit: int = 10) -> dict[str, Any]:
+    files: list[Path] = []
+    for pattern in patterns:
+        files.extend([p for p in DOWNLOADS.glob(pattern) if p.is_file()])
+    files = sorted(set(files), key=lambda p: p.stat().st_mtime, reverse=True)[:limit]
+    rows = []
+    for path in files:
+        rows.append({
+            "conversation_id": path.name,
+            "path": str(path),
+            "updated_at": utc(path.stat().st_mtime),
+            "role": "export",
+            "text": f"Static downloaded export for {target['label']}: {path.name}",
+            "attachments": [{"path": str(path), "sha256": file_sha256(path), "bytes": path.stat().st_size}],
+        })
+    return {"source": "downloads_static_exports", "raw": {"files": [str(p) for p in files]}, "rows": rows}
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def list_target(target: dict[str, Any]) -> dict[str, Any]:
+    errors: list[dict[str, str]] = []
+    if target["kind"] == "agent":
+        try:
+            result = cli_call(["conversations", target["agent_id"], "--limit", "10"], timeout=60)
+            return {"source": "agent_conversations_list", "raw": result, "rows": canonical_rows(result)}
+        except Exception as exc:
+            errors.append({"source": "agent_conversations_list", "type": type(exc).__name__, "message": str(exc)[:1000]})
+            if target["id"] == "codex":
+                listed = list_codex_local_sessions()
+                listed["errors"] = errors
+                return listed
+            raise
+    if target["kind"] == "operator_conversations":
+        try:
+            result = cli_call(["call", "operator_conversations_list", json.dumps({"limit": 10, "q": target.get("query", "")})], timeout=60)
+            return {"source": "operator_conversations_list", "raw": result, "rows": canonical_rows(result)}
+        except Exception as exc:
+            errors.append({"source": "operator_conversations_list", "type": type(exc).__name__, "message": str(exc)[:1000]})
+            if target["id"] == "codex":
+                listed = list_codex_local_sessions()
+                listed["errors"] = errors
+                return listed
+            raise
+    if target["kind"] == "operator_history":
+        try:
+            result = cli_call(["call", "conversation_history_search", json.dumps({"query": "live:", "limit": 10, "max_chars": 2000})], timeout=60)
+            return {"source": "conversation_history_search", "raw": result, "rows": canonical_rows(result)}
+        except Exception as exc:
+            errors.append({"source": "conversation_history_search", "type": type(exc).__name__, "message": str(exc)[:1000]})
+            listed = list_download_exports(target, ["ChatGPT.html", "ChatGPT*.pdf", "ChatGPT*.json", "chatgpt*.json", "chatgpt*.html"])
+            listed["errors"] = errors
+            return listed
+    raise RuntimeError(f"unsupported target kind {target['kind']}")
+
+
+def freshness(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    now = time.time()
+    times = [row_time(row) for row in rows]
+    recent = [ts for ts in times if ts and now - ts <= MAX_AGE_SECONDS]
+    return {
+        "rows_returned": len(rows),
+        "recent_response_count": len(recent),
+        "latest_response_at": utc(max(times)) if times and max(times) else None,
+        "fresh": len(rows) >= 10 and len(recent) >= 10,
+        "max_age_seconds": MAX_AGE_SECONDS,
+    }
+
+
+def dispatch_if_possible(target: dict[str, Any], state: dict[str, Any], reason: str, rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Preserve collection without sending legacy wake prompts outside D1."""
+    return {"dispatch_attempted": False, "reason": "direct_dispatch_retired_single_D1_queue"}
+
+
+def reconcile_pending(state: dict[str, Any]) -> None:
+    # Rotate a bounded read-only window. Do not silently discard pending turns
+    # merely because old direct dispatch accumulated more than 200 receipts.
+    pending = list(state.get("pending", []))
+    checking, untouched = pending[:4], pending[4:]
+    remaining: list[dict[str, Any]] = []
+    for item in checking:
+        agent_id = item.get("agent_id")
+        conversation_id = (
+            item.get("dispatch_receipt", {}).get("conversation_id")
+            or item.get("dispatch_receipt", {}).get("thread_id")
+            or item.get("dispatch_receipt", {}).get("job_id")
+            or item.get("request_id")
+        )
+        try:
+            read = cli_call(["conversation-read", str(agent_id), str(conversation_id), "--max-chars", "120000"], timeout=60)
+            rows = canonical_rows(read)
+            response_rows = [r for r in rows if str(r.get("role", "")).lower() == "assistant" and (r.get("text") or r.get("content"))]
+            downloadable = [r for r in rows if r.get("download_url") or r.get("file_id") or r.get("attachments")]
+            if response_rows:
+                target = next((candidate for candidate in TARGETS if candidate["id"] == item.get("target_id")), {"id": item.get("target_id") or "unknown", "label": item.get("target_id") or "unknown"})
+                record = capture_record(target, "pending_agent_conversation_read", str(conversation_id), rows, read, dispatch=item)
+                store_capture(record)
+                emit({"event": "pending_collected", "target_id": item.get("target_id"), "request_id": item.get("request_id"), "conversation_id": conversation_id, "response_rows": len(response_rows), "downloadable_rows": len(downloadable), "capture_gaps": record["capture_gaps"]})
+                continue
+            item["last_read"] = {"at": utc(), "conversation_id": conversation_id, "rows": len(rows), "response_rows": 0}
+        except Exception as exc:
+            item["last_error"] = {"at": utc(), "type": type(exc).__name__, "message": str(exc)[:1000]}
+        remaining.append(item)
+    state["pending"] = untouched + remaining
+
+
+def run_once() -> dict[str, Any]:
+    state = load_state()
+    state["updated_at"] = utc()
+    state.setdefault("targets", {})
+    reconcile_pending(state)
+    for target in TARGETS:
+        record = {"target": target, "checked_at": utc()}
+        try:
+            listed = list_target(target)
+            fresh = freshness(listed["rows"])
+            if listed["source"] == "codex_local_sessions":
+                captures = materialize_codex_local_sessions(target, listed)
+            else:
+                captures = materialize_listed_conversations(target, listed)
+            capture_gaps = sorted({gap for capture in captures for gap in capture.get("capture_gaps", [])})
+            record.update({"ok": True, "source": listed["source"], "captures_written": len(captures), "capture_gaps": capture_gaps, "source_errors": listed.get("errors", []), **fresh})
+            emit({"event": "target_checked", "target_id": target["id"], **record})
+            if not fresh["fresh"]:
+                record["remediation"] = dispatch_if_possible(target, state, "missing ten responses inside freshness window", listed["rows"])
+        except Exception as exc:
+            record.update({"ok": False, "error_type": type(exc).__name__, "error": str(exc)[:1200]})
+            emit({"event": "target_check_failed", "target_id": target["id"], **record})
+            try:
+                record["remediation"] = dispatch_if_possible(target, state, "conversation inventory unavailable")
+            except Exception as inner:
+                record["remediation"] = {"dispatch_attempted": target["kind"] == "agent", "error_type": type(inner).__name__, "error": str(inner)[:1200]}
+                emit({"event": "dispatch_failed", "target_id": target["id"], "error_type": type(inner).__name__, "error": str(inner)[:1200]})
+        state["targets"][target["id"]] = record
+    save_state(state)
+    publish_operator_panel_projection(state)
+    return state
+
+
+def loop() -> None:
+    while True:
+        try:
+            run_once()
+        except Exception as exc:
+            emit({"event": "loop_failed", "error_type": type(exc).__name__, "error": str(exc)[:1200]})
+        time.sleep(max(30, INTERVAL_SECONDS))
+
+
+def mcp_result(rid: Any, value: Any) -> bytes:
+    return json.dumps({"jsonrpc": "2.0", "id": rid, "result": {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}], "structuredContent": value}}, ensure_ascii=False).encode()
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, fmt: str, *args: Any) -> None:
+        return
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("content-length") or 0)
+        payload = json.loads(self.rfile.read(length) or b"{}")
+        rid = payload.get("id")
+        method = payload.get("method")
+        if method == "initialize":
+            body = {"jsonrpc": "2.0", "id": rid, "result": {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "provider-conversation-sentinel", "version": "2026.10.01.1"}}}
+        elif method == "notifications/initialized":
+            self.send_response(202); self.end_headers(); return
+        elif method == "tools/list":
+            body = {"jsonrpc": "2.0", "id": rid, "result": {"tools": [
+                {"name": "provider_sentinel_status", "description": "Read last provider conversation sentinel state.", "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}, "annotations": {"readOnlyHint": True}},
+                {"name": "provider_sentinel_head", "description": "Read the current provider conversation sentinel event sequence.", "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}, "annotations": {"readOnlyHint": True}},
+                {"name": "provider_sentinel_events", "description": "Read provider conversation sentinel events after a sequence.", "inputSchema": {"type": "object", "properties": {"after_seq": {"type": "integer"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}}, "additionalProperties": False}, "annotations": {"readOnlyHint": True}},
+                {"name": "provider_sentinel_run_once", "description": "Run one sentinel cycle. Effectful: may dispatch registered agents when freshness requirements are unmet.", "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
+            ]}}
+        elif method == "tools/call":
+            params = payload.get("params") or {}
+            name = params.get("name")
+            args = params.get("arguments") or {}
+            if name == "provider_sentinel_status":
+                value = load_state()
+            elif name == "provider_sentinel_head":
+                head = 0
+                if EVENTS.exists():
+                    head = sum(1 for _ in EVENTS.open("r", encoding="utf-8", errors="replace"))
+                value = {"schema": "cognilode.provider_conversation_sentinel.head.v1", "head_seq": head}
+            elif name == "provider_sentinel_events":
+                after = int(args.get("after_seq") or 0); limit = max(1, min(200, int(args.get("limit") or 100)))
+                rows = []
+                if EVENTS.exists():
+                    for seq, line in enumerate(EVENTS.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                        if seq > after:
+                            rows.append({"seq": seq, **json.loads(line)})
+                        if len(rows) >= limit:
+                            break
+                value = {"schema": "cognilode.provider_conversation_sentinel.events.v1", "events": rows, "next_seq": rows[-1]["seq"] if rows else after}
+            elif name == "provider_sentinel_run_once":
+                value = run_once()
+            else:
+                body = {"jsonrpc": "2.0", "id": rid, "error": {"code": -32602, "message": "unknown tool"}}
+                self._send(body); return
+            self._send_raw(mcp_result(rid, value)); return
+        else:
+            body = {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": "method not found"}}
+        self._send(body)
+
+    def _send(self, body: dict[str, Any]) -> None:
+        self._send_raw(json.dumps(body).encode())
+
+    def _send_raw(self, raw: bytes) -> None:
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+
+def serve() -> None:
+    port = int(os.environ.get("COGNILODE_PROVIDER_SENTINEL_PORT", "8796"))
+    http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("mode", choices=["once", "loop", "serve"])
+    args = parser.parse_args()
+    if args.mode == "once":
+        print(json.dumps(run_once(), ensure_ascii=False, sort_keys=True))
+    elif args.mode == "loop":
+        loop()
+    else:
+        serve()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

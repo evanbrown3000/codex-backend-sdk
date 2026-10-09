@@ -3,7 +3,11 @@ import hmac, json, os, secrets, signal, socket, subprocess, threading, time, url
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-with Path(os.environ.get('COGNILODE_RELAY_NODE_FILE','/relay/node.json')).open(encoding='utf-8') as source:
+custody_path=Path(os.environ.get('COGNILODE_RELAY_NODE_FILE','/relay/node.json'))
+while not custody_path.is_file() or custody_path.stat().st_size == 0:
+    print('company relay waiting for central node custody',flush=True)
+    time.sleep(10)
+with custody_path.open(encoding='utf-8') as source:
     CUSTODY=json.load(source)
 BEARER=str(CUSTODY['mcp_bearer'])
 NODE_ID=str(CUSTODY['node_id'])

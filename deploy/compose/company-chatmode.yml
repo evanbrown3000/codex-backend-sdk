@@ -283,6 +283,11 @@ services:
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
     working_dir: /runtime
     entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-company-remote-shell]
+    healthcheck:
+      test: [CMD, python3, -c, "from pathlib import Path; import urllib.request; assert Path('/relay/node.json').is_file() and Path('/relay/tunnel-token').is_file(); assert Path('/relay/tunnel-token').stat().st_size > 0; urllib.request.urlopen('http://127.0.0.1:8899/healthz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
     environment:
       HOME: /home/worker
       CODEX_HOME: /home/worker/.codex
@@ -335,7 +340,8 @@ services:
     volumes:
       - company_relay_custody:/relay:ro
     depends_on:
-      - remote-shell
+      remote-shell:
+        condition: service_healthy
 
   memory:
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}

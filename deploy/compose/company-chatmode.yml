@@ -491,6 +491,7 @@ services:
       COGNILODE_AWS_CLI: /usr/bin/aws
       COGNILODE_TASKFLOW_SECRETARY_ROOT: /runtime/worker/taskflow-secretary
       COGNILODE_LLM_GOVERNANCE_ROOT: /runtime/worker/llm-governance
+      COGNILODE_CODEX_INFERENCE_ROOT: /runtime/worker/codex-inference
       COGNILODE_CODEX_BIN: /codex/bin/codex
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro

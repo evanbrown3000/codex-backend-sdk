@@ -45,6 +45,10 @@ services:
       - --credential
       - cognilode/http-gate-operator-token=/deploy/operator-bearer
       - --credential
+      - ${COGNILODE_RELAY_NODE_SECRET_ID:-cognilode/remote-shell/node}=/relay/node.json
+      - --credential
+      - ${COGNILODE_RELAY_TUNNEL_SECRET_ID:-cognilode/remote-shell/tunnel-token}=/relay/tunnel-token
+      - --credential
       - cognilode/memory-drive/rclone-config#rclone_config=/memory-auth/rclone.conf
       - --credential
       - cognilode/google-drive/rollout-service-account=/deploy/drive-rollout.json
@@ -60,6 +64,7 @@ services:
       - company_auth:/home/worker/.codex
       - company_operator:/home/worker/.config/cognilode
       - company_deploy_custody:/deploy
+      - company_relay_custody:/relay
       - memory_drive_auth:/memory-auth
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
 
@@ -269,6 +274,67 @@ services:
       - codex-builder
       - credential-sync
 
+  remote-shell:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /runtime
+    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-company-remote-shell]
+    environment:
+      HOME: /home/worker
+      CODEX_HOME: /home/worker/.codex
+      COGNILODE_WORKSPACE: /runtime/source/current
+      COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
+      COGNILODE_RELAY_NODE_FILE: /relay/node.json
+      COGNILODE_HEARTBEAT_STATUS: /runtime/relay/heartbeat.json
+      COGNILODE_CENTRAL_ROLLOUT_HELPER: /codex/bin/central-rollouts
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
+      PATH: /codex/bin:/usr/bin:/usr/local/bin:/bin
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - company_relay_custody:/relay:ro
+      - company_codex_release:/codex:ro
+      - company_auth:/home/worker/.codex
+      - company_operator:/home/worker/.config/cognilode:ro
+      - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+    depends_on:
+      - credential-sync
+      - source-sync
+      - codex-builder
+
+  codex-exec-server:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: "service:remote-shell"
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /runtime/source/current
+    entrypoint: [/codex/bin/codex, exec-server, --listen, ws://127.0.0.1:8799]
+    environment:
+      HOME: /home/worker
+      CODEX_HOME: /home/worker/.codex
+      COGNILODE_CENTRAL_ROLLOUT_HELPER: /codex/bin/central-rollouts
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
+    volumes:
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - company_codex_release:/codex:ro
+      - company_auth:/home/worker/.codex
+      - company_operator:/home/worker/.config/cognilode:ro
+    depends_on:
+      - remote-shell
+
+  remote-shell-tunnel:
+    image: cloudflare/cloudflared:2026.9.0@sha256:ff69a2225ad7c6f85ed84fbd5f3087df46202426b2388ec60214098e0adf05e9
+    restart: unless-stopped
+    network_mode: "service:remote-shell"
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    command: [tunnel, run, --token-file, /relay/tunnel-token]
+    volumes:
+      - company_relay_custody:/relay:ro
+    depends_on:
+      - remote-shell
+
   memory:
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
@@ -379,5 +445,6 @@ volumes:
   company_codex_target:
   company_cargo_registry:
   company_cargo_git:
+  company_relay_custody:
   memory_data:
   memory_drive_auth:

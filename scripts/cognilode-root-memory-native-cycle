@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any, Callable, Mapping
 import zipfile
@@ -259,6 +260,14 @@ def publish_private(batch: Mapping[str, Any], *, bucket: str = DEFAULT_BUCKET,
     if (int(metadata.get("ContentLength") or 0) != path.stat().st_size
         or (metadata.get("Metadata") or {}).get("sha256") != digest):
         raise ValueError("private source mirror readback mismatch")
+    # Metadata alone cannot prove that the remote object contains the physical
+    # packet the Chat-mode worker will download on another device.
+    with tempfile.TemporaryDirectory(prefix="root-memory-mirror-") as directory:
+        reread = Path(directory) / "source.zip"
+        subprocess.run([aws, "s3api", "get-object", "--bucket", bucket, "--key", key,
+                        str(reread)], check=True, capture_output=True, timeout=120)
+        if _sha(reread.read_bytes()) != digest:
+            raise ValueError("private source mirror full-byte readback mismatch")
     return f"s3://{bucket}/{key}"
 
 

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 
@@ -90,6 +91,35 @@ def refs(count=500):
 
 
 class RootMemoryCycleTests(unittest.TestCase):
+    def test_private_source_mirror_requires_full_remote_sha_readback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            packet = Path(directory) / "source.zip"
+            packet.write_bytes(b"verified physical ZIP bytes")
+            digest = sha256(packet.read_bytes()).hexdigest()
+            batch = {"path": str(packet), "sha256": digest}
+
+            def fake_run(args, **_kwargs):
+                if "head-object" in args:
+                    return subprocess.CompletedProcess(args, 0, stdout=json.dumps({
+                        "ContentLength": packet.stat().st_size, "Metadata": {"sha256": digest}}))
+                if "get-object" in args:
+                    Path(args[-1]).write_bytes(b"verified physical ZIP bytes")
+                return subprocess.CompletedProcess(args, 0, stdout="")
+
+            with mock.patch.object(cycle.subprocess, "run", side_effect=fake_run):
+                mirror = cycle.publish_private(batch, bucket="test-bucket", aws="fake-aws")
+            self.assertIn(digest, mirror)
+
+            def corrupt_run(args, **_kwargs):
+                if "get-object" in args:
+                    Path(args[-1]).write_bytes(b"corrupted remote source ZIP")
+                    return subprocess.CompletedProcess(args, 0, stdout="")
+                return fake_run(args, **_kwargs)
+
+            with mock.patch.object(cycle.subprocess, "run", side_effect=corrupt_run):
+                with self.assertRaisesRegex(ValueError, "full-byte readback mismatch"):
+                    cycle.publish_private(batch, bucket="test-bucket", aws="fake-aws")
+
     def test_source_packet_resumes_exact_verified_reads_after_transient_failure(self):
         selected = cycle.source_selection(FakeBridge(refs()).shared_stock_census(None))
         d1 = FakeD1(selected)

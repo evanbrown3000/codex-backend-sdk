@@ -1702,11 +1702,14 @@ def reconcile_ambiguous(job: dict, device_id: str = DEVICE_ID) -> None:
                                     "observed_at": time.time()})
             index_next_at = 0
     delay = max(60, min(900, float(recovered.get("retry_after_seconds") or 300)))
+    transport_error = re.sub(r"[^a-zA-Z0-9_.:/-]", "_",
+                             str(recovered.get("error") or "")[:160])
     atomic_json(state_path, {**prior, "state": "effect_pending_read_recovery", "job_id": job_id,
                              "reconcile_next_at": max(now + delay, index_next_at if not known_conversation_id else 0),
                              "reconcile_retry_after_seconds": recovered.get("retry_after_seconds"),
                              "reconcile_scan_offset": int(recovered.get("next_offset") or 0),
                              "reconcile_provider_state": recovered.get("state"),
+                             "reconcile_transport_error": transport_error,
                              "reconcile_sender_exit": None if response is None else response.returncode})
     if recovered.get("provider_acceptance_observed") and recovered.get("conversation_id"):
         try:
@@ -1717,6 +1720,7 @@ def reconcile_ambiguous(job: dict, device_id: str = DEVICE_ID) -> None:
         if complete_from_result(job, recovered):
             return
     event("ambiguous_get_reconcile", job_id=job_id, state=recovered.get("state"),
+          transport_error=transport_error,
           conversation_id=recovered.get("conversation_id"),
           next_scan_offset=int(recovered.get("next_offset") or 0), retry_after_seconds=delay)
 

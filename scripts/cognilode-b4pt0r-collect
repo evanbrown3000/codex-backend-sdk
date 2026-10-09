@@ -44,6 +44,18 @@ def retry_after_seconds(value: str) -> float:
             return 120.0
 
 
+def artifact_matches(item: dict) -> bool:
+    path = Path(str(item.get("path") or ""))
+    expected = str(item.get("sha256") or "").lower()
+    if not path.is_file() or not re.fullmatch(r"[0-9a-f]{64}", expected):
+        return False
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest() == expected
+
+
 def atomic_json(path: Path, value: dict) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
@@ -124,7 +136,7 @@ def collect(receipt_path: Path, *, allow_provider_read: bool = True) -> dict:
         links = set(re.findall(r"sandbox:(/mnt/data/[^\s)>\]]+)", local_text))
         files = list(local_result.get("downloaded_files") or [])
         files_complete = not links or (len(files) >= len(links) and all(
-            Path(str(item.get("path") or "")).is_file() for item in files))
+            artifact_matches(item) for item in files))
         if local_prompt and local_text and local_result.get("assistant_terminal") and files_complete:
             central = local_result.get("central_conversation_store") or {}
             if not central.get("ok"):

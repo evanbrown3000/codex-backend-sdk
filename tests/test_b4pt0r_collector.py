@@ -47,6 +47,26 @@ def test_local_terminal_with_central_readback_needs_no_provider_read(tmp_path, m
     assert json.loads((tmp_path / f"{stem}.collected.json").read_text())["complete"] is True
 
 
+def test_local_terminal_rejects_tampered_artifact(tmp_path):
+    stem = "b4pt0r-chatmode-tampered"
+    receipt_path = tmp_path / f"{stem}.sse.receipt.json"
+    receipt_path.write_text(json.dumps({"user_message_id": "user-id", "state": "provider_accepted"}))
+    artifact = tmp_path / "work.zip"
+    artifact.write_bytes(b"tampered")
+    (tmp_path / f"{stem}.json").write_text(json.dumps({
+        "prompt": "Research the queue",
+        "result": {
+            "terminal_assistant_text": "[ZIP](sandbox:/mnt/data/work.zip)",
+            "assistant_terminal": True,
+            "downloaded_files": [{"path": str(artifact), "sha256": "0" * 64}],
+            "central_conversation_store": {"ok": True, "central_readback_verified": True},
+        },
+    }))
+    result = collector.collect(receipt_path, allow_provider_read=False)
+    assert result["state"] == "awaiting_conversation_id"
+    assert not (tmp_path / f"{stem}.collected.json").exists()
+
+
 def test_retry_after_is_not_shortened():
     assert collector.retry_after_seconds("900") == 900
     assert collector.retry_after_seconds("55") >= 60

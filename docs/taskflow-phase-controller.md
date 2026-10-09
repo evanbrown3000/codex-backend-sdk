@@ -35,3 +35,11 @@ For this plan the acceptance probe is exactly:
 ```
 
 An `active` service is necessary but not sufficient for CP-4-6 completion: a real `codex.external-effect` D1 job must also complete with deployment/service-change identity and central readback.
+
+## Private cross-device attachment launchpad
+
+Set `COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET` and `COGNILODE_AWS_CLI` in the controller's environment to publish each verified ZIP under `taskflow-artifacts/sha256/<sha256>.zip` in the private S3 bucket before queuing its next phase. The controller reads back object size and SHA-256 metadata. Queue attachments retain the local path and include the immutable `s3://` mirror. The chat-mode worker uses its own AWS credentials to stage a missing local ZIP from that mirror, checks the object metadata and downloaded SHA-256, and only then physically uploads it to ChatGPT. Do not use a public Pages asset path as an artifact mirror: TaskFlow workpacks can contain internal code and conversation context.
+
+On a second Linux device, install the SDK at the same user path or adjust the `ExecStart` in `deploy/systemd/user/cognilode-chatmode-queue-worker@.service`. Put its own `COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET`, `COGNILODE_AWS_CLI`, network route, and lower `COGNILODE_CHATMODE_DEVICE_PRIORITY` in `%h/.config/cognilode/chatmode-queue-worker.env`. Give that device scoped read access to the launchpad prefix, a local authenticated ChatGPT/Codex identity, and access to the central D1 operator API. Verify `health`, a private ZIP download, and a fresh D1 heartbeat before enabling its instance. The hosted rhythm chooses among fresh eligible heartbeats; the D1 queue still fences each send.
+
+CP-7 requires a real controlled outage drill: EvanPC unavailable, an alternate-device claim at a hosted due slot, exactly one provider user-message ID, terminal in-chat report, hash-verified work ZIP, central conversation readback, and a recorded external effect. A second service installation or a synthetic heartbeat does not complete it.

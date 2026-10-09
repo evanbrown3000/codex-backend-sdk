@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.machinery
 import importlib.util
+import json
 from pathlib import Path
 import zipfile
 
@@ -60,3 +61,67 @@ def test_completion_requires_terminal_central_readback_and_exact_zip(tmp_path):
         archive.writestr("report.txt", "incomplete handoff")
     assert module.validated_result({**value, "downloaded_files": [{"path": str(missing),
         "sha256": hashlib.sha256(missing.read_bytes()).hexdigest(), "name": missing.name}]}) is None
+
+
+def test_stable_send_identity_is_device_independent():
+    module = worker()
+    assert module.stable_user_message_id('job-1') == module.stable_user_message_id('job-1')
+    assert module.stable_user_message_id('job-1') != module.stable_user_message_id('job-2')
+
+
+def test_remote_attachment_requires_hash_and_https(monkeypatch, tmp_path):
+    module = worker()
+    module.STAGE_ROOT = tmp_path / 'stage'
+    with pytest.raises(ValueError, match='exact SHA-256'):
+        module._stage_remote_attachment('https://example.invalid/a.zip', '')
+    with pytest.raises(ValueError, match='requires https'):
+        module._stage_remote_attachment('http://example.invalid/a.zip', 'a' * 64)
+
+
+def test_device_priority_is_configurable_and_not_part_of_send_identity():
+    module = worker()
+    assert isinstance(module.DEVICE_PRIORITY, int)
+    assert module.stable_user_message_id('same-job') == module.stable_user_message_id('same-job')
+
+
+def test_heartbeat_is_per_device_only_and_does_not_overwrite_global_gate(monkeypatch):
+    module = worker()
+    calls = []
+    monkeypatch.setattr(module, 'health_ready', lambda: True)
+    monkeypatch.setattr(module.sender, 'operator_memory_post', lambda body: calls.append(body) or {'ok': True})
+    module.heartbeat('laptop', 0)
+    assert [c['operation'] for c in calls] == ['rhythm_device_heartbeat']
+    assert calls[0]['device']['id'] == 'laptop'
+
+
+def test_private_s3_attachment_stages_exact_zip_for_alternate_device(monkeypatch, tmp_path):
+    module = worker()
+    module.STAGE_ROOT = tmp_path / 'stage'
+    source = tmp_path / 'research.zip'
+    with zipfile.ZipFile(source, 'w') as archive:
+        archive.writestr('plan.plan', '[ ] step')
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    monkeypatch.setenv('COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET', 'private-launchpad')
+    monkeypatch.setenv('COGNILODE_AWS_CLI', 'fake-aws')
+    calls = []
+
+    class Result:
+        def __init__(self, stdout=''):
+            self.stdout = stdout
+
+    def run(argv, **_kwargs):
+        calls.append(argv)
+        if argv[2] == 'head-object':
+            return Result(json.dumps({'ContentLength': source.stat().st_size,
+                                      'Metadata': {'sha256': digest}}))
+        if argv[2] == 'get-object':
+            Path(argv[7]).write_bytes(source.read_bytes())
+            return Result()
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(module.subprocess, 'run', run)
+    row = {'ref': '/no-local/research.zip', 'sha256': digest,
+           'mirrors': [f's3://private-launchpad/taskflow-artifacts/sha256/{digest}.zip']}
+    staged = module.attachment_paths({'attachment_refs': [row]})[0]
+    assert staged.read_bytes() == source.read_bytes()
+    assert [x[2] for x in calls] == ['head-object', 'get-object']

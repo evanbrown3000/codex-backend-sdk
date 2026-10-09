@@ -466,6 +466,36 @@ def verified_work_attachment(job: Mapping[str, Any], plan: Plan) -> dict[str, An
     return meta
 
 
+def portable_attachment_ref(path: Path, digest: str) -> dict[str, Any]:
+    row: dict[str, Any] = {"ref": "file:" + str(path), "sha256": digest}
+    bucket = os.environ.get("COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET", "").strip()
+    if bucket:
+        if not HEX64.fullmatch(digest) or not path.is_file() or path.stat().st_size > MAX_ZIP_BYTES or sha256_file(path) != digest:
+            raise ValueError("invalid content-addressed TaskFlow attachment")
+        aws = os.environ.get("COGNILODE_AWS_CLI") or shutil.which("aws")
+        if not aws:
+            raise RuntimeError("AWS CLI is required for private TaskFlow attachment mirroring")
+        key = f"taskflow-artifacts/sha256/{digest}.zip"
+        base = [aws, "s3api", "head-object", "--bucket", bucket, "--key", key, "--output", "json"]
+        head = subprocess.run(base, capture_output=True, text=True, check=False, timeout=30)
+        if head.returncode != 0:
+            subprocess.run([aws, "s3api", "put-object", "--bucket", bucket, "--key", key,
+                            "--body", str(path), "--server-side-encryption", "AES256",
+                            "--metadata", f"sha256={digest}", "--content-type", "application/zip",
+                            "--output", "json"], capture_output=True, text=True, check=True, timeout=120)
+            head = subprocess.run(base, capture_output=True, text=True, check=True, timeout=30)
+        metadata = json.loads(head.stdout)
+        if metadata.get("ContentLength") != path.stat().st_size or (metadata.get("Metadata") or {}).get("sha256") != digest:
+            raise RuntimeError("private TaskFlow attachment mirror readback mismatch")
+        row["mirrors"] = [f"s3://{bucket}/{key}"]
+    base = os.environ.get("COGNILODE_TASKFLOW_ATTACHMENT_MIRROR_BASE", "").strip().rstrip("/")
+    if base:
+        if not base.startswith("https://"):
+            raise RuntimeError("COGNILODE_TASKFLOW_ATTACHMENT_MIRROR_BASE must be https://")
+        row.setdefault("mirrors", []).append(base + "/" + digest.lower())
+    return row
+
+
 def ensure_chat_job(queue: QueueClient, plan: Plan, step: Step, research_meta: Mapping[str, Any], priority: int) -> dict[str, Any]:
     jid=phase_job_id(plan,step.step_id,"chatgpt_sandbox")
     existing=queue.get(jid)
@@ -474,7 +504,7 @@ def ensure_chat_job(queue: QueueClient, plan: Plan, step: Step, research_meta: M
     job=job_base(plan,step,"chatgpt_sandbox",provider="chatgpt.com",priority=priority,dependencies=[])
     job.update({"prompt":prompt,"prompt_sha256":sha256_bytes(prompt.encode()),"reasoning_effort":"xhigh",
                 "assigned_employee":"ChatGPT chat-mode native sandbox",
-                "attachment_refs":[{"ref":"file:"+str(research_meta["path"]),"sha256":research_meta["sha256"]}]})
+                "attachment_refs":[portable_attachment_ref(Path(research_meta["path"]), research_meta["sha256"])]})
     return queue.enqueue(job)
 
 
@@ -497,7 +527,7 @@ def ensure_external_job(queue: QueueClient, plan: Plan, step: Step, priority: in
     prompt=external_prompt(plan,step,Path(str(work["path"])),effect_receipt,external_employee)
     job=job_base(plan,step,"external_effect",provider="codex.external-effect",priority=priority,dependencies=final_dependency_ids(plan,step))
     job.update({"prompt":prompt,"prompt_sha256":sha256_bytes(prompt.encode()),"assigned_employee":external_employee,
-                "attachment_refs":[{"ref":"file:"+str(work["path"]),"sha256":work["sha256"]}]})
+                "attachment_refs":[portable_attachment_ref(Path(work["path"]), work["sha256"])]})
     return queue.enqueue(job)
 
 

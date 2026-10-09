@@ -15,9 +15,12 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.request
+import uuid
 import threading
 import time
 import zipfile
@@ -51,8 +54,9 @@ sender = _LazySender()
 
 ROOT = Path.home() / ".local/share/cognilode/chatmode-queue-worker"
 DEVICE_ID = os.environ.get("COGNILODE_CHATMODE_DEVICE_ID", "evanpc")
-DEVICE_PRIORITY = int(os.environ.get("COGNILODE_CHATMODE_DEVICE_PRIORITY", "100"))
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+DEVICE_PRIORITY = int(os.environ.get("COGNILODE_CHATMODE_DEVICE_PRIORITY", "100"))
+STAGE_ROOT = ROOT / "staged-attachments"
 
 
 def atomic_json(path: Path, value: dict) -> None:
@@ -83,21 +87,104 @@ def selected_for_device(job: dict, device_id: str = DEVICE_ID) -> bool:
             and str(job.get("claimed_by") or "").startswith("rhythm:" + device_id + ":"))
 
 
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _stage_remote_attachment(url: str, expected: str) -> Path:
+    if not expected or len(expected) != 64 or any(c not in "0123456789abcdefABCDEF" for c in expected):
+        raise ValueError("remote attachment requires exact SHA-256")
+    expected = expected.lower()
+    if url.startswith("s3://"):
+        bucket = os.environ.get("COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET", "").strip()
+        key = f"taskflow-artifacts/sha256/{expected}.zip"
+        if not bucket or url != f"s3://{bucket}/{key}":
+            raise ValueError("S3 attachment is outside the configured private launchpad")
+        aws = os.environ.get("COGNILODE_AWS_CLI") or shutil.which("aws")
+        if not aws:
+            raise ValueError("AWS CLI unavailable on selected network device")
+        STAGE_ROOT.mkdir(parents=True, exist_ok=True)
+        target = STAGE_ROOT / expected
+        if target.is_file() and _sha256_file(target) == expected:
+            return target
+        head = subprocess.run([aws, "s3api", "head-object", "--bucket", bucket, "--key", key,
+                               "--output", "json"], capture_output=True, text=True, check=True, timeout=30)
+        metadata = json.loads(head.stdout)
+        if (not 0 < int(metadata.get("ContentLength", 0)) <= MAX_ATTACHMENT_BYTES
+                or (metadata.get("Metadata") or {}).get("sha256") != expected):
+            raise ValueError("private attachment metadata mismatch")
+        with tempfile.NamedTemporaryFile(dir=STAGE_ROOT, delete=False) as temp:
+            name = Path(temp.name)
+        try:
+            subprocess.run([aws, "s3api", "get-object", "--bucket", bucket, "--key", key,
+                            str(name), "--output", "json"], capture_output=True, text=True,
+                           check=True, timeout=120)
+            if name.stat().st_size != int(metadata["ContentLength"]) or _sha256_file(name) != expected:
+                raise ValueError("private attachment SHA-256 mismatch")
+            os.replace(name, target)
+        finally:
+            name.unlink(missing_ok=True)
+        return target
+    if not url.startswith("https://"):
+        raise ValueError("remote attachment staging requires https")
+    STAGE_ROOT.mkdir(parents=True, exist_ok=True)
+    target = STAGE_ROOT / expected.lower()
+    if target.is_file() and _sha256_file(target) == expected.lower():
+        return target
+    req = urllib.request.Request(url, headers={"User-Agent": "cognilode-chatmode-actuator/1"})
+    with tempfile.NamedTemporaryFile(dir=STAGE_ROOT, delete=False) as temp:
+        name = Path(temp.name)
+        try:
+            with urllib.request.urlopen(req, timeout=120) as response:
+                total = 0
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > MAX_ATTACHMENT_BYTES:
+                        raise ValueError("attachment exceeds 20 MiB")
+                    temp.write(chunk)
+            temp.flush()
+            if _sha256_file(name) != expected:
+                raise ValueError("staged attachment SHA-256 mismatch")
+            os.replace(name, target)
+        finally:
+            name.unlink(missing_ok=True)
+    return target
+
+
 def attachment_paths(job: dict) -> list[Path]:
     paths = []
     for row in job.get("attachment_refs") or []:
+        expected = "" if isinstance(row, str) else str(row.get("sha256") or "")
         ref = row if isinstance(row, str) else str(row.get("ref") or "")
         if ref.startswith("file:"):
             ref = ref.removeprefix("file:")
-        path = Path(ref).expanduser()
-        if not path.is_absolute() or not path.is_file():
-            raise ValueError("attachment not readable on selected network device")
+        path = Path(ref).expanduser() if ref and not ref.startswith(("https://", "http://", "s3://")) else None
+        if not path or not path.is_absolute() or not path.is_file():
+            mirrors = [] if isinstance(row, str) else list(row.get("mirrors") or [])
+            if ref.startswith(("https://", "s3://")):
+                mirrors.insert(0, ref)
+            staged = None
+            for url in mirrors:
+                try:
+                    staged = _stage_remote_attachment(str(url), expected)
+                    break
+                except Exception:
+                    continue
+            if staged is None:
+                raise ValueError("attachment not readable or stageable on selected network device")
+            path = staged
         if path.stat().st_size > MAX_ATTACHMENT_BYTES:
             raise ValueError("attachment exceeds 20 MiB")
-        expected = "" if isinstance(row, str) else str(row.get("sha256") or "")
-        if expected and hashlib.sha256(path.read_bytes()).hexdigest() != expected.lower():
+        if expected and _sha256_file(path) != expected.lower():
             raise ValueError("attachment SHA-256 mismatch")
-        if path.suffix.lower() == ".zip" and not zipfile.is_zipfile(path):
+        if (path.suffix.lower() == ".zip" or ref.lower().endswith(".zip")) and not zipfile.is_zipfile(path):
             raise ValueError("attachment ZIP invalid")
         paths.append(path)
     return paths
@@ -454,7 +541,27 @@ def recover(job: dict) -> None:
             complete_from_result(job, value)
 
 
-def execute(job: dict) -> None:
+def stable_user_message_id(job_id: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, "cognilode-chatmode-queue:" + job_id))
+
+
+def send_custody(job: dict) -> dict:
+    return sender.operator_memory_post({"operation": "get_chatmode_send_custody", "job_id": job["id"]})
+
+
+def record_send_intent(job: dict, device_id: str) -> dict:
+    return sender.operator_memory_post({"operation": "record_chatmode_send_intent", **fence(job),
+        "device_id": device_id, "user_message_id": stable_user_message_id(str(job["id"]))})
+
+
+def record_send_receipt(job: dict, value: dict, device_id: str) -> None:
+    sender.operator_memory_post({"operation": "record_chatmode_provider_receipt", **fence(job),
+        "device_id": device_id, "user_message_id": stable_user_message_id(str(job["id"])),
+        "conversation_id": value.get("conversation_id"),
+        "terminal_assistant_message_id": value.get("terminal_assistant_message_id"),
+        "provider_acceptance_observed": bool(value.get("provider_acceptance_observed") or value.get("conversation_id"))})
+
+def execute(job: dict, device_id: str = DEVICE_ID) -> None:
     job_id = str(job["id"])
     try:
         if result_for_job(job_id):
@@ -480,6 +587,10 @@ def execute(job: dict) -> None:
             return
         atomic_json(job_state_path(job_id), {"state": "effect_pending", "job_id": job_id,
                                             "prompt_sha256": job["prompt_sha256"]})
+        intent = record_send_intent(job, device_id)
+        if not intent.get("ok"):
+            event("send_intent_rejected", job_id=job_id, error=intent.get("error"))
+            return
         command = [sys.executable, str(SENDER_PATH), "send", "--prompt-file", str(prompt_path),
                    "--queue-job-id", job_id, "--effort", str(job.get("reasoning_effort") or "xhigh"),
                    "--timeout", "1800"]
@@ -487,6 +598,11 @@ def execute(job: dict) -> None:
             command.extend(["--attach", str(path)])
         response = subprocess.run(command, text=True, capture_output=True, timeout=2100, check=False)
         value = json.loads(response.stdout) if response.stdout.strip().startswith("{") else {}
+        if value:
+            try:
+                record_send_receipt(job, value, device_id)
+            except Exception as exc:
+                event("send_receipt_record_failed", job_id=job_id, error=type(exc).__name__+":"+str(exc)[:180])
         if value and complete_from_result(job, value):
             return
         atomic_json(job_state_path(job_id), {"state": "reconcile_required", "job_id": job_id,
@@ -510,12 +626,6 @@ def health_ready() -> bool:
 
 def heartbeat(device_id: str, active: int) -> None:
     ready = health_ready()
-    sender.operator_memory_post({"operation": "rhythm_gate_update", "gate": {
-        "active_turns": active, "max_active_turns": 1,
-        "quota_units": 1, "quota_remaining": 1,
-        "estimated_cost": 0, "cost_remaining": 1,
-        "devices": [{"id": device_id, "available": ready, "chatgpt_eligible": True, "priority": DEVICE_PRIORITY}],
-    }})
     sender.operator_memory_post({"operation": "rhythm_device_heartbeat", "device": {
         "id": device_id, "available": ready, "chatgpt_eligible": True, "priority": DEVICE_PRIORITY,
         "active_turns": active,
@@ -545,7 +655,7 @@ def poll(device_id: str, active_ids: set[str], lock: threading.Lock) -> None:
             active_ids.add(job_id)
         def run(item=job, key=job_id):
             try:
-                execute(item)
+                execute(item, device_id)
             finally:
                 with lock:
                     active_ids.discard(key)

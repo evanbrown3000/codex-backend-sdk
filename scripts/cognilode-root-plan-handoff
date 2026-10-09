@@ -585,9 +585,37 @@ def enqueue_outcome_gated_successor(
         effect = queue.get(job_id)
         if not effect or effect.get("state") != "complete":
             raise ValueError("completed root step lost its D1 external effect")
+        evidence = effect.get("effect_evidence") or effect.get("effect_evidence_json") or []
+        if isinstance(evidence, str):
+            evidence = json.loads(evidence)
+        if not isinstance(evidence, list):
+            raise ValueError("completed root effect evidence is malformed")
+        receipts = [row for row in evidence if isinstance(row, Mapping)
+                    and row.get("kind") == "external_effect_receipt"]
+        probes = [row for row in evidence if isinstance(row, Mapping)
+                  and row.get("kind") == "independent_effect_probe"]
+        if len(receipts) != 1 or len(probes) != 1:
+            raise ValueError("root recurrence needs one actual effect receipt and probe observation")
+        receipt_path = Path(str(receipts[0].get("path") or ""))
+        receipt_sha = str(receipts[0].get("ref") or "")
+        if (not HEX64.fullmatch(receipt_sha) or not receipt_path.is_file()
+            or receipt_path.stat().st_size > 1024 * 1024):
+            raise ValueError("root effect receipt is not available on execution host")
+        receipt_bytes = receipt_path.read_bytes()
+        if sha256(receipt_bytes).hexdigest() != receipt_sha:
+            raise ValueError("root effect receipt changed since D1 completion")
+        try:
+            receipt_body = json.loads(receipt_bytes)
+        except json.JSONDecodeError as exc:
+            raise ValueError("root effect receipt is not JSON") from exc
+        if not isinstance(receipt_body, Mapping):
+            raise ValueError("root effect receipt is not a JSON object")
         item = {"step_id": step.step_id, "title": step.title,
                 "hierarchy_scope": step.fields.get("hierarchy_scope", ""),
-                "effect_job_id": job_id, "effect_evidence": effect.get("effect_evidence") or [],
+                "effect_job_id": job_id, "effect_evidence": evidence,
+                "external_effect_receipt": receipt_body,
+                "external_effect_receipt_sha256": receipt_sha,
+                "independent_probe_observation": probes[0].get("observed"),
                 "effect_conversation_id": effect.get("conversation_id") or ""}
         effect_cid = str(item["effect_conversation_id"])
         if effect_cid:

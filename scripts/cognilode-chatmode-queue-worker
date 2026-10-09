@@ -87,6 +87,7 @@ def attachment_paths(job: dict) -> list[Path]:
 # DecisionX labeling is a phase of the EXISTING D1 queue. Only derived progress
 # metadata and transient attachment ZIPs live on this network device.
 import sqlite3
+from contextlib import contextmanager
 
 DX_HOME = ROOT / "decisionx-label-batches"
 DX_TARGET = 128
@@ -121,14 +122,22 @@ format/output defect before finishing. Avoid rewriting entire source transcripts
 inside descriptors. Reason across the batch thoroughly.
 """
 
+@contextmanager
 def _dx_connection():
     DX_HOME.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(str(DX_HOME / "progress.sqlite3"))
-    db.execute("""CREATE TABLE IF NOT EXISTS episodes
-        (id TEXT PRIMARY KEY, source_sha TEXT NOT NULL, state TEXT NOT NULL,
-         attempts INTEGER NOT NULL DEFAULT 0, retry_after REAL NOT NULL DEFAULT 0,
-         batch TEXT, updated REAL NOT NULL)""")
-    return db
+    try:
+        db.execute("""CREATE TABLE IF NOT EXISTS episodes
+            (id TEXT PRIMARY KEY, source_sha TEXT NOT NULL, state TEXT NOT NULL,
+             attempts INTEGER NOT NULL DEFAULT 0, retry_after REAL NOT NULL DEFAULT 0,
+             batch TEXT, updated REAL NOT NULL)""")
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 def _dx_load():
     path = DX_HOME / "scan.json"
@@ -277,12 +286,20 @@ def decisionx_admit_labels(job, files, conversation_id):
         sources = {r["episode_id"]:r for r in (json.loads(line) for line in archive.read("episodes.jsonl").decode("utf-8").splitlines() if line.strip())}
     expected = {r["episode_id"]:r["source_sha256"] for r in input_manifest["episodes"]}
     output = next((Path(r["path"]) for r in files if str(r["name"] or "").lower().endswith(".zip")),None)
-    if output is None: raise RuntimeError("missing output ZIP")
-    with zipfile.ZipFile(output) as archive:
-        names=archive.namelist()
-        name=next((n for n in names if n.split("/")[-1]=="decisionx_iae_labels.jsonl"),None)
-        if not name: raise RuntimeError("label ZIP missing decisionx_iae_labels.jsonl")
-        records=[json.loads(x) for x in archive.read(name).decode("utf-8").splitlines() if x.strip()]
+    label_error = None
+    records = []
+    try:
+        if output is None:
+            raise ValueError("missing_label_output")
+        with zipfile.ZipFile(output) as archive:
+            names=archive.namelist()
+            name=next((n for n in names if n.split("/")[-1]=="decisionx_iae_labels.jsonl"),None)
+            if not name: raise ValueError("missing_decisionx_iae_labels_jsonl")
+            records=[json.loads(x) for x in archive.read(name).decode("utf-8").splitlines() if x.strip()]
+    except (OSError,ValueError,zipfile.BadZipFile,KeyError,json.JSONDecodeError) as exc:
+        # A provider terminal result is real even if the labeling artifact was
+        # malformed. Track failed semantic work and automatically requeue it.
+        label_error = type(exc).__name__ + ":" + str(exc)[:140]
     selected, seen = [], set()
     for row in records:
         if not isinstance(row,dict): continue
@@ -311,7 +328,7 @@ def decisionx_admit_labels(job, files, conversation_id):
                                      "intent_turn_id":src["intent_turn"].get("id"),
                                      "action_turn_ids":[r.get("id") for r in src.get("action_turns") or []],
                                      "evaluation_turn_id":(src.get("next_user_turn") or {}).get("id"),
-                                     "human_authorship_unverified":True}})
+                                     "source_authorship":src["intent_turn"].get("authorship","unverified")}})
     # Existing append-only D1 segment store with idempotent segment IDs and FTS.
     for offset in range(0,len(selected),24):
         result=sender.operator_memory_post({"operation":"append_segments",
@@ -328,9 +345,9 @@ def decisionx_admit_labels(job, files, conversation_id):
             cooldown=min(86400,900*(2**min(7,attempts)))
             db.execute("UPDATE episodes SET state='retry',retry_after=?,updated=? WHERE id=?",
                        (now+cooldown,now,eid))
-    event("decisionx_label_admitted",job_id=job["id"],requested=len(expected),
+    event("decisionx_label_admitted",job_id=job["id"],label_error=label_error,requested=len(expected),
           accepted=len(seen),missing=len(missing),conversation_id=conversation_id)
-    return {"requested":len(expected),"admitted":len(seen),"retry_pending":len(missing)}
+    return {"requested":len(expected),"admitted":len(seen),"retry_pending":len(missing),"label_error":label_error}
 
 
 def validated_result(value: dict) -> tuple[str, list[dict]] | None:

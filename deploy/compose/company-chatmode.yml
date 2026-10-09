@@ -331,7 +331,6 @@ services:
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
       - company_relay_custody:/relay:ro
       - company_codex_release:/codex:ro
-      - company_auth:/home/worker/.codex
       - company_operator:/home/worker/.config/cognilode:ro
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
     depends_on:

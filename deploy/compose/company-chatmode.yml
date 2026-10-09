@@ -317,7 +317,7 @@ services:
     network_mode: "service:remote-shell"
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
     working_dir: /runtime/source/current
-    entrypoint: [/codex/bin/codex, exec-server, --listen, ws://127.0.0.1:8799]
+    entrypoint: [sh, -c, "until test -x /codex/bin/codex; do sleep 10; done; exec /codex/bin/codex exec-server --listen ws://127.0.0.1:8799"]
     environment:
       HOME: /home/worker
       CODEX_HOME: /home/worker/.codex

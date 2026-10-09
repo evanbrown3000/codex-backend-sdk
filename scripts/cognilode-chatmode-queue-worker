@@ -1154,7 +1154,8 @@ def complete_from_result(job: dict, value: dict) -> bool:
     if not checked:
         return False
     conversation_id, files = checked
-    if job.get("taskflow_multi_phase") or (job.get("payload") or {}).get("taskflow_multi_phase"):
+    if (job.get("taskflow_multi_phase") or (job.get("payload") or {}).get("taskflow_multi_phase")
+        or job.get("phase") == "decisionx_successor"):
         try:
             for row in files:
                 if str(row["name"] or "").lower().endswith(".zip"):

@@ -1,0 +1,408 @@
+#!/usr/bin/env python3
+"""Verify one native Chat-mode DecisionX successor and install its TaskFlow plan.
+
+The completed D1 job and shared conversation are the only inputs of authority.
+The output remains an agent proposal until its ZIP, cited sources, native compute,
+and the existing TaskFlow installer have been independently checked.
+"""
+from __future__ import annotations
+
+import argparse
+from datetime import datetime
+from hashlib import sha256
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+from typing import Any, Callable, Mapping
+import zipfile
+
+HERE = Path(__file__).resolve().parent
+DEFAULT_PLAN_ROOT = HERE.parent / "plans"
+DEFAULT_STATE_ROOT = Path.home() / ".local/share/cognilode/decisionx-successor/handoff"
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+EXPECTED = ("DECISIONX_ADVICE.json", "successor.plan",
+            "EXTERNAL_EFFECT_INSTRUCTIONS.md", "NATIVE_COMPUTE.json")
+MAX_ZIP_BYTES = 20 * 1024 * 1024
+
+
+def load(path: Path, name: str) -> Any:
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    if spec is None:
+        raise ValueError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    loader.exec_module(module)
+    return module
+
+
+def digest(raw: bytes) -> str:
+    return sha256(raw).hexdigest()
+
+
+def canonical(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":")).encode("utf-8")
+
+
+def exact_refs(rows: Any, *, candidate: bool = False) -> list[dict[str, str]]:
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("nonempty source references required")
+    fields = ("provider", "conversation_id", "prompt_sha256", "response_sha256", "source_sha256")
+    if candidate:
+        fields = ("segment_id", *fields)
+    result = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        if not isinstance(row, Mapping) or not all(isinstance(row.get(k), str) and row[k] for k in fields):
+            raise ValueError("malformed source or candidate reference")
+        value = {k: row[k] for k in fields}
+        if any(not HEX64.fullmatch(value[k]) for k in ("prompt_sha256", "response_sha256", "source_sha256")):
+            raise ValueError("invalid source hash")
+        key = ((value["segment_id"], value["provider"], value["conversation_id"])
+               if candidate else (value["provider"], value["conversation_id"]))
+        if key in seen:
+            raise ValueError("duplicate source reference")
+        seen.add(key)
+        result.append(value)
+    return result
+
+
+def stage_zip(ref: Mapping[str, Any], *, stage_remote: Callable[[str, str], Path] | None = None) -> Path:
+    expected = str(ref.get("sha256") or "")
+    if not HEX64.fullmatch(expected):
+        raise ValueError("attachment lacks exact SHA-256")
+    raw = str(ref.get("path") or ref.get("ref") or "")
+    path = Path(raw.removeprefix("file:"))
+    if path.is_file() and path.stat().st_size <= MAX_ZIP_BYTES and digest(path.read_bytes()) == expected:
+        return path
+    if stage_remote is None:
+        worker = load(HERE / "cognilode-chatmode-queue-worker", "dx_advice_remote_stager")
+        stage_remote = worker._stage_remote_attachment
+    for mirror in ref.get("mirrors") or []:
+        try:
+            path = stage_remote(str(mirror), expected)
+            if path.is_file() and path.stat().st_size <= MAX_ZIP_BYTES and digest(path.read_bytes()) == expected:
+                return path
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            continue
+    raise ValueError("physical ZIP missing or changed on this device and mirrors")
+
+
+def provider_job(post: Callable[[dict[str, Any]], Mapping[str, Any]], job_id: str) -> tuple[dict, dict]:
+    result = post({"operation": "get_job", "job_id": job_id})
+    job = result.get("job") or {}
+    if (not result.get("ok") or job.get("id") != job_id or job.get("state") != "complete"
+        or job.get("provider") != "chatgpt.com" or job.get("project") != "DecisionX"
+        or job.get("phase") != "decisionx_successor"
+        or job.get("reason") != "source_linked_successor_from_verified_historical_IAE"
+        or (job.get("decisionx") or {}).get("reasoning_effort") != "xhigh"
+        or not job.get("rhythm_tape_sha256")):
+        raise ValueError("completed historical-rhythm Chat-mode DecisionX job required")
+    cid = str(job.get("conversation_id") or "")
+    evidence = job.get("effect_evidence") or []
+    if not cid or not all(any(isinstance(row, Mapping) and row.get("kind") == kind and row.get("ref") == cid
+                              for row in evidence)
+                          for kind in ("provider_conversation", "central_conversation_readback")):
+        raise ValueError("provider turn and central readback not proven")
+    if not any(isinstance(row, Mapping) and row.get("kind") == "provider_observed_native_exec"
+               and row.get("raw_stream_sha256") for row in evidence):
+        raise ValueError("successful provider-native container execution not observed")
+    read = post({"operation": "read", "provider": "chatgpt.com", "conversation_id": cid})
+    central = read.get("conversation") or {}
+    if not read.get("ok") or central.get("conversation_id") != cid or central.get("provider") != "chatgpt.com":
+        raise ValueError("exact provider conversation not independently reread")
+    if not any(isinstance(row, Mapping) and row.get("role") == "assistant"
+               and row.get("source_content_complete") is True and str(row.get("content") or "").strip()
+               for row in central.get("events") or []):
+        raise ValueError("complete in-chat provider report missing")
+    return job, central
+
+
+def verify_shared_gates(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, minimum: int = 500) -> dict:
+    root = load(HERE / "cognilode-root-plan-handoff", "dx_advice_stock_census")
+    stock = root.shared_stock_census(post, minimum=minimum)
+    if not stock.get("multi_year_ready"):
+        raise ValueError("complete Drive-verified multi-year conversation stock below threshold")
+    index = post({"operation": "decisionx_candidates", "q": "agent", "limit": 1})
+    if (not index.get("ok") or index.get("ready") is not True
+        or int(index.get("distinct_sources") or 0) < minimum):
+        raise ValueError("shared DecisionX descriptor index below threshold")
+    return {"complete_drive_sources": stock["distinct_complete"],
+            "multi_year_span_days": stock["span_days"],
+            "descriptor_sources": int(index["distinct_sources"])}
+
+
+def verify_inputs(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapping[str, Any],
+                  central: Mapping[str, Any], *, stage_remote=None) -> tuple[list[str], list[dict], list[dict], str]:
+    refs = job.get("attachment_refs") or []
+    if not isinstance(refs, list) or len(refs) < 2 or len(refs) > 64:
+        raise ValueError("bounded target/candidate and full-source attachments required")
+    uploads = {str(row.get("sha256")) for row in central.get("provider_structured_uploads") or []
+               if isinstance(row, Mapping)}
+    paths, hashes = [], []
+    for ref in refs:
+        if not isinstance(ref, Mapping) or str(ref.get("sha256") or "") not in uploads:
+            raise ValueError("physical provider upload missing")
+        paths.append(stage_zip(ref, stage_remote=stage_remote))
+        hashes.append(str(ref["sha256"]))
+    with zipfile.ZipFile(paths[0]) as archive:
+        if archive.testzip() is not None or "MANIFEST.json" not in archive.namelist():
+            raise ValueError("target/candidate packet failed integrity check")
+        packet = json.loads(archive.read("MANIFEST.json"))
+        if (packet.get("schema") != "cognilode.decisionx.successor_input.v1"
+            or not HEX64.fullmatch(str(packet.get("target_json_sha256") or ""))
+            or not HEX64.fullmatch(str(packet.get("candidates_json_sha256") or ""))
+            or not HEX64.fullmatch(str(packet.get("source_refs_sha256") or ""))
+            or any(name not in archive.namelist() or
+                   digest(archive.read(name)) != packet.get(field)
+                   for name, field in (("target.json", "target_json_sha256"),
+                                       ("candidates.json", "candidates_json_sha256")))):
+            raise ValueError("target/candidate packet schema or member SHA mismatch")
+    source_refs = exact_refs(packet.get("source_refs"))
+    source_refs_sha = digest(canonical(packet["source_refs"]))
+    if source_refs_sha != packet["source_refs_sha256"]:
+        raise ValueError("uploaded source reference SHA mismatch")
+    candidate_refs = exact_refs(packet.get("candidate_refs"), candidate=True)
+    source_set = {(r["provider"], r["conversation_id"], r["prompt_sha256"],
+                   r["response_sha256"], r["source_sha256"]) for r in source_refs}
+    if len(candidate_refs) > 12 or any(tuple(r[k] for k in ("provider", "conversation_id", "prompt_sha256",
+                                                     "response_sha256", "source_sha256")) not in source_set
+                                    for r in candidate_refs):
+        raise ValueError("candidate citations exceed uploaded historical sources")
+    root = load(HERE / "cognilode-root-plan-handoff", "dx_advice_source_reader")
+    for ref in source_refs:
+        read = post({"operation": "read", "provider": ref["provider"],
+                     "conversation_id": ref["conversation_id"]})
+        source = read.get("conversation") or {}
+        if (root._complete_source(ref, read) is None or
+            any(str(source.get(k) or "") != ref[k] for k in ("prompt_sha256", "response_sha256")) or
+            str((source.get("capture") or {}).get("source_sha256") or "") != ref["source_sha256"]):
+            raise ValueError("uploaded historical source no longer matches complete Drive readback")
+    for ref in candidate_refs:
+        segment_read = post({"operation": "read_segment", "segment_id": ref["segment_id"]})
+        segment = segment_read.get("segment") or {}
+        meta = segment.get("metadata") or {}
+        if (not segment_read.get("ok") or segment.get("segment_id") != ref["segment_id"]
+            or segment.get("kind") != "IAE" or meta.get("drive_verified_source") is not True
+            or segment.get("source_key") != ref["provider"] + ":" + ref["conversation_id"]
+            or meta.get("full_source_prompt_sha256") != ref["prompt_sha256"]
+            or meta.get("full_source_response_sha256") != ref["response_sha256"]):
+            raise ValueError("candidate descriptor missing from shared DecisionX index")
+    native_batch = load(HERE / "decisionx_native_batch.py", "dx_advice_full_sources")
+    full, full_hashes = native_batch.full_sources(paths[1:])
+    if (full_hashes != hashes[1:] or
+        set(full) != {(r["provider"], r["conversation_id"]) for r in source_refs}):
+        raise ValueError("uploaded full-source ZIPs do not cover cited sources")
+    for ref in source_refs:
+        source = full[(ref["provider"], ref["conversation_id"])]
+        if (source.get("prompt_sha256") != ref["prompt_sha256"]
+            or source.get("response_sha256") != ref["response_sha256"]
+            or (source.get("capture") or {}).get("source_sha256") != ref["source_sha256"]):
+            raise ValueError("uploaded full-source contents differ from shared readback")
+    return hashes, source_refs, candidate_refs, source_refs_sha
+
+
+def verify_output(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapping[str, Any],
+                  evidence: list, input_hashes: list[str],
+                  source_refs: list[dict], candidate_refs: list[dict], source_refs_sha: str,
+                  *, stage_remote=None) -> tuple[dict, bytes, str]:
+    artifacts = [row for row in evidence if isinstance(row, Mapping)
+                 and row.get("kind") == "chatgpt_sandbox_artifact"]
+    if len(artifacts) != 1:
+        raise ValueError("exactly one returned Chat-mode ZIP required")
+    path = stage_zip(artifacts[0], stage_remote=stage_remote)
+    with zipfile.ZipFile(path) as archive:
+        names = archive.namelist()
+        if archive.testzip() is not None or len(names) != len(set(names)) or set(names) != {"MANIFEST.json", *EXPECTED}:
+            raise ValueError("returned ZIP members missing, duplicated, or unexpected")
+        manifest = json.loads(archive.read("MANIFEST.json"))
+        members = manifest.get("members") or {}
+        if (manifest.get("schema") != "cognilode.decisionx.successor_output.v1"
+            or not isinstance(members, Mapping) or set(members) != set(EXPECTED)
+            or any(members[name] != digest(archive.read(name)) for name in EXPECTED)):
+            raise ValueError("returned member SHA manifest mismatch")
+        advice = json.loads(archive.read("DECISIONX_ADVICE.json"))
+        native = json.loads(archive.read("NATIVE_COMPUTE.json"))
+        plan_raw = archive.read("successor.plan")
+        instructions = archive.read("EXTERNAL_EFFECT_INSTRUCTIONS.md")
+    if len(instructions.strip()) < 100:
+        raise ValueError("external effect instructions are superficial")
+    if (not isinstance(native, Mapping) or native.get("schema") != "cognilode.decisionx.successor_native_compute.v1"
+        or native.get("input_zip_sha256s") != input_hashes
+        or native.get("target_job_id") != (job.get("decisionx") or {}).get("target_job_id")
+        or native.get("source_count") != len(source_refs)
+        or native.get("candidate_count") != len(candidate_refs)
+        or native.get("source_refs_sha256") != source_refs_sha):
+        raise ValueError("provider-native compute proof does not bind uploaded inputs")
+    if (not isinstance(advice, Mapping) or advice.get("schema") != "cognilode.decisionx.successor_advice.v1"
+        or advice.get("target_job_id") != (job.get("decisionx") or {}).get("target_job_id")
+        or not isinstance(advice.get("proposed_next_instruction"), str)
+        or len(advice["proposed_next_instruction"].strip()) < 80
+        or not isinstance(advice.get("changed_conditions"), list)
+        or not isinstance(advice.get("uncertainties"), list)
+        or not advice["changed_conditions"] or not advice["uncertainties"]):
+        raise ValueError("DecisionX advice lacks target, substance, change, or uncertainty")
+    target_id = str((job.get("decisionx") or {}).get("target_job_id") or "")
+    target_job_result = post({"operation": "get_job", "job_id": target_id})
+    target_job = target_job_result.get("job") or {}
+    target_read = post({"operation": "read", "provider": target_job.get("provider"),
+                        "conversation_id": target_job.get("conversation_id")})
+    target = target_read.get("conversation") or {}
+    if (not target_job_result.get("ok") or target_job.get("id") != target_id
+        or target_job.get("state") != "complete" or not target_read.get("ok")
+        or (target.get("provider"), target.get("conversation_id")) !=
+           (target_job.get("provider"), target_job.get("conversation_id"))
+        or any(advice.get(field) != target.get(key) for field, key in
+               (("target_provider", "provider"), ("target_conversation_id", "conversation_id"),
+                ("target_prompt_sha256", "prompt_sha256"),
+                ("target_response_sha256", "response_sha256")))):
+        raise ValueError("advice target does not match completed central target conversation")
+    cited = exact_refs(advice.get("candidate_refs"), candidate=True)
+    allowed = {tuple(r[k] for k in ("segment_id", "provider", "conversation_id",
+                                    "prompt_sha256", "response_sha256", "source_sha256")) for r in candidate_refs}
+    if not all(tuple(r[k] for k in ("segment_id", "provider", "conversation_id",
+                                      "prompt_sha256", "response_sha256", "source_sha256")) in allowed for r in cited):
+        raise ValueError("DecisionX advice cites a candidate outside the provider packet")
+    controller = load(HERE / "cognilode-taskflow-phase-controller", "dx_advice_plan_parser")
+    plan_text = plan_raw.decode("utf-8")
+    plan = controller.parse_plan_text(plan_text)
+    if (len(plan.steps) == 0 or any(step.checked for step in plan.steps)
+        or any(not step.fields.get("owner") or not step.fields.get("role")
+               or not step.fields.get("effect_probe_command")
+               or not step.fields.get("effect_probe_expected") for step in plan.steps)
+        or advice["proposed_next_instruction"].strip() not in plan_text):
+        raise ValueError("successor plan needs pending owned steps, independent probes, and exact instruction")
+    return dict(advice), plan_raw, str(artifacts[0]["sha256"])
+
+
+def commit_and_install(plan_raw: bytes, *, job: Mapping[str, Any], output_root: Path,
+                       install: Callable[[Path, Mapping[str, Any]], Mapping[str, Any]]) -> dict:
+    controller = load(HERE / "cognilode-taskflow-phase-controller", "dx_advice_plan_commit")
+    parsed = controller.parse_plan_text(plan_raw.decode("utf-8"))
+    receipt = job.get("decisionx") or {}
+    employees = {"project_id": parsed.project_id,
+                 "research_employee": receipt.get("research_employee"),
+                 "external_employee": receipt.get("external_employee"),
+                 "priority": job.get("priority", 50)}
+    if (not employees["research_employee"] or not employees["external_employee"]
+        or employees["research_employee"] == employees["external_employee"]):
+        raise ValueError("named research and external-effect Codex employees required")
+    root = output_root.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    repo = subprocess.run(["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+                          text=True, capture_output=True, timeout=10, check=False)
+    if repo.returncode != 0:
+        raise ValueError("plan destination must be inside existing TaskFlow Git project")
+    project_repo = Path(repo.stdout.strip()).resolve()
+    if not root.is_relative_to(project_repo):
+        raise ValueError("plan destination outside Git project")
+    target = root / f"decisionx-{digest(job['id'].encode())[:12]}-{digest(plan_raw)[:12]}.plan"
+    if target.exists() and target.read_bytes() != plan_raw:
+        raise ValueError("existing plan path has different content")
+    if not target.exists():
+        temp = target.with_suffix(".plan.next")
+        temp.write_bytes(plan_raw)
+        os.replace(temp, target)
+    relative = target.relative_to(project_repo).as_posix()
+    committed = subprocess.run(["git", "-C", str(project_repo), "show", f"HEAD:{relative}"],
+                               capture_output=True, timeout=10, check=False)
+    if committed.returncode != 0 or committed.stdout != plan_raw:
+        subprocess.run(["git", "-C", str(project_repo), "add", "--", relative],
+                       capture_output=True, check=True, timeout=15)
+        subprocess.run(["git", "-C", str(project_repo), "commit", "--only", "-m",
+                        f"Record DecisionX provider successor {job['id']}", "--", relative],
+                       capture_output=True, check=True, timeout=30)
+    controller.verify_plan_revision(controller.parse_plan(target))
+    installed = install(target, employees)
+    if installed.get("ok") is not True or installed.get("single_queue") != "cloudflare-d1":
+        raise ValueError("Secretary/TaskFlow installer did not confirm shared queue")
+    return {"plan_path": str(target), "plan_sha256": digest(plan_raw),
+            "secretary_taskflow_installation": installed}
+
+
+def handoff(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, job_id: str,
+            output_root: Path, stage_remote=None,
+            install: Callable[[Path, Mapping[str, Any]], Mapping[str, Any]] | None = None) -> dict:
+    gates = verify_shared_gates(post)
+    job, central = provider_job(post, job_id)
+    hashes, sources, candidates, source_refs_sha = verify_inputs(post, job, central, stage_remote=stage_remote)
+    advice, plan, artifact_sha = verify_output(post, job, job["effect_evidence"], hashes,
+                                                sources, candidates, source_refs_sha,
+                                                stage_remote=stage_remote)
+    if install is None:
+        root = load(HERE / "cognilode-root-plan-handoff", "dx_advice_taskflow_installer")
+        install = root.install_taskflow
+    committed = commit_and_install(plan, job=job, output_root=output_root, install=install)
+    return {"ok": True, "provider_requests_created": 0, "job_id": job_id,
+            "provider_conversation_id": job["conversation_id"],
+            "work_product_sha256": artifact_sha,
+            "cited_candidate_count": len(advice["candidate_refs"]),
+            "shared_gates": gates, **committed}
+
+
+def tick(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, job_id: str,
+         output_root: Path = DEFAULT_PLAN_ROOT, state_root: Path = DEFAULT_STATE_ROOT) -> dict:
+    """Idempotently reconcile a completed job into the existing TaskFlow service."""
+    result = post({"operation": "get_job", "job_id": job_id})
+    job = result.get("job") or {}
+    if not result.get("ok") or job.get("id") != job_id:
+        raise ValueError("DecisionX successor D1 job missing")
+    if job.get("state") != "complete":
+        return {"ok": True, "phase": "waiting_provider", "job_id": job_id,
+                "job_state": job.get("state"), "provider_requests_created": 0}
+    marker = state_root / (digest(job_id.encode())[:24] + ".json")
+    if marker.is_file():
+        try:
+            prior = json.loads(marker.read_text(encoding="utf-8"))
+            path = Path(prior["plan_path"])
+            unit = prior["unit"]
+            if (prior.get("job_id") == job_id and path.is_file()
+                and digest(path.read_bytes()) == prior["plan_sha256"]):
+                controller = load(HERE / "cognilode-taskflow-phase-controller", "dx_advice_tick_plan")
+                controller.verify_plan_revision(controller.parse_plan(path))
+                active = subprocess.run(["systemctl", "--user", "is-active", unit],
+                                        capture_output=True, text=True, timeout=20, check=False)
+                if active.returncode == 0 and active.stdout.strip() == "active":
+                    return {"ok": True, "phase": "installed_active", "job_id": job_id,
+                            "plan_path": str(path), "plan_sha256": prior["plan_sha256"],
+                            "unit": unit, "provider_requests_created": 0}
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            pass
+    installed = handoff(post, job_id=job_id, output_root=output_root)
+    info = installed["secretary_taskflow_installation"]
+    marker_value = {"schema": "cognilode.decisionx.successor_handoff.v1",
+                    "job_id": job_id, "plan_path": installed["plan_path"],
+                    "plan_sha256": installed["plan_sha256"], "unit": info["unit"],
+                    "work_product_sha256": installed["work_product_sha256"]}
+    state_root.mkdir(parents=True, exist_ok=True)
+    temp = marker.with_suffix(".next")
+    temp.write_bytes(canonical(marker_value))
+    os.replace(temp, marker)
+    return {"phase": "installed", **installed}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--decisionx-job-id", required=True)
+    parser.add_argument("--output-root", type=Path, default=DEFAULT_PLAN_ROOT)
+    parser.add_argument("--tick", action="store_true")
+    args = parser.parse_args()
+    sender = load(HERE / "cognilode-b4pt0r-chatmode", "dx_advice_d1_reader")
+    if args.tick:
+        result = tick(sender.operator_memory_post, job_id=args.decisionx_job_id,
+                      output_root=args.output_root)
+    else:
+        result = handoff(sender.operator_memory_post, job_id=args.decisionx_job_id,
+                         output_root=args.output_root)
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

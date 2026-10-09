@@ -31,7 +31,7 @@ class NativeSessionTests(unittest.TestCase):
         self.receipt = root/"receipt.json"
         self.receipt.write_text(json.dumps({"conversation_id":CID}))
         self.binary = root/"codex"
-        self.binary.write_text("#!/bin/sh\nexit 0\n")
+        self.binary.write_bytes(b"\x7fELF"+b"\x00"*128)
         self.binary.chmod(0o700)
         self.bundle = root/"instructions.json"
         self.bundle.write_text(json.dumps({"system":"replacement","developer":"replacement"}))
@@ -51,6 +51,13 @@ class NativeSessionTests(unittest.TestCase):
         self.stderr.write_text("OpenAI Codex v0.162.0\n--------\nsession id: "+
                                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\n--------\n")
         with self.assertRaisesRegex(ValueError,"header session ID mismatch"):
+            native.verify_registration(session_id=CID,environment_id="evanpc-workspace",
+                rollout_path=self.rollout,stderr_path=self.stderr,source_receipt_path=self.receipt,
+                binary_path=self.binary,instruction_bundle_path=self.bundle)
+
+    def test_mutable_shell_launcher_cannot_be_binary_identity(self):
+        self.binary.write_text("#!/bin/sh\nexec /some/other/codex \"$@\"\n")
+        with self.assertRaisesRegex(ValueError,"direct native release binary"):
             native.verify_registration(session_id=CID,environment_id="evanpc-workspace",
                 rollout_path=self.rollout,stderr_path=self.stderr,source_receipt_path=self.receipt,
                 binary_path=self.binary,instruction_bundle_path=self.bundle)

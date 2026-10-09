@@ -1477,7 +1477,8 @@ def ensure_native_retry_job(queue: QueueClient, plan: Plan, step: Step, original
         or original.get("prompt_sha256") != sha256_bytes(str(original.get("prompt") or "").encode())):
         raise ValueError("original ChatGPT phase does not match immutable plan and prompt")
     original_refs = original.get("attachment_refs") or []
-    if len(original_refs) != 1 or not isinstance(original_refs[0], dict) or not HEX64.fullmatch(str(original_refs[0].get("sha256") or "")):
+    if not original_refs or any(not isinstance(ref, dict) or not HEX64.fullmatch(str(ref.get("sha256") or ""))
+                                for ref in original_refs):
         raise ValueError("original research ZIP reference is invalid")
     research = queue.get(phase_job_id(plan, step.step_id, "research"))
     if not research or research.get("state") != "complete" or not any(
@@ -1485,30 +1486,54 @@ def ensure_native_retry_job(queue: QueueClient, plan: Plan, step: Step, original
         for e in research.get("effect_evidence") or []
     ):
         raise ValueError("original research ZIP has no completed D1 source receipt")
-    if original["prompt"] != chatgpt_prompt(plan, step, {"sha256": original_refs[0]["sha256"]}):
+    human_template = original.get("prompt_template_version") == "human-taskflow-template-20261009"
+    if not human_template and original["prompt"] != chatgpt_prompt(plan, step, {"sha256": original_refs[0]["sha256"]}):
         raise ValueError("original ChatGPT prompt differs from the plan and research ZIP")
     jid = phase_job_id(plan, step.step_id, "chatgpt_sandbox", attempt)
     missing_zip = any(isinstance(e,dict) and e.get("kind") == "chatgpt_terminal_deliverable_failure"
                       for e in previous.get("effect_evidence") or [])
     repair_reason = (f"chatmode_deliverable_repair_attempt:{attempt}" if missing_zip
                      else f"native_compute_repair_attempt:{attempt}")
-    if missing_zip:
-        prompt = (str(original["prompt"]) + "\n\nChat-mode deliverable repair: The previous completed turn did not provide "
-                  "a usable work ZIP after bounded GET-only collection. Perform the substantive compute in this "
-                  "ChatGPT chat-mode native sandbox. Return a fresh single downloadable ZIP with the required "
-                  "manifest and external-effect instructions.\n")
+    if human_template:
+        # Keep the user's prompt exactly as sent; deliver retry-specific context
+        # as another physical ZIP for the native ChatGPT sandbox to inspect.
+        prompt = str(original["prompt"])
+        repair_dir = DEFAULT_STATE_ROOT / plan.project_id / step.step_id / "native-repair"
+        repair_dir.mkdir(parents=True, exist_ok=True)
+        repair_zip = repair_dir / f"attempt-{attempt}.zip"
+        issue = ("The prior turn had no usable downloaded work ZIP after bounded collection."
+                 if missing_zip else
+                 "The prior provider stream lacked a matched native container.exec or functions.exec call and result.")
+        note = (f"# Native ChatGPT sandbox repair for {plan.project_id}/{step.step_id}\n\n"
+                f"Prior conversation: {previous.get('conversation_id') or 'not recorded'}\n"
+                f"Prior job: {previous['id']}\n\n{issue}\n\n"
+                "Perform the substantive code/data computation inside this ChatGPT.com Chat-mode native sandbox, "
+                "using its native execution tool. Read the other attached research and source ZIPs. "
+                "Return one downloadable work ZIP with top-level EXTERNAL_EFFECT_INSTRUCTIONS.md "
+                "and a comprehensive in-chat report. Do not run the heavy compute on a remote environment.\n")
+        with tempfile.NamedTemporaryFile(dir=repair_dir, suffix=".zip", delete=False) as temporary:
+            temp_path = Path(temporary.name)
+        try:
+            with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                member = zipfile.ZipInfo("READ_ME_FIRST_NATIVE_REPAIR.md", date_time=(1980, 1, 1, 0, 0, 0))
+                member.compress_type = zipfile.ZIP_DEFLATED
+                archive.writestr(member, note)
+            os.replace(temp_path, repair_zip)
+        finally:
+            temp_path.unlink(missing_ok=True)
+        attachment_refs = [*original_refs, portable_attachment_ref(repair_zip, sha256_file(repair_zip))]
     else:
-        # Preserve the exact historical retry prompt for already queued jobs.
-        prompt = (str(original["prompt"]) + "\n\nNative execution repair: The previous completed turn supplied a ZIP, "
-                  "but its provider stream did not show a matched native container.exec or functions.exec call and result. "
-                  "Perform the substantive compute in this ChatGPT chat-mode sandbox with its native execution tool. "
-                  "Return a fresh single ZIP and in-chat report as instructed above.\n")
+        prompt = (str(original["prompt"]) + "\n\nChat-mode deliverable repair: " +
+                  ("The previous completed turn did not provide a usable work ZIP. " if missing_zip else
+                   "The previous provider stream did not show native compute. ") +
+                  "Perform the work in the ChatGPT native sandbox and return one ZIP and report.\n")
+        attachment_refs = original_refs
     existing = queue.get(jid)
     if existing:
         if (existing.get("provider") != "chatgpt.com" or existing.get("plan_revision") != plan.sha256
             or existing.get("phase") != "chatgpt_sandbox"
             or existing.get("reason") != repair_reason
-            or existing.get("attachment_refs") != original_refs
+            or existing.get("attachment_refs") != attachment_refs
             or existing.get("taskflow_dependencies") != [str(previous["id"])]
             or existing.get("prompt") != prompt
             or existing.get("prompt_sha256") != sha256_bytes(prompt.encode())
@@ -1520,7 +1545,7 @@ def ensure_native_retry_job(queue: QueueClient, plan: Plan, step: Step, original
     job.update({"id": jid, "prompt": prompt, "prompt_sha256": sha256_bytes(prompt.encode()),
                 "reasoning_effort": original.get("reasoning_effort") or "xhigh",
                 "assigned_employee": original.get("assigned_employee") or "ChatGPT chat-mode native sandbox",
-                "attachment_refs": json.loads(json.dumps(original_refs)), "phase_attempt": attempt,
+                "attachment_refs": json.loads(json.dumps(attachment_refs)), "phase_attempt": attempt,
                 "reason": repair_reason})
     job["payload"]["phase_attempt"] = attempt
     job["payload"]["native_repair_of"] = str(original["id"])

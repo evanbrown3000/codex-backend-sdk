@@ -1,7 +1,9 @@
 import importlib.machinery
 import importlib.util
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
 import unittest
 
 
@@ -42,6 +44,37 @@ class ConversationDeltaTests(unittest.TestCase):
         cursor = reader.delta_view(self.full)["next_cursor"]
         with self.assertRaisesRegex(ValueError, "another conversation"):
             reader.delta_view({**self.full, "conversation_id": "conversation-2"}, cursor)
+
+    def test_deployed_reader_can_import_sibling_and_checkout_package(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = Path(temporary)
+            scripts = checkout / "deploy" / "conversation-vacuum"
+            package = checkout / "src" / "memory_stock"
+            scripts.mkdir(parents=True)
+            package.mkdir(parents=True)
+            (scripts / "drive_transport_errors.py").write_text("STATUS = 'classified'\n")
+            (package / "__init__.py").write_text("")
+            (package / "unified_conversation.py").write_text("STATUS = 'reconciled'\n")
+            deployed = scripts / "canonical_full_readback.py"
+            deployed.write_text(
+                "from drive_transport_errors import STATUS as TRANSPORT\n"
+                "def read_full_conversation(*args):\n"
+                "    from memory_stock.unified_conversation import STATUS as MEMORY\n"
+                "    return (TRANSPORT, MEMORY)\n"
+            )
+            check = subprocess.run(
+                [sys.executable, "-c", (
+                    "import importlib.machinery, importlib.util, sys; "
+                    "source=importlib.machinery.SourceFileLoader('reader',sys.argv[1]); "
+                    "spec=importlib.util.spec_from_loader(source.name,source); "
+                    "module=importlib.util.module_from_spec(spec); "
+                    "sys.modules[source.name]=module; source.exec_module(module); "
+                    "loaded=module._load_script(__import__('pathlib').Path(sys.argv[2]),'deployed'); "
+                    "print('/'.join(loaded.read_full_conversation()))"
+                ), str(SCRIPT), str(deployed)],
+                text=True, capture_output=True, check=True,
+            )
+            self.assertEqual(check.stdout.strip(), "classified/reconciled")
 
 
 if __name__ == "__main__":

@@ -346,6 +346,8 @@ def test_decisionx_native_batch_verifies_source_and_binds_returned_compute(tmp_p
     assert outcome['admitted'] == 1
     assert admitted[0]['kind'] == 'IAE'
     assert admitted[0]['metadata']['source_sha256'] == episode['source_sha256']
+    assert admitted[0]['metadata']['drive_verified_source'] is True
+    assert admitted[0]['metadata']['full_source_prompt_sha256'] == '1' * 64
 
 
 def test_decisionx_batch_resolves_exact_source_and_drops_changed_episode():

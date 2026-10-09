@@ -171,6 +171,15 @@ def attachment_paths(job: dict) -> list[Path]:
             mirrors = [] if isinstance(row, str) else list(row.get("mirrors") or [])
             if ref.startswith(("https://", "s3://")):
                 mirrors.insert(0, ref)
+            # Jobs queued before the D1 mirror-preservation fix retained only
+            # their local path. Recover the content-addressed private launchpad
+            # from the signed digest on an alternate device.
+            bucket = os.environ.get("COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET", "").strip()
+            if bucket and len(expected) == 64 and all(c in "0123456789abcdefABCDEF" for c in expected):
+                digest = expected.lower()
+                fallback = f"s3://{bucket}/taskflow-artifacts/sha256/{digest}.zip"
+                if fallback not in mirrors:
+                    mirrors.append(fallback)
             staged = None
             for url in mirrors:
                 try:

@@ -28,8 +28,44 @@ def migrate_previous_state(source: Path, destination: Path) -> None:
     for name in ("b4pt0r-chatmode", "chatmode-queue-worker", "handoffs", "root-memory-native-cycle"):
         old = source / name
         new = target / name
-        if old.is_dir():
+        marker = new / ".company-container-migration-complete"
+        if old.is_dir() and not marker.exists():
             shutil.copytree(old, new, dirs_exist_ok=True, copy_function=shutil.copy2)
+            marker.touch()
+
+
+def migrate_container_browser(project: str, image: str) -> None:
+    """Capture the old company container's profile without touching host Chrome."""
+    volume = f"{project}_company_browser"
+    subprocess.run(["docker", "volume", "create", volume], stdout=subprocess.DEVNULL,
+                   check=True, timeout=30)
+    marker = subprocess.run(["docker", "run", "--rm", "--volume", f"{volume}:/browser:ro",
+                             image, "sh", "-c",
+                             "test -f /browser/profile/.custody-complete && "
+                             "test -s '/browser/profile/Local State' && "
+                             "test -n \"$(find /browser/profile -type f -name Cookies -size +0c -print -quit)\""],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            check=False, timeout=30)
+    if marker.returncode == 0:
+        return
+    source = ["docker", "exec", "cognilode-primary-workspace", "sh", "-c",
+              "test -d /workspace/.cognilode/host-chrome-copy && "
+              "tar -C /workspace/.cognilode/host-chrome-copy -cf - ."]
+    target = ["docker", "run", "--rm", "--user", "0", "-i",
+              "--volume", f"{volume}:/browser", image, "sh", "-c",
+              "mkdir -p /browser/profile && tar -C /browser/profile -xf - && "
+              "test -s '/browser/profile/Local State' && "
+              "test -n \"$(find /browser/profile -type f -name Cookies -size +0c -print -quit)\" && "
+              "touch /browser/profile/.custody-complete"]
+    with subprocess.Popen(source, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as reader:
+        assert reader.stdout is not None
+        with subprocess.Popen(target, stdin=reader.stdout, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL) as writer:
+            reader.stdout.close()
+            target_status = writer.wait(timeout=480)
+            source_status = reader.wait(timeout=30)
+            if target_status != 0 or source_status not in (0, 1):
+                raise RuntimeError("company container browser custody transfer failed")
 
 
 def retired_units() -> list[str]:
@@ -53,13 +89,15 @@ def main() -> int:
            "AWS_AUTH_ROOT": str(aws), "COMPANY_UID": str(os.getuid()), "COMPANY_GID": str(os.getgid()),
            "COGNILODE_ENVIRONMENT_ID": os.environ.get("COGNILODE_ENVIRONMENT_ID", "evanpc-company-container")}
     project = "cognilode-company-runtime"
+    image = env.get("COGNILODE_WORKSPACE_IMAGE", "cognilode-standard-workspace:2026-09-28")
+    migrate_container_browser(project, image)
     for name in ("company_auth", "company_operator"):
         subprocess.run(["docker", "volume", "create", f"{project}_{name}"],
                        stdout=subprocess.DEVNULL, check=True, timeout=30)
     subprocess.run(["docker", "run", "--rm", "--user", "0",
                     "--volume", f"{project}_company_auth:/auth",
                     "--volume", f"{project}_company_operator:/operator",
-                    env.get("COGNILODE_WORKSPACE_IMAGE", "cognilode-standard-workspace:2026-09-28"),
+                    image,
                     "chown", "-R", f"{os.getuid()}:{os.getgid()}", "/auth", "/operator"],
                    stdout=subprocess.DEVNULL, check=True, timeout=60)
     command = ["docker", "compose", "--project-name", project, "-f", str(COMPOSE), "up", "-d"]

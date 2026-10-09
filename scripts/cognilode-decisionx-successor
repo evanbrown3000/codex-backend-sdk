@@ -356,7 +356,9 @@ def tick(post: Callable[[dict], Mapping], *, output_root: Path = DEFAULT_ROOT,
             rejection = None
             if prior_state == "complete":
                 segment_id = "decisionx.handoff_rejected." + sha(prior_id.encode())
-                read = post({"operation": "read_segment", "segment_id": segment_id})
+                handoff_bridge = load(HERE / "cognilode-decisionx-advice-handoff",
+                                      "decisionx_successor_optional_rejection_reader")
+                read = handoff_bridge.read_optional_segment(post, segment_id)
                 found = read.get("segment") or {}
                 if (read.get("ok") and found.get("segment_id") == segment_id
                     and found.get("kind") == "decisionx_handoff_rejection"

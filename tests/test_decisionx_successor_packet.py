@@ -25,6 +25,13 @@ native = load("decisionx_successor_native_test", "decisionx_successor_native.py"
 handoff = load("decisionx_successor_handoff_retry_test", "cognilode-decisionx-advice-handoff")
 
 
+class MissingSegmentHTTP(RuntimeError):
+    code = "central_memory_http_failed"
+
+    def __init__(self):
+        super().__init__('Agent Memory HTTP 404: {"ok":false,"error":"segment_not_found"}')
+
+
 def digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
@@ -191,6 +198,33 @@ def test_failed_successor_is_deferred_then_reenqueued_with_new_fence(tmp_path, m
     assert json.loads(state_path.read_text())["job_id"] == "decisionx-successor-new-retry-1"
 
 
+def test_normal_absent_rejection_http_404_does_not_block_completed_job(tmp_path):
+    root_state = tmp_path / "root.json"
+    root_state.write_text(json.dumps({"phase": "complete", "root_job_id": "root-job"}))
+    output = tmp_path / "successor"
+    output.mkdir()
+    (output / "state.json").write_text(json.dumps({"target_job_id": "root-job",
+                                                    "job_id": "decisionx-successor-good"}))
+    def post(body):
+        if body["operation"] == "get_job":
+            return {"ok": True, "job": {"id": "decisionx-successor-good", "state": "complete"}}
+        if body["operation"] == "read_segment":
+            raise MissingSegmentHTTP()
+        raise AssertionError(body)
+    result = upstream.tick(post, output_root=output, root_state_path=root_state)
+    assert result["phase"] == "already_queued"
+    assert result["job_state"] == "complete"
+
+
+def test_optional_segment_reader_does_not_mask_auth_http_404():
+    class AuthHTTP(RuntimeError):
+        code = "central_memory_http_failed"
+    def post(_body):
+        raise AuthHTTP('Agent Memory HTTP 404: {"error":"wrong_route"}')
+    with pytest.raises(AuthHTTP):
+        handoff.read_optional_segment(post, "decisionx.handoff_rejected.abc")
+
+
 def test_complete_but_invalid_provider_zip_records_shared_rejection_then_retries(tmp_path, monkeypatch):
     root_state = tmp_path / "root.json"
     root_state.write_text(json.dumps({"phase": "complete", "root_job_id": "root-job"}))
@@ -210,6 +244,8 @@ def test_complete_but_invalid_provider_zip_records_shared_rejection_then_retries
             return {"ok": True}
         if body["operation"] == "read_segment":
             row = stored.get(body["segment_id"])
+            if row is None:
+                raise MissingSegmentHTTP()
             return {"ok": bool(row), "segment": row}
         raise AssertionError(body)
     def invalid(*_args, **_kwargs):
@@ -237,6 +273,8 @@ def test_three_spaced_completed_job_validation_failures_write_d1_retry_receipt(t
             return {"ok": True, "job": job}
         if body["operation"] == "read_segment":
             row = stored.get(body["segment_id"])
+            if row is None:
+                raise MissingSegmentHTTP()
             return {"ok": bool(row), "segment": row, "error": None if row else "segment_not_found"}
         if body["operation"] == "append_segments":
             for row in body["segments"]:

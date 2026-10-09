@@ -60,6 +60,19 @@ def canonical(value: Any) -> bytes:
                       separators=(",", ":")).encode("utf-8")
 
 
+def read_optional_segment(post: Callable[[dict[str, Any]], Mapping[str, Any]], segment_id: str) -> dict:
+    """Treat only an exact D1 segment 404 as absence; propagate all other errors."""
+    try:
+        return dict(post({"operation": "read_segment", "segment_id": segment_id}))
+    except Exception as exc:
+        message = str(exc)
+        if (getattr(exc, "code", None) == "central_memory_http_failed"
+            and message.startswith("Agent Memory HTTP 404:")
+            and "segment_not_found" in message):
+            return {"ok": False, "error": "segment_not_found"}
+        raise
+
+
 def remote_stager() -> Callable[[str, str], Path]:
     if not os.environ.get("COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET"):
         root_cycle = load(HERE / "cognilode-root-memory-native-cycle", "dx_advice_s3_config")
@@ -490,7 +503,7 @@ def tick(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, job_id: str,
         return {"ok": True, "phase": "waiting_provider", "job_id": job_id,
                 "job_state": job.get("state"), "provider_requests_created": 0}
     rejection_id = "decisionx.handoff_rejected." + digest(job_id.encode())
-    rejection_read = post({"operation": "read_segment", "segment_id": rejection_id})
+    rejection_read = read_optional_segment(post, rejection_id)
     existing_rejection = rejection_read.get("segment") or {}
     if (rejection_read.get("ok") and existing_rejection.get("segment_id") == rejection_id
         and existing_rejection.get("kind") == "decisionx_handoff_rejection"

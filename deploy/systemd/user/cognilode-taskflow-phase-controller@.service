@@ -1,0 +1,18 @@
+[Unit]
+Description=Cognilode TaskFlow phase controller (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/cognilode/taskflow-%i.env
+ExecStart=%h/Projects/codex-backend-sdk/scripts/cognilode-taskflow-phase-controller-service
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=20
+NoNewPrivileges=true
+CPUQuota=100%
+MemoryMax=3G
+
+[Install]
+WantedBy=default.target

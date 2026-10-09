@@ -154,9 +154,43 @@ def save_service_hashes(path: Path, hashes: dict[str, str]) -> None:
     temporary.replace(path)
 
 
+def retire_standalone_adopter(project: str, compose: Path, runtime: Path,
+                             env: dict[str, str]) -> None:
+    """Remove the old unfenced adopter once its container replacements run."""
+    marker = runtime / "shared/standalone-adopter-retired"
+    if marker.exists():
+        return
+    running = subprocess.run(
+        ["docker", "compose", "--project-name", project, "-f", str(compose),
+         "ps", "--status", "running", "--services"], env=env,
+        capture_output=True, text=True, check=False, timeout=30)
+    if running.returncode != 0 or not {"chatmode", "effect-reviewer"}.issubset(
+            set(running.stdout.splitlines())):
+        return
+    name = "cognilode-chatmode-work-adopter"
+    inspected = subprocess.run(
+        ["docker", "inspect", "--format", "{{json .Config.Labels}}", name],
+        capture_output=True, text=True, check=False, timeout=30)
+    if inspected.returncode == 0:
+        try:
+            labels = json.loads(inspected.stdout)
+        except ValueError:
+            return
+        if labels not in ({}, None):
+            print("standalone adopter retirement pending: unexpected container labels", flush=True)
+            return
+        subprocess.run(["docker", "stop", "--time", "30", name],
+                       check=True, timeout=60)
+        subprocess.run(["docker", "rm", name], check=True, timeout=30)
+    marker.touch()
+    print("retired standalone chatmode work adopter", flush=True)
+
+
 def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
     """Apply new synchronized Compose configuration from the sole host starter."""
-    applied_digest = hashlib.sha256(COMPOSE.read_bytes()).hexdigest()
+    digest_path = runtime / "shared/compose-config-applied.sha256"
+    applied_digest = (digest_path.read_text(encoding="utf-8").strip()
+                      if digest_path.is_file() else hashlib.sha256(COMPOSE.read_bytes()).hexdigest())
     applied_compose = COMPOSE
     synced = runtime / "shared/source/current/codex-backend-sdk"
     memory_applied = runtime / "shared/memory-source-applied"
@@ -175,11 +209,16 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0)
             if selected and selected == synced_main and current_enough:
                 synced_starter = synced / "scripts/cognilode-company-container-bootstrap"
-                if synced_starter.is_file() and synced_starter.resolve() != Path(__file__).resolve():
+                loaded_revision = os.environ.get("COGNILODE_BOOTSTRAP_LOADED_REVISION", "")
+                if (synced_starter.is_file() and
+                        (synced_starter.resolve() != Path(__file__).resolve()
+                         or selected != loaded_revision)):
                     print(f"company starter adopting synchronized source: {selected}", flush=True)
                     os.execve(sys.executable, [sys.executable,
                               str(synced_starter)],
-                              {**os.environ, "COGNILODE_BOOTSTRAP_FROM_SYNC": "1"})
+                              {**os.environ, "COGNILODE_BOOTSTRAP_FROM_SYNC": "1",
+                               "COGNILODE_BOOTSTRAP_LOADED_REVISION": selected,
+                               "COGNILODE_BOOTSTRAP_RECONCILE_ONLY": "1"})
                 digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
                 if digest != applied_digest:
                     try:
@@ -204,7 +243,14 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
                     else:
                         applied_digest = digest
                         applied_compose = candidate
+                        temporary = digest_path.with_suffix(".tmp")
+                        temporary.write_text(digest + "\n", encoding="utf-8")
+                        temporary.replace(digest_path)
                         print(f"company Compose configuration applied: {selected}", flush=True)
+        try:
+            retire_standalone_adopter(project, applied_compose, runtime, env)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            print(f"standalone adopter retirement pending: {exc}", flush=True)
         memory_source = runtime / "shared/source/current/memory-stock-canonical"
         if (memory_source / ".git").exists():
             revision = subprocess.run(["git", "-c", "safe.directory=*", "-C", str(memory_source),
@@ -228,6 +274,10 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
 
 def main() -> int:
     startup_time = time.time()
+    if "COGNILODE_BOOTSTRAP_LOADED_REVISION" not in os.environ:
+        os.environ["COGNILODE_BOOTSTRAP_LOADED_REVISION"] = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=False).stdout.strip()
     repos = Path(os.environ.get("COMPANY_REPOS_ROOT", str(Path.home() / "Projects"))).resolve()
     runtime = Path(os.environ.get("COMPANY_RUNTIME_ROOT", str(Path.home() / ".local/share/cognilode/company-runtime"))).resolve()
     portable_aws = os.environ.get("COGNILODE_PORTABLE_AWS") == "1"
@@ -258,17 +308,21 @@ def main() -> int:
                     and selected != current
                     and candidate.resolve() != Path(__file__).resolve()):
                 os.execve(sys.executable, [sys.executable, str(candidate)],
-                          {**os.environ, "COGNILODE_BOOTSTRAP_FROM_SYNC": "1"})
+                          {**os.environ, "COGNILODE_BOOTSTRAP_FROM_SYNC": "1",
+                           "COGNILODE_BOOTSTRAP_LOADED_REVISION": selected})
     migrate_previous_state(Path(os.environ.get("COMPANY_LEGACY_DATA_ROOT", str(Path.home() / ".local/share/cognilode"))), runtime)
     env = {**os.environ, "COMPANY_REPOS_ROOT": str(repos), "COMPANY_RUNTIME_ROOT": str(runtime),
            "AWS_AUTH_ROOT": "company_aws_client" if portable_aws else str(aws),
            "COMPANY_UID": str(os.getuid()), "COMPANY_GID": str(os.getgid()),
            "COGNILODE_ENVIRONMENT_ID": os.environ.get("COGNILODE_ENVIRONMENT_ID", "evanpc-company-container")}
+    project = "cognilode-company-runtime"
+    if os.environ.get("COGNILODE_BOOTSTRAP_RECONCILE_ONLY") == "1":
+        reconcile_compose(project, runtime, env)
+        return 0
     legacy_relay = Path(os.environ.get("COGNILODE_LEGACY_RELAY_ENV",
                                    str(Path.home() / ".config/cognilode/evanpc-host-node.env")))
     subprocess.run([sys.executable, str(ROOT / "scripts/cognilode-migrate-company-relay-custody")],
                    env=env, check=True, timeout=120)
-    project = "cognilode-company-runtime"
     image = env.get("COGNILODE_WORKSPACE_IMAGE", "cognilode-standard-workspace:2026-09-28")
     if portable_aws:
         prepare_portable_aws(project, image, os.getuid(), os.getgid())
@@ -291,6 +345,8 @@ def main() -> int:
     subprocess.run(command, env=env, check=True, timeout=180)
     save_service_hashes(runtime / "shared/compose-service-digests.json",
                         compose_service_hashes(project, COMPOSE, env))
+    (runtime / "shared/compose-config-applied.sha256").write_text(
+        hashlib.sha256(COMPOSE.read_bytes()).hexdigest() + "\n", encoding="utf-8")
     memory_source = runtime / "shared/source/current/memory-stock-canonical"
     memory_minimum = "b4a4878d47abe142b75ab23c74f9b6dc1ce67cba"
     memory_shallow_accepted = "cdbe5de43b57e23e10f915185e533b02a4aba636"

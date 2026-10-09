@@ -353,8 +353,11 @@ DX_PROMPT = """You are a ChatGPT.com Chat-mode DecisionX labeling employee. Read
 episodes.jsonl completely. It contains MANY source-linked candidate IAE episodes
 from the existing conversation memory, never a replacement memory database.
 
-Run the attached RUN_ME.py against the attached input ZIP in YOUR native
-ChatGPT.com sandbox. It verifies every episode and computes lexical neighbors.
+The attached decisionx episode ZIP and source ZIPs contain complete rendered
+conversation records for every episode, split into <=20 MiB files. Run the
+attached RUN_ME.py in YOUR native ChatGPT.com sandbox as:
+python RUN_ME.py <episode-input.zip> <output-dir> <all-complete-source-zips...>
+It verifies every episode against the complete sources and computes lexical neighbors.
 Use its neighbors.json as supporting evidence while YOU reason semantically.
 Do not move this computation to a remote machine. Include NATIVE_COMPUTE.json
 and neighbors.json unchanged in your single returned ZIP, alongside your labels.
@@ -425,6 +428,17 @@ def _dx_bridge():
     bridge = importlib.util.module_from_spec(spec)
     loader.exec_module(bridge)
     return bridge
+
+
+def _dx_source_batch_builder():
+    import importlib.machinery
+    import importlib.util
+    script = Path(__file__).resolve().parent / "cognilode-root-memory-native-cycle"
+    loader = importlib.machinery.SourceFileLoader("decisionx_full_source_batch_builder", str(script))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 
 def _dx_ref(episode):
@@ -527,9 +541,20 @@ def _dx_retire_completed_inputs(limit=20):
             evidence = job.get("effect_evidence") or []
             if job.get("state") != "complete" or not any(
                 isinstance(item, dict) and item.get("kind") == "decisionx_label_admission"
+                and int(item.get("admitted") or 0) > 0
                 for item in evidence
             ): continue
             path.unlink()
+            full_dir = folder / batch / "full"
+            if full_dir.is_dir() and not full_dir.is_symlink():
+                for full_zip in full_dir.glob("batch-*.zip"):
+                    if full_zip.is_file() and not full_zip.is_symlink():
+                        full_zip.unlink()
+                try:
+                    full_dir.rmdir()
+                    full_dir.parent.rmdir()
+                except OSError:
+                    pass
             retired += 1
         except (OSError, KeyError, ValueError, zipfile.BadZipFile):
             continue
@@ -549,7 +574,12 @@ def _dx_reconcile_queued(db):
         evidence = job.get("effect_evidence") or []
         if job.get("state") == "complete" and any(
                 isinstance(row, dict) and row.get("kind") == "decisionx_label_admission"
+                and int(row.get("requested") or 0) > 0
+                and int(row.get("admitted") or 0) == int(row.get("requested") or -1)
                 for row in evidence):
+            cursor = db.execute("UPDATE episodes SET state='done',updated=? "
+                                "WHERE state='queued' AND batch=?", (time.time(), batch))
+            released += cursor.rowcount
             continue
         cursor = db.execute("UPDATE episodes SET state='retry',retry_after=0,updated=? "
                             "WHERE state='queued' AND batch=?", (time.time(), batch))
@@ -642,6 +672,21 @@ def decisionx_batch_pump():
             e["episode_id"] + e["source_sha256"] for e in selected)
         batch = hashlib.sha256(batch_source.encode()).hexdigest()[:32]
         srczip = _dx_input_zip(selected,batch)
+        builder = _dx_source_batch_builder()
+        selected_keys = {(row["provider"], row["conversation_id"]) for row in selected}
+        source_refs = [row for row in stock["verified_source_refs"]
+                       if (row["provider"], row["conversation_id"]) in selected_keys]
+        full_zips = builder.build_source_batches(sender.operator_memory_post, source_refs,
+            output_root=DX_HOME / "input" / batch / "full", bridge=bridge)
+        if len(full_zips) + 1 > 64:
+            raise ValueError("DecisionX native batch exceeds 64 physical attachments")
+        packet_files = [{"path": str(srczip), "sha256": hashlib.sha256(srczip.read_bytes()).hexdigest()}]
+        packet_files.extend(full_zips)
+        refs = []
+        for packet in packet_files:
+            mirror = builder.publish_private(packet)
+            refs.append({"ref": packet["path"], "sha256": packet["sha256"],
+                         "mirrors": [mirror], "kind": "decisionx_native_source"})
         prompt = DX_PROMPT + "\nBatch identity: " + batch + "\nEpisode count: " + str(len(selected))
         digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         id_value = "decisionx-iae-" + batch
@@ -655,9 +700,7 @@ def decisionx_batch_pump():
             "reasoning_effort":"xhigh","model":"gpt-5-6-thinking",
             "taskflow_step":"iae-label-batch-"+batch,
             "assigned_employee":"DecisionX Chat-mode labeler",
-            "attachment_refs":[{"ref":str(srczip),
-                                "sha256":hashlib.sha256(srczip.read_bytes()).hexdigest(),
-                                "kind":"iae_episode_batch"}],
+            "attachment_refs":refs,
             "reason":"low_priority_large_batch_semantic_descriptors"})
         if not reply.get("ok") or (reply.get("job") or {}).get("state") not in {
                 "queued", "claimed", "effect_pending_read_recovery", "complete"}:
@@ -679,12 +722,48 @@ def decisionx_batch_pump():
         event("decisionx_batch_queued",job_id=id_value,episodes=len(selected),
               priority=DX_PRIORITY,idempotent=reply.get("idempotent",False))
 
+def _dx_packet_paths(job):
+    packets = []
+    for attachment in job.get("attachment_refs") or []:
+        if not isinstance(attachment, dict):
+            raise ValueError("DecisionX input packet reference malformed")
+        expected = str(attachment.get("sha256") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise ValueError("DecisionX input packet lacks exact SHA")
+        ref = str(attachment.get("ref") or "")
+        local = Path(ref[5:] if ref.startswith("file:") else ref)
+        if not local.is_file() or hashlib.sha256(local.read_bytes()).hexdigest() != expected:
+            mirrors = attachment.get("mirrors") or []
+            candidates = []
+            for mirror in mirrors:
+                try:
+                    candidates.append(_stage_remote_attachment(str(mirror), expected))
+                except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                    continue
+            local = next((path for path in candidates if path.is_file()
+                          and hashlib.sha256(path.read_bytes()).hexdigest() == expected), local)
+        if not local.is_file() or hashlib.sha256(local.read_bytes()).hexdigest() != expected:
+            raise ValueError("DecisionX physical input packet unavailable or changed")
+        if local.stat().st_size > MAX_ATTACHMENT_BYTES:
+            raise ValueError("DecisionX physical input packet exceeds 20 MiB")
+        packets.append({"path": local, "sha256": expected})
+    if not packets:
+        raise ValueError("DecisionX input packets missing")
+    return packets
+
+
 def decisionx_admit_labels(job, files, conversation_id, *, preflight_error=None):
     """Admit actual returned semantic records into existing Agent Memory segments."""
     if job.get("phase") != "iae_label_batch": return None
     batch = str(job["id"]).removeprefix("decisionx-iae-")
-    input_zip = DX_HOME / "input" / (batch + ".zip")
-    if not input_zip.is_file(): raise RuntimeError("missing source manifest for label admission")
+    try:
+        input_zip = _dx_packet_paths(job)[0]["path"]
+    except (OSError, ValueError, RuntimeError):
+        if preflight_error:
+            return {"requested": 0, "admitted": 0, "retry_pending": 0,
+                    "label_error": preflight_error, "input_zip_sha256": None,
+                    "output_zip_sha256": None}
+        raise
     with zipfile.ZipFile(input_zip) as archive:
         input_manifest = json.loads(archive.read("manifest.json"))
         sources = {r["episode_id"]:r for r in (json.loads(line) for line in archive.read("episodes.jsonl").decode("utf-8").splitlines() if line.strip())}
@@ -776,18 +855,17 @@ def _dx_native_preflight(job, files, value, evidence):
     if not any(row.get("kind") == "provider_observed_native_exec" for row in evidence):
         return "missing_provider_observed_native_exec"
     refs = job.get("attachment_refs") or []
-    if len(refs) != 1 or not isinstance(refs[0], dict): return "missing_exact_input_zip"
-    expected = str(refs[0].get("sha256") or "")
-    input_ref = str(refs[0].get("ref") or "")
-    input_path = Path(input_ref[5:] if input_ref.startswith("file:") else input_ref)
-    if input_path.resolve(strict=False) != (DX_HOME / "input" / (str(job["id"]).removeprefix("decisionx-iae-") + ".zip")).resolve(strict=False):
-        return "input_zip_path_mismatch"
-    if (not re.fullmatch(r"[0-9a-f]{64}", expected) or not input_path.is_file()
-            or hashlib.sha256(input_path.read_bytes()).hexdigest() != expected):
+    if len(refs) < 2 or len(refs) > 64: return "missing_exact_input_zip"
+    try:
+        packets = _dx_packet_paths(job)
+    except (OSError, ValueError, RuntimeError):
         return "input_zip_sha_mismatch"
+    expected = packets[0]["sha256"]
+    input_path = packets[0]["path"]
     central = value.get("central_conversation_store") or {}
     uploads = central.get("provider_structured_uploads") or []
-    if expected not in {str(row.get("sha256") or "") for row in uploads if isinstance(row,dict)}:
+    uploaded = {str(row.get("sha256") or "") for row in uploads if isinstance(row,dict)}
+    if any(packet["sha256"] not in uploaded for packet in packets):
         return "provider_upload_proof_missing"
     output = [row for row in files if str(row.get("name") or "").lower().endswith(".zip")]
     if len(output) != 1: return "output_zip_count_invalid"
@@ -807,9 +885,28 @@ def _dx_native_preflight(job, files, value, evidence):
             neighbor_rows = json.loads(neighbors)
         with zipfile.ZipFile(input_path) as source_archive:
             input_manifest = json.loads(source_archive.read("manifest.json"))
+        source_refs = {}
+        for packet in packets[1:]:
+            with zipfile.ZipFile(packet["path"]) as source_archive:
+                manifest = json.loads(source_archive.read("MANIFEST.json"))
+                if manifest.get("schema") != "cognilode.root_memory_sources.v1":
+                    return "complete_source_packet_schema_mismatch"
+                for row in manifest.get("parts") or []:
+                    key = (str(row.get("provider") or ""), str(row.get("conversation_id") or ""))
+                    identity = (str(row.get("prompt_sha256") or ""), str(row.get("response_sha256") or ""))
+                    if key in source_refs and source_refs[key] != identity:
+                        return "complete_source_identity_conflict"
+                    source_refs[key] = identity
         input_ids = {str(row.get("episode_id") or "") for row in input_manifest.get("episodes") or []}
+        produced_refs = {(str(row.get("provider") or ""), str(row.get("conversation_id") or ""),
+                          str(row.get("prompt_sha256") or ""), str(row.get("response_sha256") or ""))
+                         for row in compute.get("source_refs") or []}
+        expected_refs = {(*key,*identity) for key,identity in source_refs.items()}
         if (compute.get("schema") != "decisionx.native_batch_compute.v1"
                 or compute.get("input_zip_sha256") != expected
+                or compute.get("source_zip_sha256s") != [packet["sha256"] for packet in packets[1:]]
+                or compute.get("distinct_complete_sources") != len(source_refs)
+                or produced_refs != expected_refs
                 or compute.get("neighbors_sha256") != hashlib.sha256(neighbors).hexdigest()
                 or compute.get("episode_count") != input_manifest.get("episode_count")
                 or compute.get("episode_count") != len(input_ids)
@@ -848,8 +945,9 @@ def validated_result(value: dict) -> tuple[str, list[dict]] | None:
 
 
 def terminal_deliverable_candidate(job: dict, value: dict | None) -> bool:
-    """A final, centrally reread TaskFlow turn whose work ZIP is unusable."""
-    if not value or job.get("provider") != "chatgpt.com" or job.get("phase") != "chatgpt_sandbox":
+    """A final, centrally reread Chat-mode turn whose required ZIP is unusable."""
+    if (not value or job.get("provider") != "chatgpt.com"
+            or job.get("phase") not in {"chatgpt_sandbox", "iae_label_batch"}):
         return False
     central = value.get("central_conversation_store") or {}
     cid = str(value.get("conversation_id") or "")
@@ -871,7 +969,7 @@ def terminal_deliverable_deadline(job: dict, value: dict) -> float:
 
 
 def complete_failed_deliverable(job: dict, value: dict, *, deadline: float) -> bool:
-    """Fenced completion records a work-product defect, never TaskFlow success."""
+    """Fenced completion records a work-product defect, never semantic success."""
     if not terminal_deliverable_candidate(job, value):
         return False
     cid = str(value["conversation_id"])

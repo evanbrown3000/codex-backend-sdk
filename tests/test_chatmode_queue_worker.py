@@ -220,7 +220,18 @@ def test_decisionx_native_batch_verifies_source_and_binds_returned_compute(tmp_p
     spec = importlib.util.spec_from_loader(loader.name, loader)
     native = importlib.util.module_from_spec(spec)
     loader.exec_module(native)
-    computed = native.run(input_zip, tmp_path / 'native')
+    full = {**source, 'prompt_sha256': '1' * 64, 'response_sha256': '2' * 64}
+    full_raw = (json.dumps(full,sort_keys=True,ensure_ascii=False,separators=(',',':')) + '\n').encode()
+    full_sha = hashlib.sha256(full_raw).hexdigest()
+    source_zip = tmp_path / 'batch-000.zip'
+    with zipfile.ZipFile(source_zip,'w') as archive:
+        archive.writestr('MANIFEST.json',json.dumps({'schema':'cognilode.root_memory_sources.v1',
+            'parts':[{'provider':'openai-codex','conversation_id':'conversation-1',
+                      'prompt_sha256':'1'*64,'response_sha256':'2'*64,
+                      'part_index':0,'part_count':1,'source_json_sha256':full_sha,
+                      'part_sha256':full_sha,'path':'parts/part-000.part'}]}))
+        archive.writestr('parts/part-000.part',full_raw)
+    computed = native.run(input_zip, tmp_path / 'native', [source_zip])
     assert computed['episode_count'] == 1
     output = tmp_path / 'labels.zip'
     with zipfile.ZipFile(output, 'w') as archive:
@@ -229,10 +240,13 @@ def test_decisionx_native_batch_verifies_source_and_binds_returned_compute(tmp_p
         archive.writestr('decisionx_iae_labels.jsonl', '{}\n')
         archive.writestr('EXTERNAL_EFFECT_INSTRUCTIONS.md', 'Admit verified labels into shared search.\n')
     input_sha = hashlib.sha256(input_zip.read_bytes()).hexdigest()
+    source_sha = hashlib.sha256(source_zip.read_bytes()).hexdigest()
     output_sha = hashlib.sha256(output.read_bytes()).hexdigest()
     job = {'id': 'decisionx-iae-' + 'a' * 32, 'phase': 'iae_label_batch',
-           'attachment_refs': [{'ref': str(input_zip), 'sha256': input_sha}]}
-    value = {'central_conversation_store': {'provider_structured_uploads': [{'sha256': input_sha}]}}
+           'attachment_refs': [{'ref': str(input_zip), 'sha256': input_sha},
+                               {'ref': str(source_zip), 'sha256': source_sha}]}
+    value = {'central_conversation_store': {'provider_structured_uploads': [
+        {'sha256': input_sha},{'sha256': source_sha}]}}
     files = [{'path': str(output), 'name': 'labels.zip', 'sha256': output_sha}]
     native_proof = [{'kind': 'provider_observed_native_exec'}]
     assert module._dx_native_preflight(job, files, value, native_proof) is None
@@ -278,7 +292,7 @@ def test_decisionx_transport_input_retired_only_after_central_admission(tmp_path
             batch = request['job_id'].removeprefix('decisionx-iae-')
             if batch == complete:
                 return {'job': {'state': 'complete', 'effect_evidence': [
-                    {'kind': 'decisionx_label_admission', 'ref': 'verified'}]}}
+                    {'kind': 'decisionx_label_admission', 'ref': 'verified', 'admitted': 1}]}}
             return {'job': {'state': 'queued', 'effect_evidence': []}}
     module.sender = Sender()
     assert module._dx_retire_completed_inputs() == 1

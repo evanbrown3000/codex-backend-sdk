@@ -74,6 +74,36 @@ class ConversationDeltaTests(unittest.TestCase):
             self.assertEqual(refreshed["cursor_reset_reason"],"source_prefix_changed")
             self.assertEqual(refreshed["new_events"],3)
 
+    def test_job_id_resolves_only_matching_central_provider_readback(self):
+        job={"id":"job-1","state":"complete","provider":"chatgpt.com",
+             "conversation_id":"conversation-1","effect_evidence":[
+                 {"kind":"provider_conversation","ref":"conversation-1"},
+                 {"kind":"central_conversation_readback","ref":"conversation-1"}]}
+        sender=mock.Mock()
+        sender.operator_memory_post.return_value={"ok":True,"job":job}
+        with mock.patch.object(reader,"_load_script",return_value=sender):
+            link=reader.resolve_job_conversation("job-1")
+            self.assertTrue(link["conversation_ready"])
+            self.assertEqual(link["conversation_id"],"conversation-1")
+            sender.operator_memory_post.assert_called_once_with({"operation":"get_job","job_id":"job-1"})
+            with self.assertRaisesRegex(ValueError,"identity mismatch"):
+                reader.resolve_job_conversation("job-1",expected_provider="gemini.com")
+            job["effect_evidence"].pop()
+            with self.assertRaisesRegex(ValueError,"central provider readback"):
+                reader.resolve_job_conversation("job-1")
+
+    def test_job_id_returns_pending_state_without_claiming_provider_response(self):
+        sender=mock.Mock()
+        sender.operator_memory_post.return_value={"ok":True,"job":{
+            "id":"job-1","state":"queued","provider":"chatgpt.com"}}
+        output=io.StringIO()
+        with mock.patch.object(sys,"argv",["conversation-read","--job-id","job-1"]), \
+             mock.patch.object(reader,"_load_script",return_value=sender), \
+             mock.patch.object(reader,"read_conversation") as read, redirect_stdout(output):
+            self.assertEqual(reader.main(),0)
+        self.assertEqual(json.loads(output.getvalue())["conversation_ready"],False)
+        read.assert_not_called()
+
     def test_hosted_provider_read_preserves_provider_identity(self):
         response = {"conversation": {"provider": "gemini.com", "conversation_id": "g-1", "events": [
             {"id": "u-1", "role": "user", "content": "question", "source_content_complete": True},

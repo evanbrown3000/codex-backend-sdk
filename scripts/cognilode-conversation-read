@@ -309,10 +309,42 @@ def render_view(result: dict, output_format: str) -> None:
         print(f"<!-- next_cursor: {result['next_cursor']} -->")
 
 
+def resolve_job_conversation(job_id: str, *, expected_provider: str = "",
+                             expected_conversation_id: str = "") -> dict:
+    """Resolve a queued prompt to its centrally admitted provider conversation."""
+    if not job_id or len(job_id) > 160:
+        raise ValueError("job ID must be nonempty and bounded")
+    sender = _load_script(HERE / "cognilode-b4pt0r-chatmode", "cognilode_conversation_job_reader")
+    result = sender.operator_memory_post({"operation": "get_job", "job_id": job_id})
+    job = result.get("job") or {}
+    if not result.get("ok") or job.get("id") != job_id:
+        raise ValueError("shared queue job readback identity mismatch")
+    provider = str(job.get("provider") or "")
+    conversation_id = str(job.get("conversation_id") or "")
+    normalized_expected = {"chatgpt": "chatgpt.com", "codex-d1": "openai-codex"}.get(
+        expected_provider, expected_provider)
+    if ((normalized_expected and provider != normalized_expected)
+            or (expected_conversation_id and conversation_id != expected_conversation_id)):
+        raise ValueError("queue job provider or conversation identity mismatch")
+    state = str(job.get("state") or "")
+    if state != "complete":
+        return {"job_id": job_id, "state": state, "provider": provider,
+                "conversation_id": conversation_id or None, "conversation_ready": False}
+    if not provider or not conversation_id:
+        raise ValueError("completed queue job has no provider conversation identity")
+    evidence = [row for row in job.get("effect_evidence") or [] if isinstance(row, dict)]
+    if not all(any(row.get("kind") == kind and row.get("ref") == conversation_id for row in evidence)
+               for kind in ("provider_conversation", "central_conversation_readback")):
+        raise ValueError("completed queue job lacks matching central provider readback")
+    return {"job_id": job_id, "state": state, "provider": provider,
+            "conversation_id": conversation_id, "conversation_ready": True}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--provider", required=True)
-    parser.add_argument("--conversation-id", required=True)
+    parser.add_argument("--provider", default="")
+    parser.add_argument("--conversation-id", default="")
+    parser.add_argument("--job-id", default="", help="resolve a shared queue job to its admitted conversation")
     parser.add_argument("--since", default="", help="opaque next_cursor from a prior read")
     parser.add_argument("--drive-reader", type=Path, default=DEFAULT_DRIVE_READER)
     parser.add_argument("--historical-reader", type=Path, default=DEFAULT_HISTORICAL_READER)
@@ -324,6 +356,20 @@ def main() -> int:
     args = parser.parse_args()
     if args.remember and args.since:
         parser.error("--remember and --since cannot be combined")
+    job_link = None
+    if args.job_id:
+        job_link = resolve_job_conversation(args.job_id, expected_provider=args.provider,
+                                            expected_conversation_id=args.conversation_id)
+        if not job_link["conversation_ready"]:
+            if args.format == "json":
+                print(json.dumps(job_link, ensure_ascii=False))
+            else:
+                print(f"# Job {args.job_id}\n\nState: {job_link['state']} · conversation not yet admitted")
+            return 0
+        args.provider = job_link["provider"]
+        args.conversation_id = job_link["conversation_id"]
+    elif not args.provider or not args.conversation_id:
+        parser.error("supply --job-id or both --provider and --conversation-id")
     def read() -> dict:
         return read_conversation(args.provider, args.conversation_id,
                                  drive_reader=args.drive_reader,
@@ -340,12 +386,15 @@ def main() -> int:
                     raise
                 result=delta_view(source)
                 result["cursor_reset_reason"]="source_prefix_changed"
+            if job_link: result["queue_job"] = job_link
             render_view(result,args.format)
             sys.stdout.flush()
             save_remembered_cursor(path,args.reader_id,args.provider,args.conversation_id,
                                    result["next_cursor"])
     else:
-        render_view(delta_view(read(),args.since),args.format)
+        result=delta_view(read(),args.since)
+        if job_link: result["queue_job"] = job_link
+        render_view(result,args.format)
     return 0
 
 

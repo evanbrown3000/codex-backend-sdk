@@ -60,7 +60,10 @@ CP-7 requires a real controlled outage drill: EvanPC unavailable, an alternate-d
 
 ```sh
 scripts/cognilode-conversation-read --provider chatgpt.com --conversation-id CONVERSATION_ID --reader-id "Elliot Mercer" --remember --format markdown
+scripts/cognilode-conversation-read --job-id SHARED_QUEUE_JOB_ID --reader-id "Elliot Mercer" --remember --format json
 scripts/cognilode-conversation-read --provider openai-codex --conversation-id CONVERSATION_ID --since NEXT_CURSOR --format json
 ```
 
 `--remember` stores a private cursor per employee, provider, and conversation. A changed message prefix automatically shows the full conversation again and labels the reset; it never silently hides revised history. Explicit `--since` remains available for callers that store their own `next_cursor`. The response labels its source and coverage; admitted events do not imply every provider branch has been acquired. The Drive reader path can be set with `COGNILODE_DRIVE_READBACK_SCRIPT` when Memory Stock is installed elsewhere.
+
+`--job-id` resolves a prompt in the shared D1 queue. While it is queued or in flight, the command returns its state and `conversation_ready: false`. After completion, it requires matching provider and central-readback evidence before returning the conversation. It does not turn a transport receipt into a provider response.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import gzip
 import importlib.machinery
 import importlib.util
 import hashlib
@@ -117,3 +119,58 @@ def test_candidate_role_is_not_installed_role(tmp_path, monkeypatch):
     monkeypatch.setattr(controller, "SLACK_CANDIDATES_PATH", candidates)
     assert "Maya Chen — Staff Systems Integration Engineer" in controller.slack_role_context("Maya Chen")
     assert "Maya Chen" not in json.loads(installed.read_text())["employees"]
+
+
+def test_missing_session_identity_repairs_only_after_drive_cas(tmp_path, monkeypatch):
+    monkeypatch.setattr(module, "ROOT", tmp_path)
+    monkeypatch.setattr(module.Path, "home", lambda: tmp_path)
+    cid = "01a120c5-9450-7743-b47b-0cbe5e7133cf"
+    jid = "tf-" + "1" * 40
+    run = tmp_path / ".taskflow-state/employee-spine/project/AUTONOMY-1/research" / jid
+    run.mkdir(parents=True)
+    research_zip = run / "research.zip"
+    research_zip.write_bytes(b"original research zip")
+    secretary = tmp_path / ".local/state/cognilode/secretary/runs/run/attempt-01-codex"
+    secretary.mkdir(parents=True)
+    stderr = b"OpenAI Codex v0.162.0\n--------\nworkdir: /repo\nmodel: gpt-6-sol\n"
+    (secretary / "codex.stderr").write_bytes(stderr)
+    rollout = tmp_path / ".codex/sessions/2026/10/09" / f"rollout-test-{cid}.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_bytes(b'{"type":"session_meta"}\n')
+    receipt = {"completed": True, "taskflow_route_verified": True,
+               "attempts": [{"full_receipt_ref": str(secretary / "receipt.json"),
+                             "result": {"conversation_id": None,
+                                        "conversation_id_source": None,
+                                        "codex_stderr_sha256": hashlib.sha256(stderr).hexdigest(),
+                                        "response_text_sha256": "a" * 64}}]}
+    (secretary / "receipt.json").write_text("{}")
+    receipt_text = json.dumps(receipt)
+    (run / "secretary_receipt.json").write_text(receipt_text)
+    job = {"id": jid, "state": "complete", "provider": "codex.research",
+           "prompt_author": "taskflow_plan", "effect_evidence": [
+               {"kind": "research_zip", "path": str(research_zip),
+                "ref": hashlib.sha256(research_zip.read_bytes()).hexdigest()},
+               {"kind": "research_invocation", "ref": hashlib.sha256(receipt_text.encode()).hexdigest()}]}
+    capture = {"source_kind": "codex_rollout", "source_stream_id": str(rollout),
+               "source_sha256": hashlib.sha256(rollout.read_bytes()).hexdigest(),
+               "source_response_complete": True, "source_complete": True,
+               "drive_verified": False}
+    calls = []
+    def post(body):
+        calls.append(body["operation"])
+        if body["operation"] == "read":
+            return {"ok": True, "conversation": {"conversation_id": cid,
+                    "response_sha256": "a" * 64, "capture": capture}}
+        assert body["operation"] == "repair_completed_codex_identity"
+        assert gzip.decompress(base64.b64decode(body["stderr_gzip_base64"])) == stderr
+        assert gzip.decompress(base64.b64decode(body["rollout_gzip_base64"])) == rollout.read_bytes()
+        return {"ok": True, "job": {**job, "conversation_id": cid,
+                "effect_evidence": [*job["effect_evidence"], {"kind": "codex_session_identity"}]}}
+    assert module.maybe_repair_completed_codex_identity(job, post, lambda _: cid) is job
+    assert calls == ["read"]
+    capture.update(drive_verified=True, drive_source_sha256=capture["source_sha256"],
+                   drive_object_sha256="b" * 64, drive_verified_at="2026-10-09T13:00:00Z",
+                   drive_conversation_id=cid)
+    repaired = module.maybe_repair_completed_codex_identity(job, post, lambda _: cid)
+    assert repaired["conversation_id"] == cid
+    assert calls == ["read", "read", "repair_completed_codex_identity"]

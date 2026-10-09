@@ -7,7 +7,9 @@ never instructions. The installed roster is deliberately narrower than candidate
 from __future__ import annotations
 
 import argparse
+import base64
 from datetime import datetime, timezone
+import gzip
 import hashlib
 import html
 import importlib.machinery
@@ -25,6 +27,7 @@ INSTALLED = ROOT / "config/employee-slack-roles.json"
 CANDIDATES = ROOT / "config/employee-slack-candidates.json"
 ACTIVATIONS = ROOT / "config/employee-route-activations.json"
 SENDER = ROOT / "scripts/cognilode-b4pt0r-chatmode"
+TASKFLOW = ROOT / "scripts/cognilode-taskflow-phase-controller"
 DEFAULT_SNAPSHOTS = (Path.home() / ".local/share/cognilode/"
                      "spine-rpe-decisionx-batches-20261007T223721Z/decisionx-spine/slack")
 LANDING_SNAPSHOTS = Path.home() / ".local/share/cognilode/slack-role-snapshots"
@@ -111,6 +114,108 @@ def _sender():
     return module
 
 
+def _taskflow_header_session_id(stderr: str) -> str | None:
+    loader = importlib.machinery.SourceFileLoader("employee_roster_taskflow", str(TASKFLOW))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    loader.exec_module(module)
+    return module.codex_header_session_id(stderr)
+
+
+def _drive_capture_verified(capture: dict[str, Any], cid: str) -> bool:
+    source_sha = str(capture.get("source_sha256") or "")
+    return bool(capture.get("source_kind") == "codex_rollout"
+                and capture.get("source_response_complete") is True
+                and capture.get("source_complete") is True
+                and capture.get("drive_verified") is True
+                and re.fullmatch(r"[0-9a-f]{64}", source_sha)
+                and capture.get("drive_source_sha256") == source_sha
+                and re.fullmatch(r"[0-9a-f]{64}", str(capture.get("drive_object_sha256") or ""))
+                and capture.get("drive_verified_at")
+                and capture.get("drive_conversation_id") == cid)
+
+
+def maybe_repair_completed_codex_identity(job: dict[str, Any], post,
+                                          header_parser=None) -> dict[str, Any]:
+    """Repair one 0.162 startup-warning omission from original bytes, never rerun it."""
+    if (job.get("state") != "complete" or job.get("provider") != "codex.research"
+        or job.get("prompt_author") != "taskflow_plan"
+        or any(isinstance(e, dict) and e.get("kind") == "codex_session_identity"
+               for e in job.get("effect_evidence") or [])):
+        return job
+    evidence = [e for e in job.get("effect_evidence") or [] if isinstance(e, dict)]
+    zip_rows = [e for e in evidence if e.get("kind") == "research_zip"]
+    invocation = [e for e in evidence if e.get("kind") == "research_invocation"]
+    if len(zip_rows) != 1 or len(invocation) != 1:
+        return job
+    try:
+        zip_path = Path(str(zip_rows[0]["path"])).resolve(strict=True)
+        if (not zip_path.is_relative_to((ROOT / ".taskflow-state/employee-spine").resolve())
+            or zip_path.name != "research.zip" or zip_path.stat().st_size > 20 * 1024 * 1024
+            or hashlib.sha256(zip_path.read_bytes()).hexdigest() != zip_rows[0]["ref"]):
+            return job
+        receipt_path = zip_path.with_name("secretary_receipt.json")
+        receipt_text = receipt_path.read_text(encoding="utf-8")
+        if hashlib.sha256(receipt_text.encode()).hexdigest() != invocation[0]["ref"]:
+            return job
+        receipt = json.loads(receipt_text)
+        attempts = receipt.get("attempts") or []
+        if len(attempts) != 1 or not isinstance(attempts[0], dict):
+            return job
+        result = attempts[0].get("result") or {}
+        if (result.get("conversation_id") is not None
+            or result.get("conversation_id_source") is not None
+            or receipt.get("completed") is not True
+            or receipt.get("taskflow_route_verified") is not True):
+            return job
+        full_path = Path(str(attempts[0]["full_receipt_ref"])).resolve(strict=True)
+        if (not full_path.is_relative_to((Path.home()/".local/state/cognilode/secretary/runs").resolve())
+            or full_path.name != "receipt.json"):
+            return job
+        stderr_path = full_path.with_name("codex.stderr")
+        stderr = stderr_path.read_bytes()
+        if (len(stderr) > 2_000_000
+            or hashlib.sha256(stderr).hexdigest() != result.get("codex_stderr_sha256")):
+            return job
+        parser = header_parser or _taskflow_header_session_id
+        cid = parser(stderr.decode("utf-8"))
+        if not cid:
+            return job
+        try:
+            central = post({"operation": "read", "provider": "openai-codex",
+                            "conversation_id": cid})
+        except Exception:
+            return job
+        conversation = central.get("conversation") or {}
+        capture = conversation.get("capture") or {}
+        if (not central.get("ok") or conversation.get("conversation_id") != cid
+            or not _drive_capture_verified(capture, cid)
+            or conversation.get("response_sha256") != result.get("response_text_sha256")):
+            return job
+        rollout_path = Path(str(capture["source_stream_id"])).resolve(strict=True)
+        if (not rollout_path.is_relative_to((Path.home()/".codex/sessions").resolve())
+            or not rollout_path.name.endswith(f"-{cid}.jsonl")
+            or rollout_path.stat().st_size > 4_000_000):
+            return job
+        rollout = rollout_path.read_bytes()
+        if hashlib.sha256(rollout).hexdigest() != capture["source_sha256"]:
+            return job
+        body = {"operation": "repair_completed_codex_identity",
+                "job_id": job["id"], "conversation_id": cid,
+                "receipt_text": receipt_text,
+                "stderr_gzip_base64": base64.b64encode(gzip.compress(stderr, 9, mtime=0)).decode(),
+                "rollout_gzip_base64": base64.b64encode(gzip.compress(rollout, 9, mtime=0)).decode()}
+        try:
+            repaired = post(body)
+        except Exception:
+            return job
+        return repaired.get("job") if repaired.get("ok") and isinstance(repaired.get("job"), dict) else job
+    except (OSError, ValueError, KeyError, TypeError, UnicodeError):
+        return job
+
+
 def verified_employee_job(job: dict[str, Any], post) -> dict[str, str] | None:
     name = str(job.get("assigned_employee") or "")
     if (job.get("state") != "complete" or job.get("claimed_by") != name
@@ -144,18 +249,7 @@ def verified_employee_job(job: dict[str, Any], post) -> dict[str, str] | None:
     if not read.get("ok") or conversation.get("conversation_id") != cid:
         return None
     capture = conversation.get("capture") or {}
-    source_sha = str(capture.get("source_sha256") or "")
-    drive_source_sha = str(capture.get("drive_source_sha256") or "")
-    drive_object_sha = str(capture.get("drive_object_sha256") or "")
-    if (capture.get("source_kind") != "codex_rollout"
-        or capture.get("source_response_complete") is not True
-        or capture.get("source_complete") is not True
-        or capture.get("drive_verified") is not True
-        or not re.fullmatch(r"[0-9a-f]{64}", source_sha)
-        or drive_source_sha != source_sha
-        or not re.fullmatch(r"[0-9a-f]{64}", drive_object_sha)
-        or not str(capture.get("drive_verified_at") or "")
-        or capture.get("drive_conversation_id") != cid):
+    if not _drive_capture_verified(capture, cid):
         # D1 interim admission can precede the singular Drive CAS/readback.
         # Do not install a newly named employee until both are complete.
         return None
@@ -177,7 +271,8 @@ def verified_employee_job(job: dict[str, Any], post) -> dict[str, str] | None:
     return {"provider": str(job["provider"]), "job_id": str(job["id"]),
             "employee": name, "conversation_id": cid,
             "response_sha256": response_sha, "effect_kind": effect_kind,
-            "source_sha256": source_sha, "drive_object_sha256": drive_object_sha,
+            "source_sha256": str(capture["source_sha256"]),
+            "drive_object_sha256": str(capture["drive_object_sha256"]),
             "drive_verified_at": str(capture["drive_verified_at"]),
             "effect_ref": str(effect["ref"]),
             "completed_at": str(job.get("completed_at") or "")}
@@ -233,6 +328,7 @@ def reconcile(snapshot_dirs: list[Path], *, activate: bool = True,
                     candidate = facts["candidates"].get(name)
                     if not candidate or name in route_proofs:
                         continue
+                    job = maybe_repair_completed_codex_identity(job, post)
                     proof = verified_employee_job(job, post)
                     if proof:
                         proof["slack_message"] = candidate["slack_message"]

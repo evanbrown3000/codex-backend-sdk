@@ -122,10 +122,29 @@ services:
     environment:
       HOME: /home/worker
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+      COGNILODE_SOURCE_SYNC_INTERVAL: "300"
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+
+  site-publisher:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /company/codex-backend-sdk
+    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-company-site-publisher]
+    environment:
+      HOME: /home/worker
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+      PATH: /usr/bin:/usr/local/bin:/bin
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+    depends_on:
+      - source-sync
 
   taskflow-worker:
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}

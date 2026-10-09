@@ -73,6 +73,128 @@ class FakeQueue:
         raise AssertionError(body)
 
 class Tests(unittest.TestCase):
+    def test_verified_checkoff_preserves_parallel_sibling_dependency_and_restart(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo=Path(td)
+            subprocess.run(['git','init','-q',str(repo)],check=True)
+            subprocess.run(['git','-C',str(repo),'config','user.name','Test'],check=True)
+            subprocess.run(['git','-C',str(repo),'config','user.email','test@example.invalid'],check=True)
+            path=repo/'plans'/'parallel.plan'; path.parent.mkdir()
+            path.write_text('''project Parallel
+id parallel
+[ ] A applied effect
+    effect_probe_command: /usr/bin/printf ok
+    effect_probe_expected: ok
+[ ] B parallel work
+    effect_probe_command: /usr/bin/printf ok
+    effect_probe_expected: ok
+[ ] C follows A
+    depends_on: A
+[ ] D follows B
+    depends_on: B
+''')
+            subprocess.run(['git','-C',str(repo),'add','plans/parallel.plan'],check=True)
+            subprocess.run(['git','-C',str(repo),'commit','-qm','initial plan'],check=True)
+            original=c.parse_plan(path); q=FakeQueue()
+            def effect(plan, step_id):
+                step=plan.by_id()[step_id]
+                job=c.job_base(plan,step,'external_effect',provider='codex.external-effect',priority=50,dependencies=[])
+                job.update(state='complete',effect_evidence=[
+                    {'kind':'external_effect','ref':'deploy:real'},
+                    {'kind':'external_effect_receipt','ref':'a'*64},
+                    {'kind':'chatgpt_work_zip','ref':'b'*64},
+                    {'kind':'independent_effect_probe','ref':'c'*64,'observed':'ok','command':step.fields['effect_probe_command']}])
+                q.jobs[job['id']]=job
+                return job
+            a=effect(original,'A')
+            b_research=c.job_base(original,original.by_id()['B'],'research',provider='codex.research',priority=50,dependencies=[])
+            q.jobs[b_research['id']]=b_research
+            result=c.checkoff_verified_effects(q,original,expected_revision=original.sha256,
+                                               expected_job_id=a['id'],step_id='A')
+            self.assertEqual(result['checked_steps'],['A'])
+            current=c.parse_plan(path); c.verify_plan_revision(current)
+            self.assertTrue(current.by_id()['A'].checked)
+            self.assertEqual(current.completed_effects['A'],a['id'])
+            self.assertEqual(current.inflight_revisions['B'],original.sha256)
+            self.assertEqual(c.final_dependency_ids(current,current.by_id()['C']),[])
+            with self.assertRaisesRegex(ValueError,'checked step lacks verified effect'):
+                c.parse_plan_text(current.text.replace('[ ] C follows A','[x] C follows A'))
+            self.assertEqual(c.final_dependency_ids(current,current.by_id()['D']),[c.phase_job_id(original,'B','external_effect')])
+            self.assertFalse(c.completed_prerequisites(q,current,current.by_id()['D']))
+            # A new process can reload the old committed bytes and the same B job ID.
+            cohorts=c.prior_plan_cohorts(c.parse_plan(path))
+            self.assertEqual(len(cohorts),1)
+            old,ids=cohorts[0]
+            self.assertEqual(ids,{'B'})
+            self.assertEqual(old.sha256,original.sha256)
+            self.assertEqual(c.phase_job_id(old,'B','research'),b_research['id'])
+            with self.assertRaisesRegex(ValueError,'plan revision changed'):
+                c.checkoff_verified_effects(q,current,expected_revision=original.sha256,
+                                            expected_job_id=a['id'],step_id='A')
+            b=effect(old,'B')
+            self.assertTrue(c.completed_prerequisites(q,current,current.by_id()['D']))
+            next_result=c.checkoff_verified_effects(q,current,expected_revision=current.sha256,
+                                                     expected_job_id=b['id'],step_id='B')
+            self.assertEqual(next_result['checked_steps'],['B'])
+            revised=c.parse_plan(path)
+            self.assertTrue(revised.by_id()['B'].checked)
+            self.assertEqual(revised.completed_effects['B'],b['id'])
+            self.assertNotIn('B',revised.inflight_revisions)
+            self.assertEqual(c.final_dependency_ids(revised,revised.by_id()['D']),[])
+
+    def test_checkoff_rejects_unverified_effect_and_dirty_plan(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo=Path(td); subprocess.run(['git','init','-q',str(repo)],check=True)
+            path=repo/'plans'/'one.plan'; path.parent.mkdir()
+            path.write_text('project One\nid one\n[ ] S deployed\n    effect_probe_command: /usr/bin/printf ok\n')
+            subprocess.run(['git','-C',str(repo),'add','plans/one.plan'],check=True)
+            subprocess.run(['git','-C',str(repo),'-c','user.name=Test','-c','user.email=test@example.invalid','commit','-qm','initial'],check=True)
+            plan=c.parse_plan(path); q=FakeQueue(); jid=c.phase_job_id(plan,'S','external_effect')
+            with self.assertRaisesRegex(ValueError,'not complete'):
+                c.checkoff_verified_effects(q,plan,expected_revision=plan.sha256,expected_job_id=jid,step_id='S')
+            job=c.job_base(plan,plan.by_id()['S'],'external_effect',provider='codex.external-effect',priority=50,dependencies=[])
+            job.update(state='complete',effect_evidence=[{'kind':'external_effect','ref':'deploy:real'}]); q.jobs[jid]=job
+            with self.assertRaisesRegex(ValueError,'independent probe'):
+                c.checkoff_verified_effects(q,plan,expected_revision=plan.sha256,expected_job_id=jid,step_id='S')
+            job['effect_evidence']=[
+                {'kind':'external_effect','ref':'deploy:real'},
+                {'kind':'external_effect_receipt','ref':'a'*64},
+                {'kind':'chatgpt_work_zip','ref':'b'*64},
+                {'kind':'independent_effect_probe','ref':'c'*64,'observed':'ok','command':'/usr/bin/printf ok'},
+            ]
+            path.write_text(path.read_text()+'# concurrent edit\n')
+            with self.assertRaisesRegex(ValueError,'source changed'):
+                c.checkoff_verified_effects(q,plan,expected_revision=plan.sha256,expected_job_id=jid,step_id='S')
+
+    def test_controller_asks_codex_employee_to_execute_fenced_checkoff_after_d1_readback(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo=Path(td); subprocess.run(['git','init','-q',str(repo)],check=True)
+            path=repo/'plans'/'one.plan'; path.parent.mkdir()
+            path.write_text('project One\nid one\n[ ] S deployed\n    effect_probe_command: /usr/bin/printf ok\n')
+            subprocess.run(['git','-C',str(repo),'add','plans/one.plan'],check=True)
+            subprocess.run(['git','-C',str(repo),'-c','user.name=Test','-c','user.email=test@example.invalid','commit','-qm','initial'],check=True)
+            plan=c.parse_plan(path); step=plan.by_id()['S']; q=FakeQueue()
+            job=c.job_base(plan,step,'external_effect',provider='codex.external-effect',priority=50,dependencies=[])
+            job.update(state='complete',effect_evidence=[
+                {'kind':'external_effect','ref':'deploy:real'}, {'kind':'external_effect_receipt','ref':'a'*64},
+                {'kind':'chatgpt_work_zip','ref':'b'*64},
+                {'kind':'independent_effect_probe','ref':'c'*64,'observed':'ok','command':step.fields['effect_probe_command']}])
+            q.jobs[job['id']]=job
+            calls=[]
+            def codex_checkoff(secretary,prompt_path,**kwargs):
+                calls.append((prompt_path.read_text(),kwargs['employee']))
+                c.checkoff_verified_effects(q,plan,expected_revision=plan.sha256,expected_job_id=job['id'],step_id='S')
+                return {'taskflow_route_verified':True}
+            with mock.patch.object(c,'QueueClient',return_value=q), mock.patch.object(c,'load_sender',return_value=None), \
+                 mock.patch.object(c,'run_once',return_value={'actions':[]}), mock.patch.object(c,'run_secretary',side_effect=codex_checkoff):
+                with mock.patch('sys.stdout') as stdout:
+                    self.assertEqual(c.main(['--plan',str(path),'--role','Elliot Mercer','--external-employee','Rina Hale',
+                                             '--state-root',str(repo/'.state')]),0)
+            self.assertEqual(len(calls),1)
+            self.assertEqual(calls[0][1],'Rina Hale')
+            self.assertIn('--expected-effect-job-id '+job['id'],calls[0][0])
+            self.assertTrue(c.parse_plan(path).by_id()['S'].checked)
+
     def test_named_employee_receives_slack_role_source(self):
         role=c.slack_role_context('Elliot Mercer')
         self.assertIn('Principal Platform Systems Engineer',role)

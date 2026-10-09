@@ -12,7 +12,7 @@ scripts/cognilode-taskflow-phase-controller \
   --seed-step CP-4-6
 ```
 
-The D1 API must support `get_job` by exact ID, `prompt_authority=taskflow_plan`, and the `codex.research` and `codex.external-effect` providers. Each phase enqueue includes the source `.plan` path, full plan text, exact SHA-256, step, phase, and assigned employee. A changed plan produces new phase IDs; a source change detected before phase materialization stops that run.
+The D1 API must support `get_job` by exact ID, `prompt_authority=taskflow_plan`, and the `codex.research` and `codex.external-effect` providers. Each phase enqueue includes the source `.plan` path, full plan text, exact SHA-256, step, phase, and assigned employee. A changed plan produces new phase IDs for work that has not started; a source change detected before phase materialization stops that run. In-flight steps retain their originating revision and phase IDs until their effect completes.
 
 Each step's `owner:` selects its named Codex researcher. `config/employee-slack-roles.json` records the Slack role and source message that the controller gives to that employee; a missing role stops materialization. The `--role` argument is a fallback for plans without per-step owners. The external-effect employee is named separately with `--external-employee`.
 
@@ -35,6 +35,14 @@ For this plan the acceptance probe is exactly:
 ```
 
 An `active` service is necessary but not sufficient for CP-4-6 completion: a real `codex.external-effect` D1 job must also complete with deployment/service-change identity and central readback.
+
+## Verified plan checkoff and revision continuity
+
+After D1 records a completed external-effect job with its work ZIP, effect receipt, and independent readback probe, the controller invokes the named Codex external-effect employee again for a fenced `.plan` checkoff. That Codex invocation runs `--checkoff-only` with the exact prior plan SHA, step ID, and D1 effect job ID. The command checks the D1 job and evidence afresh; the checkbox alone has no effect authority.
+
+The checkoff commits only the `.plan` path and an immutable copy of the prior plan at `.taskflow-plan-revisions/<plan-name>/<old-sha>.plan`. Its `completed_effect STEP JOB_ID` lines retain each verified effect reference. Its `inflight_revision STEP OLD_SHA` lines retain the original phase IDs for independent work already in progress. Existing checked boxes become explicit `inherited_checked STEP` baseline entries. After the first automated revision, a checked box without either a verified effect reference or a baseline entry is rejected. A fresh controller process reads the committed snapshots, continues only their listed steps, and uses each old external-effect job ID for dependencies. Once an old step's effect is independently verified, a later checkoff removes its in-flight marker. A dependent step can then start under the latest plan revision.
+
+The checkoff refuses a dirty plan path, a changed revision, a mismatched job identity, or missing probe evidence. The controller runs one checkoff per recurrence; if the Codex invocation fails, the current plan remains the source for the next attempt. A Git commit records the local plan revision. A separate repository synchronization process must publish that commit to remote collaborators.
 
 ## Private cross-device attachment launchpad
 

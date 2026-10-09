@@ -1602,6 +1602,41 @@ def requeue_definitive_rejection(job: dict, value: dict) -> bool:
     return True
 
 
+def requeue_prepost_failure(job: dict, device_id: str, value: dict, stderr: str = "") -> bool:
+    """Let D1 decide whether a Chat POST boundary was ever crossed.
+
+    The sender commits `post_started` before POST. Only custody still in
+    `intent_recorded` may return to a later historical-rhythm slot.
+    """
+    try:
+        error = json.loads(stderr.strip()) if stderr.strip().startswith("{") else {}
+    except ValueError:
+        error = {}
+    reason = str(value.get("state") or error.get("state") or "sender_exited_before_result")[:160]
+    delay = max(0.0, float(value.get("retry_after_seconds") or error.get("retry_after_seconds") or 0))
+    try:
+        reply = sender.operator_memory_post({"operation": "requeue_chatmode_prepost_failure", **fence(job),
+            "device_id": device_id, "user_message_id": stable_user_message_id(str(job["id"])),
+            "reason": reason, "retry_after_ms": int(delay * 1000)})
+    except Exception as exc:
+        event("prepost_boundary_check_failed", job_id=job["id"], error=type(exc).__name__ + ":" + str(exc)[:180])
+        return False
+    if not reply.get("ok"):
+        event("prepost_requeue_rejected", job_id=job["id"], reason=reply.get("error"))
+        return False
+    stem = job_stem(str(job["id"]))
+    target = ROOT / "prepost-attempts" / str(job["id"]) / str(job.get("lease_generation") or 0)
+    target.mkdir(parents=True, exist_ok=True)
+    for source in sender.DEFAULT_OUTPUT_ROOT.glob(stem + "*"):
+        # Keep finalized provider file IDs for the next rhythm slot.
+        if source.is_file() and not source.name.endswith(".uploads.json"):
+            source.replace(target / source.name)
+    atomic_json(job_state_path(str(job["id"])), {"state": "queued_after_prepost_failure",
+                                                "job_id": job["id"], "reason": reason})
+    event("prepost_requeued", job_id=job["id"], reason=reason, retry_after_seconds=delay)
+    return True
+
+
 def prior_rejected_result(job_id: str) -> dict | None:
     value = result_for_job(job_id)
     if value is None:
@@ -1658,7 +1693,15 @@ def execute(job: dict, device_id: str = DEVICE_ID) -> None:
             event("send_intent_rejected", job_id=job_id, error=intent.get("error"))
             return
         command = sender_command(job, prompt_path, attachments)
-        response = subprocess.run(command, text=True, capture_output=True, timeout=2100, check=False)
+        send_env = dict(os.environ)
+        send_env["COGNILODE_CHATMODE_SEND_FENCE"] = json.dumps({**fence(job), "device_id": device_id})
+        try:
+            response = subprocess.run(command, text=True, capture_output=True,
+                                      timeout=2100, check=False, env=send_env)
+        except subprocess.TimeoutExpired:
+            if requeue_prepost_failure(job, device_id, {}, ""):
+                return
+            raise
         value = json.loads(response.stdout) if response.stdout.strip().startswith("{") else {}
         if value:
             try:
@@ -1668,6 +1711,8 @@ def execute(job: dict, device_id: str = DEVICE_ID) -> None:
         if value and requeue_definitive_rejection(job, value):
             return
         if value and complete_from_result(job, value):
+            return
+        if requeue_prepost_failure(job, device_id, value, response.stderr):
             return
         provider_delay = max(0.0, float(value.get("retry_after_seconds") or 0))
         atomic_json(job_state_path(job_id), {"state": "reconcile_required", "job_id": job_id,

@@ -583,7 +583,11 @@ print(json.dumps({'completed':True,'final_candidate':{'family':candidate['family
             self.assertIsNone(q.get(c.phase_job_id(plan,'AM-8','research')), 'AM-8 must not release after research')
             # Simulate the proven B4PT0R chat-mode worker completing only its phase after central readback.
             work=td/'work.zip'; manifest_zip(work,plan.sha256,{'EXTERNAL_EFFECT_INSTRUCTIONS.md':b'apply it','patch.txt':b'change'})
-            chat.update(state='complete',effect_evidence=[{'kind':'provider_conversation','ref':'conv-1'},{'kind':'central_conversation_readback','ref':'conv-1'},{'kind':'chatgpt_sandbox_artifact','ref':hashlib.sha256(work.read_bytes()).hexdigest(),'path':str(work)}])
+            chat.update(state='complete',conversation_id='conv-1',effect_evidence=[{'kind':'provider_conversation','ref':'conv-1'},{'kind':'central_conversation_readback','ref':'conv-1'},{'kind':'chatgpt_sandbox_artifact','ref':hashlib.sha256(work.read_bytes()).hexdigest(),'path':str(work)}])
+            unproven=c.run_once(queue=q,plan=plan,role='Elliot Mercer',secretary=secretary,state_root=state,worker_id='test-worker',manager='m',priority=50,external_employee='Rina Hale')
+            self.assertIsNone(q.get(c.phase_job_id(plan,'AM-5','external_effect')))
+            self.assertTrue(any(x.get('phase')=='chatgpt_readback' and 'native functions.exec' in x.get('error','') for x in unproven['actions']))
+            chat['effect_evidence'].append({'kind':'provider_observed_functions_exec','ref':'result-1','call_ref':'call-1','raw_stream_sha256':'a'*64})
             second=c.run_once(queue=q,plan=plan,role='Elliot Mercer',secretary=secretary,state_root=state,worker_id='test-worker',manager='m',priority=50,external_employee='Rina Hale')
             effect=q.get(c.phase_job_id(plan,'AM-5','external_effect')); self.assertEqual(effect['state'],'complete')
             # One more controller recurrence observes committed effect completion and releases AM-8 research.

@@ -1035,8 +1035,18 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
         if not path: continue
         try:
             meta=verify_manifest_zip(path,expected_plan_sha256=plan.sha256,require_external_instructions=True)
-            matching=[e for e in cjob.get("effect_evidence") or [] if isinstance(e,dict) and e.get("kind")=="chatgpt_sandbox_artifact" and e.get("path")==str(path) and e.get("ref")==meta["sha256"]]
+            evidence=[e for e in cjob.get("effect_evidence") or [] if isinstance(e,dict)]
+            matching=[e for e in evidence if e.get("kind")=="chatgpt_sandbox_artifact" and e.get("path")==str(path) and e.get("ref")==meta["sha256"]]
             if len(matching) != 1: raise ValueError("ChatGPT artifact evidence SHA mismatch")
+            conversation_id=str(cjob.get("conversation_id") or "")
+            if not conversation_id or not all(any(e.get("kind")==kind and e.get("ref")==conversation_id for e in evidence)
+                                              for kind in ("provider_conversation","central_conversation_readback")):
+                raise ValueError("ChatGPT conversation lacks matching central readback evidence")
+            native=[e for e in evidence if e.get("kind")=="provider_observed_functions_exec"
+                    and str(e.get("ref") or "").strip() and str(e.get("call_ref") or "").strip()
+                    and HEX64.fullmatch(str(e.get("raw_stream_sha256") or ""))]
+            if not native:
+                raise ValueError("ChatGPT phase lacks matched provider-observed native functions.exec call and result")
         except Exception as exc:
             action["actions"].append({"step":step.step_id,"phase":"chatgpt_readback","ok":False,"error":f"{type(exc).__name__}:{exc}"}); continue
         ejob=ensure_external_job(queue,plan,step,priority,meta,state_root=state_root,external_employee=external_employee)

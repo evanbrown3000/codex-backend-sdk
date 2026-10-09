@@ -115,8 +115,9 @@ class AdviceHandoffTests(unittest.TestCase):
                 "[ ] DX-1 Complete grounded next action\n"
                 "    owner: Nadia Brooks\n    role: Research engineer\n"
                 f"    do: {instruction}\n"
+                "    done_when: The external target effect is independently observed with matching source identity.\n"
                 "    effect_probe_command: /usr/bin/python3 -I /opt/cognilode/check.py read\n"
-                "    effect_probe_expected: verified\n")
+                "    effect_probe_expected: target effect present with source identity and matching digest\n")
             (work / "EXTERNAL_EFFECT_INSTRUCTIONS.md").write_text(
                 "Install the TaskFlow plan through the named Codex employee, perform the external action, "
                 "then independently reread the resulting state and check off only with effect evidence.")
@@ -168,8 +169,9 @@ class AdviceHandoffTests(unittest.TestCase):
                 "[ ] S1 Act on the selected successor\n"
                 "    owner: Nadia Brooks\n    role: Research engineer\n"
                 f"    do: {instruction}\n"
+                "    done_when: The real external effect is independently observed and source-linked.\n"
                 "    effect_probe_command: /usr/bin/python3 -I /opt/cognilode/verify.py --read\n"
-                "    effect_probe_expected: verified\n").encode()
+                "    effect_probe_expected: external effect present with exact source-linked identity\n").encode()
         advice = {"schema": "cognilode.decisionx.successor_advice.v1",
                   "target_job_id": "target-1", "target_provider": "openai-codex",
                   "target_conversation_id": "current-1", "target_prompt_sha256": "d" * 64,
@@ -212,12 +214,26 @@ class AdviceHandoffTests(unittest.TestCase):
                                            [candidate], source_ref_hash, "1" * 64,
                                            stage_remote=lambda _url, _sha: path)
             self.assertEqual(result[2], archive_sha)
+            members["successor.plan"] = plan.replace(
+                b"/usr/bin/python3 -I /opt/cognilode/verify.py --read", b"/usr/bin/true").replace(
+                b"external effect present with exact source-linked identity", b"true")
+            manifest["members"]["successor.plan"] = sha256(members["successor.plan"]).hexdigest()
+            archive_sha = write_zip(path, {"MANIFEST.json": handoff.canonical(manifest), **members})
+            evidence[0]["sha256"] = evidence[0]["ref"] = archive_sha
+            evidence[0]["mirrors"] = ["s3://private-test/" + archive_sha]
+            with self.assertRaisesRegex(ValueError, "pending owned steps"):
+                handoff.verify_output(post, job, evidence, input_hashes, [source],
+                                      [candidate], source_ref_hash, "1" * 64,
+                                      stage_remote=lambda _url, _sha: path)
+            members["successor.plan"] = plan
+            manifest["members"]["successor.plan"] = sha256(plan).hexdigest()
             native["source_refs_sha256"] = "0" * 64
             members["NATIVE_COMPUTE.json"] = handoff.canonical(native)
             manifest["members"]["NATIVE_COMPUTE.json"] = sha256(members["NATIVE_COMPUTE.json"]).hexdigest()
             archive_sha = write_zip(path, {"MANIFEST.json": handoff.canonical(manifest), **members})
             evidence[0]["sha256"] = archive_sha
             evidence[0]["ref"] = archive_sha
+            evidence[0]["mirrors"] = ["s3://private-test/" + archive_sha]
             with self.assertRaisesRegex(ValueError, "native compute proof"):
                 handoff.verify_output(post, job, evidence, input_hashes, [source],
                                       [candidate], source_ref_hash, "1" * 64,

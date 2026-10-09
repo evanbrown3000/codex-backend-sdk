@@ -22,6 +22,7 @@ def load(name, filename):
 
 upstream = load("decisionx_successor_packet_test", "cognilode-decisionx-successor")
 native = load("decisionx_successor_native_test", "decisionx_successor_native.py")
+handoff = load("decisionx_successor_handoff_retry_test", "cognilode-decisionx-advice-handoff")
 
 
 def digest(raw):
@@ -188,3 +189,36 @@ def test_failed_successor_is_deferred_then_reenqueued_with_new_fence(tmp_path, m
     assert seen[0]["attempt"] == 1
     assert seen[0]["predecessor_job_id"] == "decisionx-successor-old"
     assert json.loads(state_path.read_text())["job_id"] == "decisionx-successor-new-retry-1"
+
+
+def test_complete_but_invalid_provider_zip_records_shared_rejection_then_retries(tmp_path, monkeypatch):
+    root_state = tmp_path / "root.json"
+    root_state.write_text(json.dumps({"phase": "complete", "root_job_id": "root-job"}))
+    output = tmp_path / "successor"
+    output.mkdir()
+    (output / "state.json").write_text(json.dumps({"target_job_id": "root-job",
+                                                    "job_id": "decisionx-successor-bad", "attempt": 0}))
+    stored = {}
+    job = {"id": "decisionx-successor-bad", "state": "complete",
+           "conversation_id": "chat-bad", "effect_evidence": []}
+    def post(body):
+        if body["operation"] == "get_job":
+            return {"ok": True, "job": job}
+        if body["operation"] == "append_segments":
+            for row in body["segments"]:
+                stored[row["segment_id"]] = row
+            return {"ok": True}
+        if body["operation"] == "read_segment":
+            row = stored.get(body["segment_id"])
+            return {"ok": bool(row), "segment": row}
+        raise AssertionError(body)
+    def invalid(*_args, **_kwargs):
+        raise handoff.InvalidProviderDeliverable("successor plan contains a tautological probe")
+    monkeypatch.setattr(handoff, "handoff", invalid)
+    rejected = handoff.tick(post, job_id=job["id"], output_root=tmp_path,
+                            state_root=tmp_path / "handoff-state")
+    assert rejected["phase"] == "provider_result_rejected"
+    assert rejected["rejection_segment_id"] in stored
+    deferred = upstream.tick(post, output_root=output, root_state_path=root_state)
+    assert deferred["phase"] == "retry_deferred"
+    assert deferred["job_state"] == "provider_result_rejected"

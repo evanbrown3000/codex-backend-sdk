@@ -255,7 +255,7 @@ job/provider/conversation and prompt/response hashes, candidate_refs with six ex
 identity fields, proposed_next_instruction, changed_conditions, uncertainties),
 `successor.plan` (human-readable machine-readable pending steps embodying the exact
 proposed_next_instruction; each step must remain pending and name an owner, role,
-`effect_probe_command`, and `effect_probe_expected` observable result),
+`done_when:`, `effect_probe_command:`, and `effect_probe_expected:`),
 `EXTERNAL_EFFECT_INSTRUCTIONS.md` (how the Codex employee
 should deploy the plan), `NATIVE_COMPUTE.json` copied from work/, and `MANIFEST.json`
 (schema cognilode.decisionx.successor_output.v1; members maps the other four paths
@@ -266,10 +266,15 @@ manifest and ZIP reproducibly. Provide that ZIP as a downloadable Chat attachmen
 Use TaskFlow syntax exactly: begin `project DecisionX Successor` and
 `id decisionx-successor`, then a line such as
 `[ ] DX-1 Verify and implement the proposed next instruction`, followed by
-indented `owner:`, `role:`, `effect_probe_command:`,
+indented `owner:`, `role:`, `done_when:`, `effect_probe_command:`,
 `effect_probe_expected:`, and `do:` fields. Use Nadia Brooks as the named
 research employee and Rina Hale as the named Codex external-effect employee.
-Put `proposed_next_instruction` verbatim somewhere in successor.plan.
+Put `proposed_next_instruction` verbatim inside a `do:` instruction or `do:`
+bullet, not in a title or comment. The independent probe command must have the
+form `/usr/bin/python3 -I /absolute/path/to/probe.py <read-only-args>` and read
+the real external effect after execution. Its expected observation must be
+specific and at least 24 characters long, not `true`, `ok`, `verified`, or a
+unit-test pass.
 Also report in chat what you learned, what remains unresolved, and exactly which
 historical conversations changed your proposed next action.
 """
@@ -348,8 +353,18 @@ def tick(post: Callable[[dict], Mapping], *, output_root: Path = DEFAULT_ROOT,
             require(prior_result.get("ok") and prior.get("id") == prior_id,
                     "predecessor D1 job missing")
             prior_state = str(prior.get("state") or "")
-            if prior_state not in {"failed", "cancelled"}:
+            rejection = None
+            if prior_state == "complete":
+                segment_id = "decisionx.handoff_rejected." + sha(prior_id.encode())
+                read = post({"operation": "read_segment", "segment_id": segment_id})
+                found = read.get("segment") or {}
+                if (read.get("ok") and found.get("segment_id") == segment_id
+                    and found.get("kind") == "decisionx_handoff_rejection"
+                    and (found.get("metadata") or {}).get("job_id") == prior_id):
+                    rejection = found
+            if prior_state not in {"failed", "cancelled"} and rejection is None:
                 return {"ok": True, "phase": "already_queued", "job_state": prior_state, **state}
+            effective_failure = "provider_result_rejected" if rejection else prior_state
             attempt = int(state.get("attempt") or 0) + 1
             if not 1 <= attempt <= 1000:
                 raise ValueError("invalid DecisionX successor retry attempt")
@@ -363,17 +378,18 @@ def tick(post: Callable[[dict], Mapping], *, output_root: Path = DEFAULT_ROOT,
                 temp = existing.with_suffix(".tmp")
                 temp.write_bytes(canonical(state))
                 os.replace(temp, existing)
-                return {"ok": True, "phase": "retry_deferred", "job_state": prior_state,
+                return {"ok": True, "phase": "retry_deferred", "job_state": effective_failure,
                         "retry_after": state["retry_after"], **state}
             try:
                 after = datetime.fromisoformat(str(state["retry_after"]).replace("Z", "+00:00"))
             except (KeyError, ValueError) as exc:
                 raise ValueError("invalid successor retry fence") from exc
             if now < after:
-                return {"ok": True, "phase": "retry_deferred", "job_state": prior_state,
+                return {"ok": True, "phase": "retry_deferred", "job_state": effective_failure,
                         "retry_after": state["retry_after"], **state}
             predecessor_job_id = prior_id
-            predecessor_failure = str(prior.get("last_error") or prior.get("error") or prior_state)
+            predecessor_failure = str((rejection or {}).get("content") or
+                                      prior.get("last_error") or prior.get("error") or prior_state)
     first = post({"operation": "decisionx_candidates", "q": "research", "limit": 1})
     if not first.get("ok") or first.get("ready") is not True or int(first.get("distinct_sources") or 0) < 500:
         return {"ok": False, "reason": "shared_descriptor_index_below_500",

@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 from typing import Any, Callable, Mapping
@@ -29,6 +30,10 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 EXPECTED = ("DECISIONX_ADVICE.json", "successor.plan",
             "EXTERNAL_EFFECT_INSTRUCTIONS.md", "NATIVE_COMPUTE.json")
 MAX_ZIP_BYTES = 20 * 1024 * 1024
+
+
+class InvalidProviderDeliverable(ValueError):
+    """A complete provider turn returned a permanently unusable work product."""
 
 
 def load(path: Path, name: str) -> Any:
@@ -49,6 +54,14 @@ def digest(raw: bytes) -> str:
 def canonical(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True,
                       separators=(",", ":")).encode("utf-8")
+
+
+def remote_stager() -> Callable[[str, str], Path]:
+    if not os.environ.get("COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET"):
+        root_cycle = load(HERE / "cognilode-root-memory-native-cycle", "dx_advice_s3_config")
+        os.environ["COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET"] = root_cycle.DEFAULT_BUCKET
+    worker = load(HERE / "cognilode-chatmode-queue-worker", "dx_advice_remote_stager")
+    return worker._stage_remote_attachment
 
 
 def exact_refs(rows: Any, *, candidate: bool = False) -> list[dict[str, str]]:
@@ -74,6 +87,41 @@ def exact_refs(rows: Any, *, candidate: bool = False) -> list[dict[str, str]]:
     return result
 
 
+def instruction_in_do(plan_text: str, instruction: str) -> bool:
+    lines = plan_text.splitlines()
+    for i, line in enumerate(lines):
+        match = re.match(r"^(\s+)do:\s*(.*)$", line)
+        if not match:
+            continue
+        if instruction in match.group(2):
+            return True
+        indent = len(match.group(1).expandtabs(4))
+        for following in lines[i + 1:]:
+            if not following.strip():
+                continue
+            if len(following[:len(following) - len(following.lstrip())].expandtabs(4)) <= indent:
+                break
+            if re.match(r"^\s+-\s+", following) and instruction in following:
+                return True
+    return False
+
+
+def substantive_probe(step: Any) -> bool:
+    command = str(step.fields.get("effect_probe_command") or "")
+    expected = str(step.fields.get("effect_probe_expected") or "").strip()
+    done_when = str(step.fields.get("done_when") or "").strip()
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    return (len(argv) >= 4 and argv[:2] == ["/usr/bin/python3", "-I"]
+            and Path(argv[2]).is_absolute() and Path(argv[2]).suffix == ".py"
+            and all(arg not in {"-c", "-m", "true", "false", "echo"} for arg in argv[3:])
+            and len(expected) >= 24 and "\n" not in expected
+            and expected.lower() not in {"true", "ok", "pass", "passed", "verified", "success"}
+            and len(done_when) >= 30 and "\n" not in done_when)
+
+
 def stage_zip(ref: Mapping[str, Any], *, stage_remote: Callable[[str, str], Path] | None = None) -> Path:
     expected = str(ref.get("sha256") or "")
     if not HEX64.fullmatch(expected):
@@ -83,8 +131,7 @@ def stage_zip(ref: Mapping[str, Any], *, stage_remote: Callable[[str, str], Path
     if path.is_file() and path.stat().st_size <= MAX_ZIP_BYTES and digest(path.read_bytes()) == expected:
         return path
     if stage_remote is None:
-        worker = load(HERE / "cognilode-chatmode-queue-worker", "dx_advice_remote_stager")
-        stage_remote = worker._stage_remote_attachment
+        stage_remote = remote_stager()
     for mirror in ref.get("mirrors") or []:
         try:
             path = stage_remote(str(mirror), expected)
@@ -113,7 +160,7 @@ def provider_job(post: Callable[[dict[str, Any]], Mapping[str, Any]], job_id: st
         raise ValueError("provider turn and central readback not proven")
     if not any(isinstance(row, Mapping) and row.get("kind") == "provider_observed_native_exec"
                and row.get("raw_stream_sha256") for row in evidence):
-        raise ValueError("successful provider-native container execution not observed")
+        raise InvalidProviderDeliverable("successful provider-native container execution not observed")
     read = post({"operation": "read", "provider": "chatgpt.com", "conversation_id": cid})
     central = read.get("conversation") or {}
     if not read.get("ok") or central.get("conversation_id") != cid or central.get("provider") != "chatgpt.com":
@@ -121,7 +168,7 @@ def provider_job(post: Callable[[dict[str, Any]], Mapping[str, Any]], job_id: st
     if not any(isinstance(row, Mapping) and row.get("role") == "assistant"
                and row.get("source_content_complete") is True and str(row.get("content") or "").strip()
                for row in central.get("events") or []):
-        raise ValueError("complete in-chat provider report missing")
+        raise InvalidProviderDeliverable("complete in-chat provider report missing")
     return job, central
 
 
@@ -220,14 +267,13 @@ def verify_output(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapp
     artifacts = [row for row in evidence if isinstance(row, Mapping)
                  and row.get("kind") == "chatgpt_sandbox_artifact"]
     if len(artifacts) != 1:
-        raise ValueError("exactly one returned Chat-mode ZIP required")
+        raise InvalidProviderDeliverable("exactly one returned Chat-mode ZIP required")
     artifact = artifacts[0]
     mirror_urls = artifact.get("mirrors") or []
     if not isinstance(mirror_urls, list) or not mirror_urls:
         raise ValueError("returned ZIP lacks shared content-addressed mirror")
     if stage_remote is None:
-        worker = load(HERE / "cognilode-chatmode-queue-worker", "dx_advice_output_mirror")
-        stage_remote = worker._stage_remote_attachment
+        stage_remote = remote_stager()
     mirrored = False
     for mirror in mirror_urls:
         if not str(mirror).startswith("s3://"):
@@ -242,22 +288,26 @@ def verify_output(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapp
     if not mirrored:
         raise ValueError("returned ZIP shared mirror failed independent SHA readback")
     path = stage_zip(artifacts[0], stage_remote=stage_remote)
-    with zipfile.ZipFile(path) as archive:
-        names = archive.namelist()
-        if archive.testzip() is not None or len(names) != len(set(names)) or set(names) != {"MANIFEST.json", *EXPECTED}:
-            raise ValueError("returned ZIP members missing, duplicated, or unexpected")
-        manifest = json.loads(archive.read("MANIFEST.json"))
-        members = manifest.get("members") or {}
-        if (manifest.get("schema") != "cognilode.decisionx.successor_output.v1"
-            or not isinstance(members, Mapping) or set(members) != set(EXPECTED)
-            or any(members[name] != digest(archive.read(name)) for name in EXPECTED)):
-            raise ValueError("returned member SHA manifest mismatch")
-        advice = json.loads(archive.read("DECISIONX_ADVICE.json"))
-        native = json.loads(archive.read("NATIVE_COMPUTE.json"))
-        plan_raw = archive.read("successor.plan")
-        instructions = archive.read("EXTERNAL_EFFECT_INSTRUCTIONS.md")
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = archive.namelist()
+            if archive.testzip() is not None or len(names) != len(set(names)) or set(names) != {"MANIFEST.json", *EXPECTED}:
+                raise InvalidProviderDeliverable("returned ZIP members missing, duplicated, or unexpected")
+            manifest = json.loads(archive.read("MANIFEST.json"))
+            members = manifest.get("members") or {}
+            if (manifest.get("schema") != "cognilode.decisionx.successor_output.v1"
+                or not isinstance(members, Mapping) or set(members) != set(EXPECTED)
+                or any(members[name] != digest(archive.read(name)) for name in EXPECTED)):
+                raise InvalidProviderDeliverable("returned member SHA manifest mismatch")
+            advice = json.loads(archive.read("DECISIONX_ADVICE.json"))
+            native = json.loads(archive.read("NATIVE_COMPUTE.json"))
+            plan_raw = archive.read("successor.plan")
+            instructions = archive.read("EXTERNAL_EFFECT_INSTRUCTIONS.md")
+    except (zipfile.BadZipFile, KeyError, TypeError, AttributeError,
+            json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise InvalidProviderDeliverable("returned ZIP corrupt or malformed") from exc
     if len(instructions.strip()) < 100:
-        raise ValueError("external effect instructions are superficial")
+        raise InvalidProviderDeliverable("external effect instructions are superficial")
     if (not isinstance(native, Mapping) or native.get("schema") != "cognilode.decisionx.successor_native_compute.v1"
         or native.get("input_zip_sha256s") != input_hashes
         or native.get("target_job_id") != (job.get("decisionx") or {}).get("target_job_id")
@@ -265,7 +315,7 @@ def verify_output(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapp
         or native.get("candidate_count") != len(candidate_refs)
         or native.get("source_refs_sha256") != source_refs_sha
         or native.get("historical_rendered_sha256") != historical_rendered_sha):
-        raise ValueError("provider-native compute proof does not bind uploaded inputs")
+        raise InvalidProviderDeliverable("provider-native compute proof does not bind uploaded inputs")
     if (not isinstance(advice, Mapping) or advice.get("schema") != "cognilode.decisionx.successor_advice.v1"
         or advice.get("target_job_id") != (job.get("decisionx") or {}).get("target_job_id")
         or not isinstance(advice.get("proposed_next_instruction"), str)
@@ -273,7 +323,7 @@ def verify_output(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapp
         or not isinstance(advice.get("changed_conditions"), list)
         or not isinstance(advice.get("uncertainties"), list)
         or not advice["changed_conditions"] or not advice["uncertainties"]):
-        raise ValueError("DecisionX advice lacks target, substance, change, or uncertainty")
+        raise InvalidProviderDeliverable("DecisionX advice lacks target, substance, change, or uncertainty")
     target_id = str((job.get("decisionx") or {}).get("target_job_id") or "")
     target_job_result = post({"operation": "get_job", "job_id": target_id})
     target_job = target_job_result.get("job") or {}
@@ -288,28 +338,33 @@ def verify_output(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapp
                (("target_provider", "provider"), ("target_conversation_id", "conversation_id"),
                 ("target_prompt_sha256", "prompt_sha256"),
                 ("target_response_sha256", "response_sha256")))):
-        raise ValueError("advice target does not match completed central target conversation")
+        raise InvalidProviderDeliverable("advice target does not match completed central target conversation")
     native_render = load(HERE / "decisionx_successor_native.py", "dx_advice_target_render_verifier")
     target_rendered = native_render.render({"provider": target["provider"],
                                             "conversation_id": target["conversation_id"],
                                             "events": target.get("events") or []})
     if native.get("target_rendered_sha256") != digest(target_rendered.encode("utf-8")):
-        raise ValueError("native target render proof differs from shared conversation")
-    cited = exact_refs(advice.get("candidate_refs"), candidate=True)
+        raise InvalidProviderDeliverable("native target render proof differs from shared conversation")
+    try:
+        cited = exact_refs(advice.get("candidate_refs"), candidate=True)
+    except ValueError as exc:
+        raise InvalidProviderDeliverable("DecisionX advice candidate references malformed") from exc
     allowed = {tuple(r[k] for k in ("segment_id", "provider", "conversation_id",
                                     "prompt_sha256", "response_sha256", "source_sha256")) for r in candidate_refs}
     if not all(tuple(r[k] for k in ("segment_id", "provider", "conversation_id",
                                       "prompt_sha256", "response_sha256", "source_sha256")) in allowed for r in cited):
-        raise ValueError("DecisionX advice cites a candidate outside the provider packet")
+        raise InvalidProviderDeliverable("DecisionX advice cites a candidate outside the provider packet")
     controller = load(HERE / "cognilode-taskflow-phase-controller", "dx_advice_plan_parser")
-    plan_text = plan_raw.decode("utf-8")
-    plan = controller.parse_plan_text(plan_text)
+    try:
+        plan_text = plan_raw.decode("utf-8")
+        plan = controller.parse_plan_text(plan_text)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise InvalidProviderDeliverable("successor plan is not a parseable TaskFlow .plan") from exc
     if (len(plan.steps) == 0 or any(step.checked for step in plan.steps)
         or any(not step.fields.get("owner") or not step.fields.get("role")
-               or not step.fields.get("effect_probe_command")
-               or not step.fields.get("effect_probe_expected") for step in plan.steps)
-        or advice["proposed_next_instruction"].strip() not in plan_text):
-        raise ValueError("successor plan needs pending owned steps, independent probes, and exact instruction")
+               or not substantive_probe(step) for step in plan.steps)
+        or not instruction_in_do(plan_text, advice["proposed_next_instruction"].strip())):
+        raise InvalidProviderDeliverable("successor plan needs pending owned steps, independent probes, and exact instruction")
     return dict(advice), plan_raw, str(artifacts[0]["sha256"])
 
 
@@ -379,6 +434,35 @@ def handoff(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, job_id: str,
             "shared_gates": gates, **committed}
 
 
+def record_rejection(post: Callable[[dict[str, Any]], Mapping[str, Any]],
+                     job: Mapping[str, Any], reason: str) -> str:
+    """Write a content-addressed rejection into the existing shared D1 segment store."""
+    job_id = str(job.get("id") or "")
+    cid = str(job.get("conversation_id") or "")
+    if not job_id or not cid:
+        raise ValueError("rejected job lacks D1 and provider identities")
+    segment_id = "decisionx.handoff_rejected." + digest(job_id.encode())
+    artifact_hashes = [str(row.get("sha256")) for row in job.get("effect_evidence") or []
+                       if isinstance(row, Mapping) and row.get("kind") == "chatgpt_sandbox_artifact"
+                       and HEX64.fullmatch(str(row.get("sha256") or ""))]
+    item = {"segment_id": segment_id, "kind": "decisionx_handoff_rejection",
+            "source_key": "chatgpt.com:" + cid, "author_class": "agent_derived",
+            "origin": "sdk:decisionx_advice_handoff",
+            "content": "Completed DecisionX Chat-mode successor work product was rejected: " + reason[:500],
+            "metadata": {"job_id": job_id, "conversation_id": cid,
+                         "artifact_sha256s": artifact_hashes, "reason": reason[:500]}}
+    appended = post({"operation": "append_segments", "segments": [item]})
+    if not appended.get("ok"):
+        raise ValueError("shared D1 rejection receipt write failed")
+    read = post({"operation": "read_segment", "segment_id": segment_id})
+    segment = read.get("segment") or {}
+    if (not read.get("ok") or segment.get("segment_id") != segment_id
+        or (segment.get("metadata") or {}).get("job_id") != job_id
+        or segment.get("kind") != "decisionx_handoff_rejection"):
+        raise ValueError("shared D1 rejection receipt readback failed")
+    return segment_id
+
+
 def tick(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, job_id: str,
          output_root: Path = DEFAULT_PLAN_ROOT, state_root: Path = DEFAULT_STATE_ROOT) -> dict:
     """Idempotently reconcile a completed job into the existing TaskFlow service."""
@@ -410,7 +494,14 @@ def tick(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, job_id: str,
                             "unit": unit, "provider_requests_created": 0}
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
             pass
-    installed = handoff(post, job_id=job_id, output_root=output_root)
+    try:
+        installed = handoff(post, job_id=job_id, output_root=output_root)
+    except InvalidProviderDeliverable as exc:
+        segment_id = record_rejection(post, job, str(exc))
+        return {"ok": False, "phase": "provider_result_rejected", "job_id": job_id,
+                "conversation_id": job.get("conversation_id"),
+                "rejection_segment_id": segment_id, "reason": str(exc),
+                "provider_requests_created": 0}
     info = installed["secretary_taskflow_installation"]
     marker_value = {"schema": "cognilode.decisionx.successor_handoff.v1",
                     "job_id": job_id, "plan_path": installed["plan_path"],

@@ -138,7 +138,9 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False))
     else:
         print(f"# {result['provider']}/{result['conversation_id']}\n")
-        print(f"Source: {result['source']} · new: {result['new_events']} / {result['total_events']}\n")
+        print(f"Source: {result['source']} · coverage: {result['coverage']} · "
+              f"all provider events known: {result['all_provider_events_known']} · "
+              f"new: {result['new_events']} / {result['total_events']}\n")
         for event in result["events"]:
             print(f"## {event['role']} {event['occurred_at_utc']}\n\n{event['text']}\n")
         print(f"<!-- next_cursor: {result['next_cursor']} -->")

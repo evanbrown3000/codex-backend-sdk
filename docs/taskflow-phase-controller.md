@@ -43,3 +43,14 @@ Set `COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET` and `COGNILODE_AWS_CLI` in the con
 On a second Linux device, check out the SDK and give that device scoped read access to the launchpad prefix, a local authenticated ChatGPT/Codex identity, and a central D1 operator bearer in `%h/.config/cognilode/operator-bearer` (mode 0600). `scripts/cognilode-install-chatmode-device --device-id laptop --priority 50 --network-route home --aws-cli /path/to/aws --probe-sha256 <known-research-zip-sha256>` verifies provider health, D1 readback, and a private ZIP download before installing and starting the device-specific service. It writes only non-secret service settings. The hosted rhythm chooses among fresh eligible heartbeats; the D1 queue still fences each send. A phone needs a separate supervisor appropriate to its operating system; the Linux systemd installer does not claim to install one.
 
 CP-7 requires a real controlled outage drill: EvanPC unavailable, an alternate-device claim at a hosted due slot, exactly one provider user-message ID, terminal in-chat report, hash-verified work ZIP, central conversation readback, and a recorded external effect. A second service installation or a synthetic heartbeat does not complete it.
+
+## Conversation reads after the first view
+
+`scripts/cognilode-conversation-read` provides one read command for admitted ChatGPT.com Chat-mode events in the hosted conversation service and admitted Codex deltas in Google Drive. For example:
+
+```sh
+scripts/cognilode-conversation-read --provider chatgpt.com --conversation-id CONVERSATION_ID --format markdown
+scripts/cognilode-conversation-read --provider openai-codex --conversation-id CONVERSATION_ID --since NEXT_CURSOR --format json
+```
+
+Save `next_cursor` from the first JSON response (or its Markdown comment) and pass it as `--since` on the next read. The cursor checks the exact prefix of message IDs, roles, and text hashes; an edited or reordered prefix produces a refresh error instead of silently hiding history. The response labels its coverage. `admitted_events_only` and `all_admitted_drive_deltas` do not assert that every provider branch has been acquired. The Drive reader path can be set with `COGNILODE_DRIVE_READBACK_SCRIPT` when the Memory Stock checkout is elsewhere.

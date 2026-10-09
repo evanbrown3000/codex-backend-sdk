@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+"""Bind a native Codex session to the shared conversation store and resume it on its own host.
+
+The D1/Drive conversation is a read source, never a substitute for the native
+rollout JSONL required by `codex exec resume`. A reserved operation is never
+automatically executed twice after an ambiguous interruption.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+from typing import Any
+
+HERE = Path(__file__).resolve().parent
+UUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z")
+OPERATION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}\Z")
+HEADER = re.compile(r"session id: ([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\Z")
+DEFAULT_STATE = Path.home()/".local/state/cognilode/codex-native-resume"
+
+
+def sha(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def post(body: dict[str, Any]) -> dict[str, Any]:
+    source = HERE/"cognilode-b4pt0r-chatmode"
+    loader = importlib.machinery.SourceFileLoader("cognilode_codex_native_session_sender", str(source))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:
+        raise RuntimeError("shared D1 transport loader unavailable")
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    value = module.operator_memory_post(body)
+    if not isinstance(value, dict):
+        raise ValueError("shared D1 response is not an object")
+    return value
+
+
+def header_session_id(stderr: str) -> str | None:
+    lines = stderr.splitlines()
+    if not lines or not lines[0].startswith("OpenAI Codex v"):
+        return None
+    fences = [i for i, line in enumerate(lines[:80]) if line == "--------"]
+    if len(fences) < 2 or fences[0] != 1:
+        return None
+    ids = [m.group(1) for line in lines[2:fences[1]] if (m := HEADER.fullmatch(line))]
+    return ids[0] if len(ids) == 1 else None
+
+
+def rollout_session_id(path: Path) -> str:
+    with path.open("rb") as source:
+        first = source.readline(2_000_001)
+    if len(first) > 2_000_000:
+        raise ValueError("native rollout header is too large")
+    try:
+        row = json.loads(first)
+    except json.JSONDecodeError as exc:
+        raise ValueError("native rollout first line is malformed") from exc
+    if row.get("type") != "session_meta":
+        raise ValueError("native rollout has no session metadata first line")
+    value = str((row.get("payload") or {}).get("session_id")
+                or (row.get("payload") or {}).get("id") or "").lower()
+    if not UUID.fullmatch(value):
+        raise ValueError("native rollout has no valid session ID")
+    return value
+
+
+def verify_registration(*, session_id: str, environment_id: str, rollout_path: Path,
+                        stderr_path: Path, source_receipt_path: Path, binary_path: Path,
+                        instruction_bundle_path: Path) -> dict[str, str]:
+    if not UUID.fullmatch(session_id) or not OPERATION.fullmatch(environment_id):
+        raise ValueError("native session or environment identity invalid")
+    if os.environ.get("COGNILODE_REMOTE_ENVIRONMENT_ID") not in (None, environment_id):
+        raise ValueError("local environment ID differs from requested session host")
+    paths = [rollout_path, stderr_path, source_receipt_path, binary_path,
+             instruction_bundle_path]
+    if any(not path.is_absolute() or not path.is_file() for path in paths):
+        raise ValueError("native session evidence path missing or relative")
+    if rollout_session_id(rollout_path) != session_id:
+        raise ValueError("native rollout session ID mismatch")
+    if header_session_id(stderr_path.read_text(encoding="utf-8", errors="replace")) != session_id:
+        raise ValueError("Codex CLI header session ID mismatch")
+    if not os.access(binary_path, os.X_OK):
+        raise ValueError("native Codex binary is not executable")
+    if not instruction_bundle_path.read_bytes():
+        raise ValueError("instruction bundle is empty")
+    return {"session_id":session_id,"environment_id":environment_id,
+            "rollout_path":str(rollout_path.resolve()),"rollout_sha256":sha(rollout_path),
+            "stderr_sha256":sha(stderr_path),"source_receipt_sha256":sha(source_receipt_path),
+            "binary_path":str(binary_path.resolve()),"binary_sha256":sha(binary_path),
+            "instruction_bundle_sha256":sha(instruction_bundle_path)}
+
+
+def register(args: argparse.Namespace) -> dict[str, Any]:
+    evidence = verify_registration(session_id=args.session_id,environment_id=args.environment_id,
+        rollout_path=args.rollout_path,stderr_path=args.stderr_path,
+        source_receipt_path=args.source_receipt_path,binary_path=args.binary_path,
+        instruction_bundle_path=args.instruction_bundle_path)
+    result = post({"operation":"register_codex_native_session",**evidence})
+    stored = result.get("session") or {}
+    if not result.get("ok") or any(stored.get(key) != value for key,value in evidence.items()):
+        raise ValueError("shared native session registration/readback differs")
+    return result
+
+
+def atomic_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+    with tempfile.NamedTemporaryFile("w",encoding="utf-8",dir=path.parent,
+                                     prefix=".native-resume-",delete=False) as temp:
+        target = Path(temp.name)
+        os.fchmod(temp.fileno(),0o600)
+        json.dump(value,temp,ensure_ascii=False,sort_keys=True)
+        temp.write("\n")
+        temp.flush()
+        os.fsync(temp.fileno())
+    os.replace(target,path)
+
+
+def resume(args: argparse.Namespace) -> dict[str, Any]:
+    if not OPERATION.fullmatch(args.operation_id):
+        raise ValueError("invalid native resume operation ID")
+    locator = post({"operation":"get_codex_native_session","session_id":args.session_id})
+    if not locator.get("ok"):
+        return locator
+    session = locator["session"]
+    evidence = verify_registration(session_id=args.session_id,
+        environment_id=args.environment_id,rollout_path=Path(session["rollout_path"]),
+        stderr_path=args.stderr_path,source_receipt_path=args.source_receipt_path,
+        binary_path=Path(session["binary_path"]),
+        instruction_bundle_path=args.instruction_bundle_path)
+    if any(evidence.get(key) != session.get(key) for key in evidence):
+        raise ValueError("native host evidence changed since shared registration")
+    if not locator["session"].get("resume_ready"):
+        return {"ok":False,"error":"native_session_not_ready","source_admitted":session.get("source_admitted")}
+    prompt = args.prompt_file.read_text(encoding="utf-8")
+    if not prompt.strip():
+        raise ValueError("native resume prompt is empty")
+    prompt_sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    reservation = post({"operation":"begin_codex_native_resume",
+        "session_id":args.session_id,"operation_id":args.operation_id,
+        "environment_id":args.environment_id,"prompt_sha256":prompt_sha,
+        "expected_rollout_sha256":evidence["rollout_sha256"],
+        "instruction_bundle_sha256":evidence["instruction_bundle_sha256"]})
+    if not reservation.get("ok") or reservation.get("execute") is not True:
+        return reservation
+    run_dir = args.state_root/args.operation_id
+    run_dir.mkdir(parents=True,exist_ok=False,mode=0o700)
+    atomic_json(run_dir/"intent.json",{"schema":"cognilode.codex_native_resume.intent.v1",
+        "session_id":args.session_id,"operation_id":args.operation_id,
+        "prompt_sha256":prompt_sha,"source_rollout_sha256":evidence["rollout_sha256"],
+        "instruction_bundle_sha256":evidence["instruction_bundle_sha256"]})
+    output = run_dir/"last_message.txt"
+    command = [evidence["binary_path"],"-a","never","exec","resume",
+               "--skip-git-repo-check","-o",str(output),args.session_id,"-"]
+    try:
+        completed = subprocess.run(command,input=prompt,text=True,capture_output=True,
+                                   timeout=args.timeout_seconds,check=False)
+    except (OSError,subprocess.TimeoutExpired) as exc:
+        atomic_json(run_dir/"ambiguous.json",{"error_type":type(exc).__name__,
+            "session_id":args.session_id,"operation_id":args.operation_id})
+        return {"ok":False,"state":"ambiguous_native_resume","operation_id":args.operation_id}
+    (run_dir/"stdout.txt").write_text(completed.stdout,encoding="utf-8")
+    (run_dir/"stderr.txt").write_text(completed.stderr,encoding="utf-8")
+    if completed.returncode != 0 or not output.is_file() or not output.read_text(encoding="utf-8").strip():
+        atomic_json(run_dir/"ambiguous.json",{"returncode":completed.returncode,
+            "session_id":args.session_id,"operation_id":args.operation_id})
+        return {"ok":False,"state":"incomplete_native_resume","operation_id":args.operation_id}
+    terminal_sha = sha(Path(session["rollout_path"]))
+    if terminal_sha == evidence["rollout_sha256"] or rollout_session_id(Path(session["rollout_path"])) != args.session_id:
+        return {"ok":False,"state":"native_rollout_unchanged_or_identity_mismatch",
+                "operation_id":args.operation_id}
+    receipt = {"schema":"cognilode.codex_native_resume.local_result.v1",
+               "session_id":args.session_id,"operation_id":args.operation_id,
+               "terminal_rollout_sha256":terminal_sha,
+               "terminal_output_sha256":sha(output),
+               "source_rollout_sha256":evidence["rollout_sha256"],
+               "prompt_sha256":prompt_sha,"returncode":completed.returncode}
+    atomic_json(run_dir/"result.json",receipt)
+    return confirm_result(run_dir/"result.json")
+
+
+def confirm_result(path: Path) -> dict[str, Any]:
+    result = json.loads(path.read_text(encoding="utf-8"))
+    if result.get("schema") != "cognilode.codex_native_resume.local_result.v1":
+        raise ValueError("native resume result schema mismatch")
+    return post({"operation":"complete_codex_native_resume",
+        "session_id":result["session_id"],"operation_id":result["operation_id"],
+        "terminal_rollout_sha256":result["terminal_rollout_sha256"],
+        "terminal_output_sha256":result["terminal_output_sha256"],
+        "terminal_receipt_sha256":sha(path)})
+
+
+def main() -> int:
+    parser=argparse.ArgumentParser(description=__doc__)
+    sub=parser.add_subparsers(dest="command",required=True)
+    reg=sub.add_parser("register")
+    reg.add_argument("--session-id",required=True)
+    reg.add_argument("--environment-id",required=True)
+    reg.add_argument("--rollout-path",type=Path,required=True)
+    reg.add_argument("--stderr-path",type=Path,required=True)
+    reg.add_argument("--source-receipt-path",type=Path,required=True)
+    reg.add_argument("--binary-path",type=Path,required=True)
+    reg.add_argument("--instruction-bundle-path",type=Path,required=True)
+    resolve=sub.add_parser("resolve")
+    resolve.add_argument("--session-id",required=True)
+    run=sub.add_parser("resume")
+    run.add_argument("--session-id",required=True)
+    run.add_argument("--environment-id",required=True)
+    run.add_argument("--operation-id",required=True)
+    run.add_argument("--prompt-file",type=Path,required=True)
+    run.add_argument("--stderr-path",type=Path,required=True)
+    run.add_argument("--source-receipt-path",type=Path,required=True)
+    run.add_argument("--instruction-bundle-path",type=Path,required=True)
+    run.add_argument("--state-root",type=Path,default=DEFAULT_STATE)
+    run.add_argument("--timeout-seconds",type=int,default=3600)
+    confirm=sub.add_parser("confirm")
+    confirm.add_argument("--result",type=Path,required=True)
+    args=parser.parse_args()
+    if args.command=="register": result=register(args)
+    elif args.command=="resolve": result=post({"operation":"get_codex_native_session","session_id":args.session_id})
+    elif args.command=="resume": result=resume(args)
+    else: result=confirm_result(args.result)
+    print(json.dumps(result,ensure_ascii=False,sort_keys=True))
+    return 0 if result.get("ok") else 1
+
+
+if __name__=="__main__":
+    raise SystemExit(main())

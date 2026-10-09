@@ -1805,6 +1805,11 @@ def requeue_prepost_failure(job: dict, device_id: str, value: dict, stderr: str 
     except ValueError:
         error = {}
     reason = str(value.get("state") or error.get("state") or "sender_exited_before_result")[:160]
+    # Keep a bounded machine-readable central transport failure in the normal
+    # queue receipt. Otherwise every failed slot collapses into the same
+    # `central_route_ambiguous` label and operators must repeat manual probes.
+    route_error = str(value.get("error") or error.get("error") or "")[:160]
+    route_error = re.sub(r"[^a-zA-Z0-9_.:/-]", "_", route_error)
     delay = max(0.0, float(value.get("retry_after_seconds") or error.get("retry_after_seconds") or 0))
     try:
         reply = sender.operator_memory_post({"operation": "requeue_chatmode_prepost_failure", **fence(job),
@@ -1824,8 +1829,10 @@ def requeue_prepost_failure(job: dict, device_id: str, value: dict, stderr: str 
         if source.is_file() and not source.name.endswith(".uploads.json"):
             source.replace(target / source.name)
     atomic_json(job_state_path(str(job["id"])), {"state": "queued_after_prepost_failure",
-                                                "job_id": job["id"], "reason": reason})
-    event("prepost_requeued", job_id=job["id"], reason=reason, retry_after_seconds=delay)
+                                                "job_id": job["id"], "reason": reason,
+                                                "transport_error": route_error})
+    event("prepost_requeued", job_id=job["id"], reason=reason,
+          transport_error=route_error, retry_after_seconds=delay)
     return True
 
 

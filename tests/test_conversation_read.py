@@ -104,6 +104,140 @@ class ConversationDeltaTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())["conversation_ready"],False)
         read.assert_not_called()
 
+    def _codex_taskflow_job(self, state="complete"):
+        cid = "b0f26e7e-5a33-4ec6-a815-df7c70f20942"
+        return {"id":"tf-research-1", "state":state, "provider":"codex.research",
+                "effect_evidence":[{"kind":"codex_session_identity", "job_id":"tf-research-1",
+                                    "ref":cid, "conversation_id":cid,
+                                    "conversation_id_source":"codex_cli_stderr_header",
+                                    "run_id":"secretary-run-1", "run_dir":"/run/secretary-run-1",
+                                    "compact_receipt_sha256":"a"*64, "codex_stderr_sha256":"b"*64,
+                                    "central_readback_verified":False}]}
+
+    def _codex_central(self, cid, **capture_overrides):
+        capture = {"source_kind":"codex_rollout", "source_sha256":"c"*64,
+                   "source_response_complete":True, "source_complete":True,
+                   "drive_verified":True, "drive_source_sha256":"c"*64,
+                   "drive_object_sha256":"d"*64,
+                   "drive_verified_at":"2026-10-09T15:00:00Z", "drive_conversation_id":cid}
+        capture.update(capture_overrides)
+        return {"ok":True, "conversation":{"provider":"openai-codex",
+                 "conversation_id":cid, "capture":capture, "events":[]}}
+
+    def test_taskflow_codex_job_never_reads_central_before_completion(self):
+        for state in ("queued", "effect_pending"):
+            with self.subTest(state=state):
+                job = self._codex_taskflow_job(state)
+                sender = mock.Mock()
+                sender.operator_memory_post.return_value = {"ok":True, "job":job}
+                with mock.patch.object(reader, "_load_script", return_value=sender):
+                    link = reader.resolve_job_conversation(job["id"], expected_provider="codex-d1")
+                self.assertFalse(link["conversation_ready"])
+                self.assertEqual(link["conversation_id"], job["effect_evidence"][0]["conversation_id"])
+                self.assertEqual(link["job_provider"], "codex.research")
+                sender.operator_memory_post.assert_called_once_with(
+                    {"operation":"get_job", "job_id":job["id"]})
+
+    def test_taskflow_codex_job_requires_complete_exact_drive_join(self):
+        job = self._codex_taskflow_job()
+        cid = job["effect_evidence"][0]["conversation_id"]
+        cases = [
+            ("not admitted", {"ok":True}, False),
+            ("response incomplete", self._codex_central(cid, source_response_complete=False), False),
+            ("active prefix", self._codex_central(cid, source_complete=False), False),
+            ("drive not verified", self._codex_central(cid, drive_verified=False), False),
+            ("source mismatch", self._codex_central(cid, drive_source_sha256="e"*64), False),
+            ("wrong drive session", self._codex_central(cid, drive_conversation_id="other"), False),
+            ("verified", self._codex_central(cid), True),
+        ]
+        for label, central, expected in cases:
+            with self.subTest(label=label):
+                sender = mock.Mock()
+                sender.operator_memory_post.side_effect = [{"ok":True, "job":job}, central]
+                with mock.patch.object(reader, "_load_script", return_value=sender):
+                    link = reader.resolve_job_conversation(job["id"])
+                self.assertEqual(link["conversation_ready"], expected)
+                self.assertEqual(link["conversation_id"], cid)
+                self.assertEqual(link["provider"], "codex-d1")
+                self.assertEqual(sender.operator_memory_post.call_args.args[0],
+                                 {"operation":"read", "provider":"openai-codex", "conversation_id":cid})
+
+    def test_taskflow_codex_admission_lag_keeps_session_link(self):
+        job = self._codex_taskflow_job()
+        cid = job["effect_evidence"][0]["conversation_id"]
+        sender = mock.Mock()
+        sender.operator_memory_post.side_effect = [
+            {"ok":True, "job":job}, RuntimeError("central read temporarily unavailable")]
+        with mock.patch.object(reader, "_load_script", return_value=sender):
+            link = reader.resolve_job_conversation(job["id"])
+        self.assertFalse(link["conversation_ready"])
+        self.assertEqual(link["conversation_id"], cid)
+        job["effect_evidence"] = []
+        sender.operator_memory_post.side_effect = None
+        sender.operator_memory_post.return_value = {"ok":True, "job":job}
+        with mock.patch.object(reader, "_load_script", return_value=sender):
+            missing = reader.resolve_job_conversation(job["id"])
+        self.assertFalse(missing["conversation_ready"])
+        self.assertIsNone(missing["conversation_id"])
+
+    def test_taskflow_codex_job_fails_closed_on_forged_identity_and_central_mismatch(self):
+        job = self._codex_taskflow_job()
+        cid = job["effect_evidence"][0]["conversation_id"]
+        sender = mock.Mock()
+        with mock.patch.object(reader, "_load_script", return_value=sender):
+            for key, forged in (("job_id", "another-job"), ("conversation_id_source", "echoed_text"),
+                                ("codex_stderr_sha256", "bad")):
+                with self.subTest(key=key):
+                    bad = json.loads(json.dumps(job))
+                    bad["effect_evidence"][0][key] = forged
+                    sender.operator_memory_post.return_value = {"ok":True, "job":bad}
+                    with self.assertRaisesRegex(ValueError, "session identity evidence mismatch"):
+                        reader.resolve_job_conversation(job["id"])
+            sender.operator_memory_post.side_effect = [
+                {"ok":True, "job":job},
+                {**self._codex_central(cid), "conversation":{
+                    **self._codex_central(cid)["conversation"], "conversation_id":"another-session"}},
+            ]
+            with self.assertRaisesRegex(ValueError, "central Codex conversation identity mismatch"):
+                reader.resolve_job_conversation(job["id"])
+
+    def test_taskflow_codex_remember_does_not_advance_until_drive_verified(self):
+        job = self._codex_taskflow_job()
+        cid = job["effect_evidence"][0]["conversation_id"]
+        central = self._codex_central(cid, drive_verified=False)
+        sender = mock.Mock()
+        def post(body):
+            return {"ok":True, "job":job} if body["operation"] == "get_job" else central
+        sender.operator_memory_post.side_effect = post
+        with tempfile.TemporaryDirectory() as temporary:
+            argv = ["conversation-read", "--job-id", job["id"], "--remember",
+                    "--cursor-root", temporary]
+            full = {"provider":"openai-codex", "conversation_id":cid,
+                    "source":"hosted_d1_codex_drive_verified", "events":[
+                        {"id":"a1", "role":"assistant", "text":"done", "occurred_at_utc":""}],
+                    "coverage":"admitted_codex_rollout_messages_drive_verified",
+                    "all_provider_events_known":False}
+            def invoke():
+                output = io.StringIO()
+                with mock.patch.object(sys, "argv", argv), \
+                     mock.patch.object(reader, "_load_script", return_value=sender), \
+                     mock.patch.object(reader, "read_conversation", return_value=full) as read, \
+                     redirect_stdout(output):
+                    self.assertEqual(reader.main(), 0)
+                return json.loads(output.getvalue()), read.call_count
+            first, calls = invoke()
+            self.assertFalse(first["conversation_ready"])
+            self.assertEqual(first["conversation_id"], cid)
+            self.assertEqual(calls, 0)
+            self.assertEqual(list(Path(temporary).rglob("*")), [])
+            central = self._codex_central(cid)
+            second, calls = invoke()
+            self.assertEqual(calls, 1)
+            self.assertTrue(second["queue_job"]["conversation_ready"])
+            self.assertEqual(second["new_events"], 1)
+            third, _ = invoke()
+            self.assertEqual(third["new_events"], 0)
+
     def test_hosted_provider_read_preserves_provider_identity(self):
         response = {"conversation": {"provider": "gemini.com", "conversation_id": "g-1", "events": [
             {"id": "u-1", "role": "user", "content": "question", "source_content_complete": True},
@@ -139,6 +273,22 @@ class ConversationDeltaTests(unittest.TestCase):
                 **conversation["capture"], "drive_verified": True}}}
             with self.assertRaisesRegex(ValueError, "source receipt"):
                 reader.read_conversation("codex-d1", "c-1")
+
+    def test_codex_d1_verified_read_requires_exact_source_join(self):
+        cid = "b0f26e7e-5a33-4ec6-a815-df7c70f20942"
+        conversation = self._codex_central(cid)["conversation"]
+        conversation["capture"].update(source_event_count=1, source_full_message_count=1)
+        conversation["events"] = [{"id":"event-1", "index":0, "role":"assistant", "content":"done"}]
+        sender = mock.Mock()
+        sender.operator_memory_post.return_value = {"conversation":conversation}
+        with mock.patch.object(reader, "_load_script", return_value=sender):
+            full = reader.read_conversation("codex-d1", cid)
+            self.assertEqual(full["source"], "hosted_d1_codex_drive_verified")
+            self.assertEqual(full["coverage"], "admitted_codex_rollout_legacy_unsplit_drive_verified")
+            self.assertEqual(full["events"][0]["text"], "done")
+            conversation["capture"]["drive_source_sha256"] = "e" * 64
+            with self.assertRaisesRegex(ValueError, "Drive join is incomplete"):
+                reader.read_conversation("codex-d1", cid)
 
     def test_codex_d1_reassembles_and_verifies_long_original_message(self):
         response = "😀" * 110_000

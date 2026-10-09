@@ -17,6 +17,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -33,6 +34,25 @@ DEFAULT_HISTORICAL_READER = Path(os.environ.get(
     "COGNILODE_HISTORICAL_S3_READER",
     "/home/evan/.local/share/cognilode/memory-stock-runtime/scripts/historical_s3_conversation.py",
 ))
+SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def _verified_codex_drive_join(capture: dict, conversation_id: str) -> bool:
+    """Require the D1 source and Drive readback to name the same complete rollout."""
+    source_sha = capture.get("source_sha256")
+    return bool(
+        capture.get("source_kind") == "codex_rollout"
+        and capture.get("source_response_complete") is True
+        and capture.get("source_complete") is True
+        and capture.get("drive_verified") is True
+        and isinstance(source_sha, str) and SHA256_RE.fullmatch(source_sha)
+        and capture.get("drive_source_sha256") == source_sha
+        and isinstance(capture.get("drive_object_sha256"), str)
+        and SHA256_RE.fullmatch(capture["drive_object_sha256"])
+        and isinstance(capture.get("drive_verified_at"), str)
+        and bool(capture["drive_verified_at"].strip())
+        and capture.get("drive_conversation_id") == conversation_id
+    )
 
 
 def _load_script(path: Path, name: str) -> Any:
@@ -175,15 +195,22 @@ def read_conversation(provider: str, conversation_id: str, *, drive_reader: Path
             })
         d1_codex = provider == "codex-d1"
         capture = conversation.get("capture") or {}
-        if d1_codex and (capture.get("source_kind") != "codex_rollout"
-                         or capture.get("drive_verified") is not False
-                         or not capture.get("source_sha256")):
-            raise ValueError("Codex D1 interim source receipt is incomplete")
+        if d1_codex and not (
+            _verified_codex_drive_join(capture, conversation_id)
+            or (capture.get("source_kind") == "codex_rollout"
+                and capture.get("drive_verified") is False
+                and isinstance(capture.get("source_sha256"), str)
+                and SHA256_RE.fullmatch(capture["source_sha256"]))
+        ):
+            raise ValueError("Codex D1 source receipt or Drive join is incomplete")
         coverage = "admitted_events_only"
         if d1_codex:
             events, coverage = _codex_d1_messages(raw, capture)
+            if capture.get("drive_verified") is True:
+                coverage = coverage.replace("drive_unverified", "drive_verified")
         return {"provider": hosted_provider, "conversation_id": conversation_id,
-                "source": ("hosted_d1_codex_interim" if d1_codex else "hosted_conversation_service"),
+                "source": (("hosted_d1_codex_drive_verified" if capture.get("drive_verified") is True
+                            else "hosted_d1_codex_interim") if d1_codex else "hosted_conversation_service"),
                 "events": events,
                 # This store certifies the admitted prompt/response hashes, but
                 # does not claim that every provider-side branch was ingested.
@@ -321,12 +348,59 @@ def resolve_job_conversation(job_id: str, *, expected_provider: str = "",
         raise ValueError("shared queue job readback identity mismatch")
     provider = str(job.get("provider") or "")
     conversation_id = str(job.get("conversation_id") or "")
+    codex_taskflow = provider in {"codex.research", "codex.external-effect"}
     normalized_expected = {"chatgpt": "chatgpt.com", "codex-d1": "openai-codex"}.get(
         expected_provider, expected_provider)
-    if ((normalized_expected and provider != normalized_expected)
-            or (expected_conversation_id and conversation_id != expected_conversation_id)):
+    provider_matches = (not normalized_expected or provider == normalized_expected
+                        or (codex_taskflow and normalized_expected in {"codex", "openai-codex"}))
+    if not provider_matches:
         raise ValueError("queue job provider or conversation identity mismatch")
     state = str(job.get("state") or "")
+    if codex_taskflow:
+        identities = [row for row in job.get("effect_evidence") or []
+                      if isinstance(row, dict) and row.get("kind") == "codex_session_identity"]
+        if len(identities) > 1:
+            raise ValueError("queue job has multiple Codex session identities")
+        identity = identities[0] if identities else None
+        if identity:
+            cid = identity.get("conversation_id")
+            if (not isinstance(cid, str) or not cid or len(cid) > 160
+                or identity.get("job_id") != job_id or identity.get("ref") != cid
+                or identity.get("conversation_id_source") != "codex_cli_stderr_header"
+                or not isinstance(identity.get("run_id"), str) or not identity["run_id"]
+                or any(not isinstance(identity.get(key), str)
+                       or not SHA256_RE.fullmatch(identity[key])
+                       for key in ("compact_receipt_sha256", "codex_stderr_sha256"))
+                or (conversation_id and conversation_id != cid)):
+                raise ValueError("queue job Codex session identity evidence mismatch")
+            conversation_id = cid
+        if expected_conversation_id and conversation_id != expected_conversation_id:
+            raise ValueError("queue job provider or conversation identity mismatch")
+        link = {"job_id": job_id, "state": state, "provider": "codex-d1",
+                "job_provider": provider, "conversation_id": conversation_id or None,
+                "conversation_ready": False}
+        if state != "complete" or not identity:
+            return link
+        try:
+            central = sender.operator_memory_post({"operation": "read", "provider": "openai-codex",
+                                                   "conversation_id": conversation_id})
+        except (OSError, RuntimeError):
+            # Admission/Drive readback may lag job completion or be temporarily
+            # unavailable. Preserve the session link; never advance a cursor.
+            return link
+        stored = central.get("conversation") or {}
+        if not stored:
+            return link
+        if stored.get("provider") != "openai-codex" or stored.get("conversation_id") != conversation_id:
+            raise ValueError("central Codex conversation identity mismatch")
+        capture = stored.get("capture") or {}
+        if (not isinstance(stored.get("events"), list) or not isinstance(capture, dict)
+            or not _verified_codex_drive_join(capture, conversation_id)):
+            return link
+        link["conversation_ready"] = True
+        return link
+    if expected_conversation_id and conversation_id != expected_conversation_id:
+        raise ValueError("queue job provider or conversation identity mismatch")
     if state != "complete":
         return {"job_id": job_id, "state": state, "provider": provider,
                 "conversation_id": conversation_id or None, "conversation_ready": False}

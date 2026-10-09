@@ -10,7 +10,8 @@ from test_taskflow_phase_controller import FakeQueue, c, manifest_zip
 
 
 CID = "12345678-1234-4234-9234-123456789abc"
-HEADER = f"OpenAI Codex v0.162.0\n--------\nworkdir: /tmp\nsession id: {CID}\n--------\n"
+HEADER = (f"OpenAI Codex v0.162.0\n--------\nworkdir: /tmp\n"
+          f"model: gpt-6-sol\nprovider: openai\nsession id: {CID}\n--------\n")
 
 
 def original_incomplete_run(run_dir: Path, binary: Path):

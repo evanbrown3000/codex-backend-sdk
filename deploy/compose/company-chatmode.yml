@@ -242,12 +242,13 @@ services:
       COGNILODE_CODEX_BIN: /codex/bin/codex
       COGNILODE_CENTRAL_ROLLOUT_HELPER: /codex/bin/central-rollouts
       CODEX_HOME: /home/worker/.codex
-      COGNILODE_DEFAULT_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
+      COGNILODE_RELAY_NODE_FILE: /relay/node.json
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
       - company_auth:/home/worker/.codex
       - company_operator:/home/worker/.config/cognilode:ro
       - company_codex_release:/codex:ro
+      - company_relay_custody:/relay:ro
       - ${COMPANY_RUNTIME_ROOT}/worker:/runtime/worker
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
@@ -425,11 +426,12 @@ services:
       COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
       COGNILODE_TASKFLOW_SECRETARY_ROOT: /runtime/worker/taskflow-secretary
       COGNILODE_AWS_CLI: /usr/bin/aws
-      COGNILODE_DEFAULT_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
+      COGNILODE_RELAY_NODE_FILE: /relay/node.json
     volumes:
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
       - ${COMPANY_RUNTIME_ROOT}/worker:/runtime/worker
       - company_operator:/home/worker/.config/cognilode:ro
+      - company_relay_custody:/relay:ro
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
     depends_on:
       - source-sync

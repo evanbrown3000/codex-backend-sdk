@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Once per pinned build, prove stock -> Drive -> native Codex read/resume.
+
+This is read-only at the provider boundary. It never prompts a provider or
+hydrates chatgpt.com; candidate selection uses the indexed central stock.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import select
+import subprocess
+import sys
+import time
+from urllib.request import Request, urlopen
+
+
+BASE = os.environ.get('COGNILODE_OPERATOR_URL', 'https://cognilode.com').rstrip('/')
+CODEX = Path(os.environ.get('COGNILODE_CODEX_BIN', '/codex/bin/codex'))
+HOME = Path(os.environ.get('CODEX_HOME', '/home/worker/.codex'))
+TOKEN_FILE = Path(os.environ.get('COGNILODE_OPERATOR_TOKEN_FILE',
+    '/home/worker/.config/cognilode/operator-bearer'))
+MARKER_ROOT = Path(os.environ.get('COGNILODE_ACCEPTANCE_ROOT', '/runtime/acceptance'))
+UUID = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,40}$')
+
+
+def stock(body: dict) -> dict:
+    token = TOKEN_FILE.read_text().strip().removeprefix('Bearer ').strip()
+    request = Request(BASE + '/api/operator/conversation-stock',
+        data=json.dumps(body, separators=(',', ':')).encode(), method='POST',
+        headers={'authorization': 'Bearer ' + token, 'content-type': 'application/json'})
+    with urlopen(request, timeout=60) as response:
+        value = json.load(response)
+    if not value.get('ok'):
+        raise RuntimeError('central conversation stock unavailable')
+    return value
+
+
+def candidate(pin: str) -> tuple[str, str]:
+    offset = 0
+    for _ in range(10):
+        page = stock({'action': 'list', 'provider': 'chatgpt', 'limit': 50,
+            'offset': offset})
+        for item in page.get('items') or []:
+            provider_id = str(item.get('provider_conversation_id') or '')
+            if not UUID.fullmatch(provider_id):
+                continue
+            selector = 'chatgpt:' + provider_id
+            preview = stock({'action': 'read', 'selector': selector,
+                'reader_id': 'codex-release-acceptance:' + pin[:12],
+                'limit': 1, 'peek': True})
+            last_seq = preview.get('last_seq')
+            if isinstance(last_seq, int) and 0 <= last_seq <= 500:
+                return provider_id, str(preview.get('conversation', {}).get('thread_id') or '')
+        if page.get('next_offset') is None:
+            break
+        offset = int(page['next_offset'])
+    raise RuntimeError('no bounded ChatGPT conversation in indexed stock')
+
+
+def rpc(process: subprocess.Popen, request_id: int, method: str, params: dict,
+        timeout: float = 120) -> dict:
+    process.stdin.write(json.dumps({'jsonrpc': '2.0', 'id': request_id,
+        'method': method, 'params': params}, separators=(',', ':')) + '\n')
+    process.stdin.flush()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError('native AppServer exited before reply')
+        ready, _, _ = select.select([process.stdout], [], [], min(1, deadline-time.monotonic()))
+        if not ready:
+            continue
+        line = process.stdout.readline()
+        if not line:
+            raise RuntimeError('native AppServer closed response stream')
+        message = json.loads(line)
+        if message.get('id') != request_id:
+            continue
+        if 'error' in message:
+            raise RuntimeError(f'native {method} failed: {message["error"].get("message", "unknown")[:160]}')
+        return message.get('result') or {}
+    raise TimeoutError(f'native {method} timed out')
+
+
+def source_pin() -> str:
+    target = CODEX.resolve(strict=True)
+    pin = target.parent.name
+    if not re.fullmatch(r'[0-9a-f]{40}', pin):
+        raise RuntimeError('Codex binary is not from a pinned company release')
+    return pin
+
+
+def run() -> dict:
+    pin = source_pin()
+    marker = MARKER_ROOT / f'central-rollout-{pin}.json'
+    if marker.is_file():
+        return json.loads(marker.read_text())
+    conversation_id, stock_thread_id = candidate(pin)
+    environment = {**os.environ,
+        'COGNILODE_CENTRAL_ROLLOUT_HELPER': str(CODEX.parent / 'central-rollouts'),
+        'CODEX_HOME': str(HOME)}
+    process = subprocess.Popen([str(CODEX), 'app-server', '--stdio'],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        text=True, bufsize=1, env=environment)
+    try:
+        rpc(process, 1, 'initialize', {'clientInfo': {'name': 'cognilode-rollout-acceptance',
+            'version': '1'}, 'capabilities': {'experimentalApi': True}}, timeout=30)
+        process.stdin.write('{"jsonrpc":"2.0","method":"initialized"}\n')
+        process.stdin.flush()
+        read = rpc(process, 2, 'thread/read', {'threadId': conversation_id,
+            'includeTurns': True})
+        resumed = rpc(process, 3, 'thread/resume', {'threadId': conversation_id,
+            'excludeTurns': True})
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)
+    if read.get('thread', {}).get('id') != conversation_id or \
+        resumed.get('thread', {}).get('id') != conversation_id:
+        raise RuntimeError('native read/resume thread identity mismatch')
+    turns = read.get('thread', {}).get('turns') or []
+    if not turns:
+        raise RuntimeError('native read did not render imported conversation turns')
+    files = list((HOME / 'sessions').rglob('*-' + conversation_id + '.jsonl'))
+    if len(files) != 1:
+        raise RuntimeError('central reduced rollout was not materialized exactly once')
+    digest = hashlib.sha256(files[0].read_bytes()).hexdigest()
+    result = {'ok': True, 'source_pin': pin, 'conversation_id': conversation_id,
+        'stock_thread_id': stock_thread_id, 'rollout_sha256': digest,
+        'native_read_turns': len(turns),
+        'native_resume': True, 'provider_http_requests': 0}
+    MARKER_ROOT.mkdir(parents=True, exist_ok=True)
+    temporary = marker.with_name(marker.name + f'.{os.getpid()}.tmp')
+    temporary.write_text(json.dumps(result, separators=(',', ':')) + '\n')
+    temporary.replace(marker)
+    return result
+
+
+if __name__ == '__main__':
+    try:
+        print(json.dumps(run(), separators=(',', ':')))
+    except Exception as error:
+        print(json.dumps({'ok': False, 'error': type(error).__name__,
+            'detail': str(error)[:220]}, separators=(',', ':')))
+        sys.exit(1)

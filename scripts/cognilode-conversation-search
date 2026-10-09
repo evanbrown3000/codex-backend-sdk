@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Search the hosted FTS and historical title index without copying either stock.
+"""Search the shared D1 FTS and historical title index without copying stock.
 
 The two hit groups have different retrieval scopes and scores; they are never
 merged into a fictitious global ranking. Read a hit with cognilode-conversation-read.
@@ -21,6 +21,24 @@ DEFAULT_HISTORICAL_READER = Path(
 )
 
 
+def _with_read_coordinates(rows: list[dict], identity_field: str) -> list[dict]:
+    """Expose the existing provider identity for a direct unified-reader call.
+
+    Search hits are candidates, not proof of complete source or Drive custody;
+    the reader checks those properties when the caller opens a hit.
+    """
+    output = []
+    for raw in rows:
+        row = dict(raw)
+        provider, separator, conversation_id = str(row.get(identity_field) or "").partition(":")
+        if separator and provider and conversation_id:
+            row["provider"] = provider
+            row["conversation_id"] = conversation_id
+            row["read_args"] = {"provider": provider, "conversation_id": conversation_id}
+        output.append(row)
+    return output
+
+
 def hosted_search(query: str, limit: int) -> dict:
     path = HERE / "cognilode-b4pt0r-chatmode"
     loader = importlib.machinery.SourceFileLoader("cognilode_sender_for_search", str(path))
@@ -31,8 +49,10 @@ def hosted_search(query: str, limit: int) -> dict:
     result = module.operator_memory_post({"operation": "search", "q": query, "limit": limit})
     if result.get("ok") is not True or not isinstance(result.get("segments"), list) or not isinstance(result.get("turns"), list):
         raise ValueError("hosted full-text search response is incomplete")
-    return {"scope": "hosted_d1_segments_and_turns", "segments": result["segments"],
-            "turns": result["turns"]}
+    return {"scope": "d1_indexed_cross_provider_segments_and_turns",
+            "source_coverage": "D1 search hits; original and Drive completeness require unified reader verification",
+            "segments": _with_read_coordinates(result["segments"], "source_key"),
+            "turns": _with_read_coordinates(result["turns"], "conversation_key")}
 
 
 def historical_search(query: str, limit: int, reader: Path) -> dict:

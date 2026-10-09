@@ -13,6 +13,21 @@ loader.exec_module(searcher)
 
 
 class ConversationSearchTests(unittest.TestCase):
+    def test_d1_hits_expose_cross_provider_reader_coordinates_without_claiming_custody(self):
+        hits = [{"conversation_key": "openai-codex:01a10ad5-a266-7010-9dd2-e7c7cfc267f7",
+                 "excerpt": "research"},
+                {"conversation_key": "chatgpt-export-format:export-source:abc",
+                 "excerpt": "planning"},
+                {"conversation_key": "broken", "excerpt": "unknown"}]
+        result = searcher._with_read_coordinates(hits, "conversation_key")
+        self.assertEqual(result[0]["read_args"],
+                         {"provider": "openai-codex",
+                          "conversation_id": "01a10ad5-a266-7010-9dd2-e7c7cfc267f7"})
+        self.assertEqual(result[1]["conversation_id"], "export-source:abc")
+        self.assertNotIn("read_args", result[2])
+        self.assertEqual(hits[0], {"conversation_key": hits[0]["conversation_key"],
+                                   "excerpt": "research"})
+
     def test_sources_keep_separate_scopes_and_survive_one_transport_failure(self):
         with mock.patch.object(searcher, "hosted_search", side_effect=ConnectionError("quota")), \
              mock.patch.object(searcher, "historical_search", return_value={

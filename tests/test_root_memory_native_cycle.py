@@ -90,6 +90,38 @@ def refs(count=500):
 
 
 class RootMemoryCycleTests(unittest.TestCase):
+    def test_tick_advances_native_root_secretary_without_direct_provider_send(self):
+        d1 = FakeD1([])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prepare_calls, finalize_calls, handoff_calls = [], [], []
+            def stage(_post, **kwargs):
+                prepare_calls.append(kwargs)
+                return {"ok": True, "job": {"job_id": "native-1"},
+                        "source_set_sha256": "a" * 64, "provider_requests_created": 0}
+            def finish(_post, **kwargs):
+                finalize_calls.append(kwargs)
+                return {"ok": True, "root_job": {"job_id": "root-1"},
+                        "provider_requests_created": 0}
+            def handoff(_post, **kwargs):
+                handoff_calls.append(kwargs)
+                return {"ok": True, "plan_sha256": "b" * 64,
+                        "secretary_taskflow_installation": {"ok": True}}
+            kwargs = {"output_root": root, "plan_output_root": root / "plans",
+                      "prepare_fn": stage, "finalize_fn": finish, "handoff_fn": handoff}
+            self.assertEqual(cycle.tick(d1, **kwargs)["phase"], "await_native")
+            d1.jobs["native-1"] = {"state": "queued"}
+            self.assertEqual(cycle.tick(d1, **kwargs)["job_state"], "queued")
+            d1.jobs["native-1"] = {"state": "complete"}
+            self.assertEqual(cycle.tick(d1, **kwargs)["phase"], "await_root")
+            d1.jobs["root-1"] = {"state": "complete"}
+            self.assertEqual(cycle.tick(d1, **kwargs)["phase"], "complete")
+            self.assertEqual(cycle.tick(d1, **kwargs)["phase"], "complete")
+            self.assertEqual(len(prepare_calls), 1)
+            self.assertEqual(len(finalize_calls), 1)
+            self.assertEqual(len(handoff_calls), 1)
+            self.assertEqual(json.loads((root / "cycle-state.json").read_text())["phase"], "complete")
+
     def test_500_full_sources_are_batched_and_reconstructed_in_native_script(self):
         selected = cycle.source_selection(FakeBridge(refs()).shared_stock_census(None))
         self.assertEqual(len(selected), 500)

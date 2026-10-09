@@ -5,10 +5,8 @@ id root-agent
     owner: Root Agent
     role: Company manager
     do:
-      - Read the physically attached global, project, and role memory ZIP in the ChatGPT Chat-mode native sandbox, expanding source conversations whenever necessary.
+      - Read the physically attached global, project, and role memory ZIP in the ChatGPT Chat-mode native sandbox; preserve its exact source references and state where the synthesis does not justify a claim.
       - Produce plans for the company, teams, and individual employees; do not write prompts for another agent.
       - Preserve the distinction between long-term patterns, recent changes, disagreements, and uncertainty.
       - Put the resulting machine-readable TaskFlow plan in exactly one COGNILODE_ROOT_TASKFLOW_PLAN_JSON_BEGIN and COGNILODE_ROOT_TASKFLOW_PLAN_JSON_END block in the final provider-visible chat response.
       - Provide a comprehensive in-chat report and one downloadable ZIP containing planning artifacts and EXTERNAL_EFFECT_INSTRUCTIONS.md.
-    effect_probe_command: /usr/bin/python3 -I /home/evan/Projects/codex-backend-sdk/scripts/cognilode-root-plan-effect-probe
-    effect_probe_expected: root-plan-taskflow-live

@@ -12,6 +12,7 @@ from hashlib import sha256
 import importlib.machinery
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -407,7 +408,86 @@ def prepare(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, output_root:
         row["mirror"] = publish(row)
     queued = enqueue_native_synthesis(post, batches, stock, controller=controller)
     return {"ok": True, "source_count": len(refs), "batch_count": len(batches),
+            "source_set_sha256": _sha(json.dumps(refs, sort_keys=True).encode()),
             "job": queued, "provider_requests_created": 0}
+
+
+def _atomic_state(path: Path, value: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".next")
+    with temporary.open("w", encoding="utf-8") as out:
+        json.dump(value, out, sort_keys=True)
+        out.write("\n")
+        out.flush()
+        os.fsync(out.fileno())
+    os.replace(temporary, path)
+
+
+def tick(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, output_root: Path,
+         plan_output_root: Path, bucket: str = DEFAULT_BUCKET,
+         prepare_fn: Callable[..., dict[str, Any]] = prepare,
+         finalize_fn: Callable[..., dict[str, Any]] = finalize,
+         handoff_fn: Callable[..., dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Advance one causal stage; hosted historical rhythm alone sends provider turns."""
+    state_path = output_root / "cycle-state.json"
+    state = json.loads(state_path.read_text()) if state_path.exists() else {"phase": "ready"}
+    phase = state.get("phase")
+    if phase == "await_native":
+        native_id = str(state["native_job_id"])
+        job = post({"operation": "get_job", "job_id": native_id}).get("job") or {}
+        if job.get("state") != "complete":
+            return {"ok": True, "phase": phase, "native_job_id": native_id,
+                    "job_state": job.get("state"), "provider_requests_created": 0}
+        result = finalize_fn(post, native_job_id=native_id, bucket=bucket)
+        if not result.get("ok"):
+            return result
+        root_id = str(result["root_job"]["job_id"])
+        _atomic_state(state_path, {"phase": "await_root", "native_job_id": native_id,
+                                   "root_job_id": root_id,
+                                   "source_set_sha256": state["source_set_sha256"]})
+        return {"ok": True, "phase": "await_root", "root_job_id": root_id,
+                "provider_requests_created": 0}
+    if phase == "await_root":
+        root_id = str(state["root_job_id"])
+        job = post({"operation": "get_job", "job_id": root_id}).get("job") or {}
+        if job.get("state") != "complete":
+            return {"ok": True, "phase": phase, "root_job_id": root_id,
+                    "job_state": job.get("state"), "provider_requests_created": 0}
+        if handoff_fn is None:
+            bridge = _load(BRIDGE, "root_memory_bridge_handoff")
+            handoff_fn = lambda operator, job_id, output_root: bridge.handoff(
+                operator, job_id=job_id, output_root=output_root, install=bridge.install_taskflow)
+        result = handoff_fn(post, job_id=root_id, output_root=plan_output_root)
+        if result.get("ok") is not True or result.get("secretary_taskflow_installation", {}).get("ok") is not True:
+            raise ValueError("root TaskFlow plan was not installed through Secretary")
+        _atomic_state(state_path, {"phase": "complete", "native_job_id": state["native_job_id"],
+                                   "root_job_id": root_id, "plan_sha256": result["plan_sha256"],
+                                   "source_set_sha256": state["source_set_sha256"],
+                                   "completed_at": datetime.now(timezone.utc).isoformat()})
+        return {"ok": True, "phase": "complete", "root_job_id": root_id,
+                "plan_sha256": result["plan_sha256"], "provider_requests_created": 0}
+    if phase == "complete":
+        completed = datetime.fromisoformat(str(state["completed_at"]))
+        if (datetime.now(timezone.utc) - completed).total_seconds() < 86400:
+            return {"ok": True, "phase": "complete", "root_job_id": state["root_job_id"],
+                    "provider_requests_created": 0}
+        bridge = _load(BRIDGE, "root_memory_bridge_fingerprint")
+        stock = bridge.shared_stock_census(post, minimum=500)
+        if not stock["multi_year_ready"]:
+            return {"ok": False, "reason": "shared_multi_year_stock_incomplete",
+                    "distinct_complete": stock["distinct_complete"], "provider_requests_created": 0}
+        fingerprint = _sha(json.dumps(source_selection(stock), sort_keys=True).encode())
+        if fingerprint == state.get("source_set_sha256"):
+            return {"ok": True, "phase": "complete", "reason": "shared_source_packet_unchanged",
+                    "root_job_id": state["root_job_id"], "provider_requests_created": 0}
+    result = prepare_fn(post, output_root=output_root, bucket=bucket)
+    if not result.get("ok"):
+        return result
+    native_id = str(result["job"]["job_id"])
+    _atomic_state(state_path, {"phase": "await_native", "native_job_id": native_id,
+                               "source_set_sha256": result["source_set_sha256"]})
+    return {"ok": True, "phase": "await_native", "native_job_id": native_id,
+            "provider_requests_created": 0}
 
 
 def main() -> int:
@@ -415,11 +495,17 @@ def main() -> int:
     parser.add_argument("--output-root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--bucket", default=DEFAULT_BUCKET)
     parser.add_argument("--finalize-native-job", default="")
+    parser.add_argument("--tick", action="store_true")
+    parser.add_argument("--plan-output-root", type=Path, default=REPO / "plans/root-generated")
     args = parser.parse_args()
     sender = _load(SENDER, "root_memory_d1_reader")
-    result = (finalize(sender.operator_memory_post, native_job_id=args.finalize_native_job, bucket=args.bucket)
-              if args.finalize_native_job else
-              prepare(sender.operator_memory_post, output_root=args.output_root, bucket=args.bucket))
+    if args.tick:
+        result = tick(sender.operator_memory_post, output_root=args.output_root,
+                      plan_output_root=args.plan_output_root, bucket=args.bucket)
+    elif args.finalize_native_job:
+        result = finalize(sender.operator_memory_post, native_job_id=args.finalize_native_job, bucket=args.bucket)
+    else:
+        result = prepare(sender.operator_memory_post, output_root=args.output_root, bucket=args.bucket)
     print(json.dumps(result, sort_keys=True))
     return 0 if result["ok"] else 1
 

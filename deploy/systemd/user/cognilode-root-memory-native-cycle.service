@@ -1,0 +1,15 @@
+[Unit]
+Description=Cognilode multi-year root memory and Secretary handoff recurrence
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/Projects/codex-backend-sdk/scripts/cognilode-root-memory-native-cycle-service
+Restart=always
+RestartSec=30
+CPUQuota=25%
+MemoryMax=1G
+
+[Install]
+WantedBy=default.target

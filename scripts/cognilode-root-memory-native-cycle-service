@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Reconcile root-memory stages; D1 historical rhythm remains the provider clock."""
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+HERE = Path(__file__).resolve().parent
+CYCLE = HERE / "cognilode-root-memory-native-cycle"
+STATE_ROOT = Path(os.environ.get("COGNILODE_ROOT_MEMORY_STATE_ROOT",
+    str(Path.home() / ".local/share/cognilode/root-memory-native-cycle"))).expanduser()
+INTERVAL = max(300, min(86400, int(os.environ.get("COGNILODE_ROOT_MEMORY_INTERVAL_SECONDS", "3600"))))
+STOP = False
+
+
+def _stop(_sig, _frame):
+    global STOP
+    STOP = True
+
+
+def _event(row):
+    STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    value = {"schema": "cognilode.root_memory_cycle_tick.v1", "at": time.time(), **row}
+    line = json.dumps(value, sort_keys=True)
+    with (STATE_ROOT / "recurrence.jsonl").open("a", encoding="utf-8") as out:
+        out.write(line + "\n")
+        out.flush()
+        os.fsync(out.fileno())
+    print(line, flush=True)
+
+
+def main():
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+    STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    with (STATE_ROOT / "recurrence.lock").open("a+") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            _event({"state": "already_running"})
+            return 0
+        _event({"state": "started", "interval_seconds": INTERVAL})
+        while not STOP:
+            started = time.monotonic()
+            try:
+                done = subprocess.run([sys.executable, str(CYCLE), "--tick", "--output-root", str(STATE_ROOT)],
+                                      text=True, capture_output=True, timeout=1800, check=False)
+                _event({"state": "tick", "returncode": done.returncode,
+                        "stdout_tail": done.stdout[-4000:], "stderr_tail": done.stderr[-2000:]})
+            except subprocess.TimeoutExpired:
+                _event({"state": "tick_timeout"})
+            while not STOP and time.monotonic() - started < INTERVAL:
+                time.sleep(min(1.0, INTERVAL - (time.monotonic() - started)))
+        _event({"state": "stopped"})
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

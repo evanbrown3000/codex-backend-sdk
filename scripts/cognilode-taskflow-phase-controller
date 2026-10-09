@@ -714,6 +714,50 @@ def portable_attachment_ref(path: Path, digest: str) -> dict[str, Any]:
     return row
 
 
+def step_supplement_refs(plan: Plan, step: Step) -> list[dict[str, Any]]:
+    """Load hash-pinned inputs for a future step without rewriting an in-flight plan.
+
+    The sidecar is beside the plan in the project repository. It is evaluated
+    before enqueue, so the rhythm queue receives all inputs atomically and no
+    later manual amendment or second prompt is required.
+    """
+    if not plan.source_ref.startswith("file:"):
+        return []
+    sidecar = Path(plan.source_ref.removeprefix("file:")).with_suffix(".attachments.json")
+    if not sidecar.is_file():
+        return []
+    value = json.loads(sidecar.read_text(encoding="utf-8"))
+    if (not isinstance(value, dict) or value.get("schema") != "cognilode.taskflow.step_attachments.v1"
+        or value.get("project_id") != plan.project_id or not isinstance(value.get("steps"), dict)):
+        raise ValueError("invalid TaskFlow step attachment sidecar")
+    rows = value["steps"].get(step.step_id, [])
+    if not isinstance(rows, list) or len(rows) > 63:
+        raise ValueError("invalid TaskFlow step attachment list")
+    refs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in rows:
+        if not isinstance(item, dict):
+            raise ValueError("invalid TaskFlow step attachment row")
+        digest = str(item.get("sha256") or "").lower()
+        path = Path(str(item.get("path") or ""))
+        name = str(item.get("name") or "")
+        if (not HEX64.fullmatch(digest) or digest in seen or not path.is_absolute()
+            or not path.is_file() or path.stat().st_size > MAX_ZIP_BYTES
+            or sha256_file(path) != digest or not zipfile.is_zipfile(path)
+            or not name or len(name) > 120):
+            raise ValueError("invalid or changed TaskFlow step attachment")
+        seen.add(digest)
+        ref = portable_attachment_ref(path, digest)
+        mirror = str(item.get("mirror") or "")
+        if mirror:
+            if not re.fullmatch(r"s3://[A-Za-z0-9.-]+/taskflow-artifacts/sha256/" + digest + r"\.zip", mirror):
+                raise ValueError("invalid TaskFlow step attachment mirror")
+            ref["mirrors"] = list(dict.fromkeys([*(ref.get("mirrors") or []), mirror]))
+        ref["name"] = name
+        refs.append(ref)
+    return refs
+
+
 def ensure_chat_job(queue: QueueClient, plan: Plan, step: Step, research_meta: Mapping[str, Any], priority: int) -> dict[str, Any]:
     jid=phase_job_id(plan,step.step_id,"chatgpt_sandbox")
     existing=queue.get(jid)
@@ -722,7 +766,8 @@ def ensure_chat_job(queue: QueueClient, plan: Plan, step: Step, research_meta: M
     job=job_base(plan,step,"chatgpt_sandbox",provider="chatgpt.com",priority=priority,dependencies=[])
     job.update({"prompt":prompt,"prompt_sha256":sha256_bytes(prompt.encode()),"reasoning_effort":"xhigh",
                 "assigned_employee":"ChatGPT chat-mode native sandbox",
-                "attachment_refs":[portable_attachment_ref(Path(research_meta["path"]), research_meta["sha256"])]})
+                "attachment_refs":[portable_attachment_ref(Path(research_meta["path"]), research_meta["sha256"]),
+                                   *step_supplement_refs(plan, step)]})
     return queue.enqueue(job)
 
 

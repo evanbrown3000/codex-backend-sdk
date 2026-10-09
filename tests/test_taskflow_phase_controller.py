@@ -74,6 +74,29 @@ class FakeQueue:
         raise AssertionError(body)
 
 class Tests(unittest.TestCase):
+    def test_step_sidecar_is_hash_verified_and_atomically_attached_before_enqueue(self):
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, {"COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET":""}):
+            root=Path(td); plan_path=root/'plans'/'decisionx.plan'; plan_path.parent.mkdir()
+            plan_path.write_text('project DecisionX\nid dx\n[ ] DX-2 index\n    effect_probe_command: /usr/bin/printf ok\n    effect_probe_expected: ok\n')
+            plan=c.parse_plan(plan_path); step=plan.by_id()['DX-2']
+            research=root/'research.zip'; supplement=root/'source.zip'
+            manifest_zip(research,plan.sha256,{'report.md':b'research'})
+            with zipfile.ZipFile(supplement,'w') as z:z.writestr('source.md','historical conversation')
+            research_sha=hashlib.sha256(research.read_bytes()).hexdigest()
+            supplement_sha=hashlib.sha256(supplement.read_bytes()).hexdigest()
+            sidecar=plan_path.with_suffix('.attachments.json')
+            sidecar.write_text(json.dumps({'schema':'cognilode.taskflow.step_attachments.v1','project_id':'dx',
+                'steps':{'DX-2':[{'path':str(supplement),'sha256':supplement_sha,'name':'500 source packet',
+                    'mirror':f's3://private-bucket/taskflow-artifacts/sha256/{supplement_sha}.zip'}]}}))
+            q=FakeQueue()
+            job=c.ensure_chat_job(q,plan,step,{'path':str(research),'sha256':research_sha},50)
+            self.assertEqual([r['sha256'] for r in job['attachment_refs']],[research_sha,supplement_sha])
+            self.assertEqual(job['attachment_refs'][1]['mirrors'],[f's3://private-bucket/taskflow-artifacts/sha256/{supplement_sha}.zip'])
+            self.assertEqual(job['prompt'],c.chatgpt_prompt(plan,step,{'path':str(research),'sha256':research_sha}))
+            supplement.write_bytes(b'changed')
+            with self.assertRaisesRegex(ValueError,'invalid or changed'):
+                c.step_supplement_refs(plan,step)
+
     def test_returned_work_zip_is_published_with_full_private_readback(self):
         with tempfile.TemporaryDirectory() as td:
             path=Path(td)/'work.zip'

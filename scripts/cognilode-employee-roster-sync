@@ -25,6 +25,7 @@ CANDIDATES = ROOT / "config/employee-slack-candidates.json"
 SENDER = ROOT / "scripts/cognilode-b4pt0r-chatmode"
 DEFAULT_SNAPSHOTS = (Path.home() / ".local/share/cognilode/"
                      "spine-rpe-decisionx-batches-20261007T223721Z/decisionx-spine/slack")
+LANDING_SNAPSHOTS = Path.home() / ".local/share/cognilode/slack-role-snapshots"
 ROLE = re.compile(r"^(?P<name>[A-Z][a-z]+(?: [A-Z][a-z]+){1,2}) — "
                   r"(?P<role>[^—\n]{8,100}) — (?P<org>[^\n]{4,180})$")
 TITLE = re.compile(r"\b(?:Engineer|Researcher|Scientist|Architect|Manager|Director|Specialist|Lead)\b")
@@ -208,7 +209,9 @@ def main() -> int:
                         dest="snapshot_dirs")
     parser.add_argument("--candidates-only", action="store_true")
     args = parser.parse_args()
-    print(json.dumps(reconcile(args.snapshot_dirs or [DEFAULT_SNAPSHOTS],
+    configured = [Path(p) for p in os.environ.get("COGNILODE_SLACK_SNAPSHOT_DIRS", "").split(":") if p]
+    directories = args.snapshot_dirs or configured or [DEFAULT_SNAPSHOTS, LANDING_SNAPSHOTS]
+    print(json.dumps(reconcile(directories,
                                activate=not args.candidates_only), sort_keys=True))
     return 0
 

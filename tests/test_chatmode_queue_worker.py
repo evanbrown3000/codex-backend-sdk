@@ -477,6 +477,14 @@ def test_decisionx_only_first_verified_batch_uses_catchup_priority(tmp_path):
         assert module._dx_batch_priority(db) == 20
 
 
+def test_decisionx_native_batch_keeps_one_episode_per_complete_source():
+    module = worker()
+    refs = [{'provider': 'openai-codex', 'conversation_id': 'same', 'episode_id': 'first'},
+            {'provider': 'openai-codex', 'conversation_id': 'same', 'episode_id': 'later'},
+            {'provider': 'chatgpt-export-format', 'conversation_id': 'same', 'episode_id': 'other'}]
+    assert module._dx_unique_source_refs(refs) == [refs[0], refs[2]]
+
+
 def test_decisionx_legacy_local_done_requires_central_native_admission(tmp_path):
     module = worker()
     module.DX_HOME = tmp_path

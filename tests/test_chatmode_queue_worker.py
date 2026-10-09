@@ -246,6 +246,8 @@ def test_decisionx_ready_stock_enqueues_one_xhigh_chatmode_job_with_full_source_
             if body['operation']=='enqueue_decisionx_prompt':
                 queued.append(body)
                 return {'ok':True,'job':{'id':body['job_id'],'state':'queued'}}
+            if body['operation']=='get_job':
+                return {'ok':True,'job':{'state':'queued','effect_evidence':[]}}
             raise AssertionError(body['operation'])
     module._dx_bridge=lambda:Bridge()
     module._dx_source_batch_builder=lambda:Builder()
@@ -257,12 +259,22 @@ def test_decisionx_ready_stock_enqueues_one_xhigh_chatmode_job_with_full_source_
     assert queued[0]['model']=='gpt-5-6-thinking'
     assert len(queued[0]['attachment_refs'])==2
     assert all(row['mirrors'][0].startswith('s3://') for row in queued[0]['attachment_refs'])
+    with module._dx_connection() as db:
+        db.execute("UPDATE episodes SET state='retry',retry_after=0")
+    state=json.loads((tmp_path/'scan.json').read_text())
+    state['last_scan']=0
+    state['offset']=0
+    (tmp_path/'scan.json').write_text(json.dumps(state))
+    module.decisionx_batch_pump()
+    assert len(queued)==2
+    assert queued[1]['job_id'] != queued[0]['job_id']
 
 
 def test_decisionx_native_batch_verifies_source_and_binds_returned_compute(tmp_path):
     module = worker()
     module.DX_HOME = tmp_path
     source = {'provider': 'openai-codex', 'conversation_id': 'conversation-1',
+              'prompt_sha256': '1' * 64, 'response_sha256': '2' * 64,
               'events': [{'id': 'u1', 'role': 'user', 'content': 'Research the actual requirements in the source history.'},
                          {'id': 'a1', 'role': 'assistant', 'content': 'I found the source commits and compared their behavior.'}]}
     episode = module._dx_extract(source)[0]
@@ -380,6 +392,52 @@ def test_decisionx_transport_input_retired_only_after_central_admission(tmp_path
     assert module._dx_retire_completed_inputs() == 1
     assert not (folder / f'{complete}.zip').exists()
     assert (folder / f'{queued}.zip').exists()
+
+
+def test_decisionx_cross_device_partial_admission_retries_only_missing_ids(tmp_path):
+    module=worker()
+    module.DX_HOME=tmp_path
+    batch='a'*32
+    with module._dx_connection() as db:
+        for episode_id in ('accepted','missing'):
+            db.execute('INSERT INTO episodes(id,source_sha,state,attempts,retry_after,batch,updated) '
+                       'VALUES(?,?,?,?,?,?,?)', (episode_id,'1'*64,'queued',1,0,batch,0))
+    class Sender:
+        @staticmethod
+        def operator_memory_post(body):
+            assert body['operation']=='get_job'
+            return {'job':{'state':'complete','effect_evidence':[{
+                'kind':'decisionx_label_admission','requested':2,'admitted':1,
+                'admitted_episode_ids':['accepted']}]}}
+    module.sender=Sender()
+    with module._dx_connection() as db:
+        assert module._dx_reconcile_queued(db)==1
+        states=dict(db.execute('SELECT id,state FROM episodes').fetchall())
+    assert states=={'accepted':'done','missing':'retry'}
+
+
+def test_decisionx_completion_evidence_has_d1_persistable_ref(tmp_path):
+    module=worker()
+    module.ROOT=tmp_path
+    module.validated_result=lambda _value: ('chat-conversation',[])
+    module.tool_evidence_from_result=lambda _value: [{'kind':'provider_observed_native_exec','ref':'tool-1'}]
+    module._dx_native_preflight=lambda *_args: None
+    module.decisionx_admit_labels=lambda *_args,**_kwargs: {
+        'requested':1,'admitted':1,'admitted_episode_ids':['episode-1']}
+    captured=[]
+    class Sender:
+        @staticmethod
+        def operator_memory_post(body):
+            captured.append(body)
+            return {'ok':True}
+    module.sender=Sender()
+    job={'id':'decisionx-iae-'+'a'*32,'phase':'iae_label_batch','claimed_by':'evanpc',
+         'lease_token':'lease-1','lease_generation':1}
+    assert module.complete_from_result(job,{}) is True
+    evidence=captured[0]['effect_evidence']
+    admission=next(row for row in evidence if row['kind']=='decisionx_label_admission')
+    assert admission['ref']==job['id']
+    assert admission['admitted_episode_ids']==['episode-1']
 
 
 def test_sender_receives_queue_selected_model_and_effort(tmp_path):

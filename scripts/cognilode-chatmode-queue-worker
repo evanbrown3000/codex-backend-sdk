@@ -574,15 +574,15 @@ def _dx_reconcile_queued(db):
         if job.get("state") not in {"cancelled", "failed", "complete"}:
             continue
         evidence = job.get("effect_evidence") or []
-        if job.get("state") == "complete" and any(
-                isinstance(row, dict) and row.get("kind") == "decisionx_label_admission"
-                and int(row.get("requested") or 0) > 0
-                and int(row.get("admitted") or 0) == int(row.get("requested") or -1)
-                for row in evidence):
-            cursor = db.execute("UPDATE episodes SET state='done',updated=? "
-                                "WHERE state='queued' AND batch=?", (time.time(), batch))
-            released += cursor.rowcount
-            continue
+        admission = next((row for row in evidence if isinstance(row, dict)
+                          and row.get("kind") == "decisionx_label_admission"), None)
+        if job.get("state") == "complete" and admission:
+            accepted = admission.get("admitted_episode_ids") or []
+            if isinstance(accepted, list) and len(accepted) == int(admission.get("admitted") or -1):
+                for episode_id in accepted:
+                    db.execute("UPDATE episodes SET state='done',updated=? "
+                               "WHERE state='queued' AND batch=? AND id=?",
+                               (time.time(), batch, str(episode_id)))
         cursor = db.execute("UPDATE episodes SET state='retry',retry_after=0,updated=? "
                             "WHERE state='queued' AND batch=?", (time.time(), batch))
         released += cursor.rowcount
@@ -670,7 +670,11 @@ def decisionx_batch_pump():
             bounded.append(episode)
             char_count += size
         selected = bounded
-        batch_source = "drive-verified-v3:" + "".join(
+        attempt = 1 + max((int((db.execute(
+            "SELECT attempts FROM episodes WHERE id=? AND source_sha=?",
+            (e["episode_id"], e["source_sha256"])).fetchone() or (0,))[0])
+            for e in selected), default=0)
+        batch_source = "drive-verified-v3:attempt-" + str(attempt) + ":" + "".join(
             e["episode_id"] + e["source_sha256"] for e in selected)
         batch = hashlib.sha256(batch_source.encode()).hexdigest()[:32]
         srczip = _dx_input_zip(selected,batch)
@@ -689,7 +693,8 @@ def decisionx_batch_pump():
             mirror = builder.publish_private(packet)
             refs.append({"ref": packet["path"], "sha256": packet["sha256"],
                          "mirrors": [mirror], "kind": "decisionx_native_source"})
-        prompt = DX_PROMPT + "\nBatch identity: " + batch + "\nEpisode count: " + str(len(selected))
+        prompt = (DX_PROMPT + "\nBatch identity: " + batch + "\nAttempt: " + str(attempt)
+                  + "\nEpisode count: " + str(len(selected)))
         digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         id_value = "decisionx-iae-" + batch
         reply = sender.operator_memory_post({
@@ -754,12 +759,30 @@ def _dx_packet_paths(job):
     return packets
 
 
+def _dx_full_source_refs(packets):
+    refs = {}
+    for packet in packets[1:]:
+        with zipfile.ZipFile(packet["path"]) as source_archive:
+            manifest = json.loads(source_archive.read("MANIFEST.json"))
+            if manifest.get("schema") != "cognilode.root_memory_sources.v1":
+                raise ValueError("complete source packet schema mismatch")
+            for row in manifest.get("parts") or []:
+                key = (str(row.get("provider") or ""), str(row.get("conversation_id") or ""))
+                identity = (str(row.get("prompt_sha256") or ""), str(row.get("response_sha256") or ""))
+                if key in refs and refs[key] != identity:
+                    raise ValueError("complete source identity conflict")
+                refs[key] = identity
+    return refs
+
+
 def decisionx_admit_labels(job, files, conversation_id, *, preflight_error=None):
     """Admit actual returned semantic records into existing Agent Memory segments."""
     if job.get("phase") != "iae_label_batch": return None
     batch = str(job["id"]).removeprefix("decisionx-iae-")
     try:
-        input_zip = _dx_packet_paths(job)[0]["path"]
+        packets = _dx_packet_paths(job)
+        input_zip = packets[0]["path"]
+        full_refs = _dx_full_source_refs(packets)
     except (OSError, ValueError, RuntimeError):
         if preflight_error:
             return {"requested": 0, "admitted": 0, "retry_pending": 0,
@@ -790,7 +813,11 @@ def decisionx_admit_labels(job, files, conversation_id, *, preflight_error=None)
     if records:
         bridge = _dx_bridge()
         current, _ = _dx_resolve([_dx_ref(src) for src in sources.values()],
-            complete_source=lambda index, result: bridge._complete_source(index, result) is not None)
+            complete_source=lambda index, result: (
+                bridge._complete_source(index, result) is not None
+                and full_refs.get((index["provider"], index["conversation_id"])) == (
+                    str((result.get("conversation") or {}).get("prompt_sha256") or ""),
+                    str((result.get("conversation") or {}).get("response_sha256") or ""))))
         current_ids = {(row["episode_id"], row["source_sha256"]) for row in current}
     selected, seen = [], set()
     for row in records:
@@ -847,6 +874,7 @@ def decisionx_admit_labels(job, files, conversation_id, *, preflight_error=None)
     event("decisionx_label_admitted",job_id=job["id"],label_error=label_error,requested=len(expected),
           accepted=len(seen),missing=len(missing),conversation_id=conversation_id)
     return {"requested":len(expected),"admitted":len(seen),"retry_pending":len(missing),
+            "admitted_episode_ids":sorted(seen),
             "label_error":label_error,
             "input_zip_sha256":hashlib.sha256(input_zip.read_bytes()).hexdigest(),
             "output_zip_sha256":hashlib.sha256(output.read_bytes()).hexdigest() if output and output.is_file() else None}
@@ -887,18 +915,7 @@ def _dx_native_preflight(job, files, value, evidence):
             neighbor_rows = json.loads(neighbors)
         with zipfile.ZipFile(input_path) as source_archive:
             input_manifest = json.loads(source_archive.read("manifest.json"))
-        source_refs = {}
-        for packet in packets[1:]:
-            with zipfile.ZipFile(packet["path"]) as source_archive:
-                manifest = json.loads(source_archive.read("MANIFEST.json"))
-                if manifest.get("schema") != "cognilode.root_memory_sources.v1":
-                    return "complete_source_packet_schema_mismatch"
-                for row in manifest.get("parts") or []:
-                    key = (str(row.get("provider") or ""), str(row.get("conversation_id") or ""))
-                    identity = (str(row.get("prompt_sha256") or ""), str(row.get("response_sha256") or ""))
-                    if key in source_refs and source_refs[key] != identity:
-                        return "complete_source_identity_conflict"
-                    source_refs[key] = identity
+        source_refs = _dx_full_source_refs(packets)
         input_ids = {str(row.get("episode_id") or "") for row in input_manifest.get("episodes") or []}
         produced_refs = {(str(row.get("provider") or ""), str(row.get("conversation_id") or ""),
                           str(row.get("prompt_sha256") or ""), str(row.get("response_sha256") or ""))
@@ -916,7 +933,7 @@ def _dx_native_preflight(job, files, value, evidence):
                 or not isinstance(neighbor_rows,list)
                 or {str(row.get("episode_id") or "") for row in neighbor_rows} != input_ids):
             return "native_compute_proof_mismatch"
-    except (OSError, ValueError, KeyError, zipfile.BadZipFile, json.JSONDecodeError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, zipfile.BadZipFile, json.JSONDecodeError):
         return "native_compute_proof_invalid"
     return None
 
@@ -1115,7 +1132,7 @@ def complete_from_result(job: dict, value: dict) -> bool:
                      **({"mirrors": row["mirrors"]} if row.get("mirrors") else {})} for row in files)
     evidence.extend(native_evidence)
     if decisionx_result is not None:
-        evidence.append({"kind":"decisionx_label_admission",**decisionx_result})
+        evidence.append({"kind":"decisionx_label_admission","ref":job["id"],**decisionx_result})
 
     reply = sender.operator_memory_post({"operation": "complete_job", **fence(job),
                                           "conversation_id": conversation_id, "effect_evidence": evidence})

@@ -536,6 +536,7 @@
   },
   "schema": "cognilode.employee_slack_candidates.v1",
   "sources": [
-    "/home/evan/.local/share/cognilode/spine-rpe-decisionx-batches-20261007T223721Z/decisionx-spine/slack"
+    "/home/evan/.local/share/cognilode/spine-rpe-decisionx-batches-20261007T223721Z/decisionx-spine/slack",
+    "/home/evan/.local/share/cognilode/slack-role-snapshots"
   ]
 }

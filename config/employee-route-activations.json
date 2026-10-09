@@ -1,0 +1,16 @@
+{
+  "employees": {
+    "Maya Chen": {
+      "completed_at": "2026-10-09T12:40:53.983Z",
+      "conversation_id": "01a120a8-4ed0-77a0-afbf-bab2db84e58e",
+      "effect_kind": "research_zip",
+      "effect_ref": "590e56080f8020cfb5dddecdb58c9e374a741a5677170a53c553363e3be1cd87",
+      "employee": "Maya Chen",
+      "job_id": "tf-5e0e59e37af971626024a0657a93e69079d47ef2",
+      "provider": "codex.research",
+      "response_sha256": "c687e80ac8f02ce03aa2a5e26919150fad14287d3454fb525b2012779a977b08",
+      "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791233715823319"
+    }
+  },
+  "schema": "cognilode.employee_route_activations.v1"
+}

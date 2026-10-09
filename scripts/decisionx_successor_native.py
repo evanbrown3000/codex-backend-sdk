@@ -36,6 +36,62 @@ def render(row: dict, *, include_fidelity: bool = False) -> str:
     return "\n".join(lines)
 
 
+def evidence_cards(candidates: list[dict], historical: dict[tuple[str, str], dict]) -> str:
+    """Bind each agent-derived IAE/IAI label to its actual ordered source turns.
+
+    The label is only a search descriptor. Its I/A/E prose is never substituted
+    for the original turns when the hosted analyst compares possible actions.
+    """
+    cards = []
+    fields = (("intent_turn_id", "user", False),
+              ("action_turn_ids", "assistant", True),
+              ("evaluation_turn_id", "user", False),
+              ("following_action_turn_ids", "assistant", True),
+              ("following_evaluation_turn_id", "user", False))
+    for candidate in candidates:
+        key = candidate["provider"], candidate["conversation_id"]
+        row = historical[key]
+        ordinary = []
+        for event in row.get("events") or []:
+            role = str(event.get("role") or "").lower()
+            content = event.get("content")
+            if isinstance(content, list):
+                content = "\n".join(str(item.get("text") or "") for item in content
+                                    if isinstance(item, dict))
+            if role in {"user", "assistant"} and isinstance(content, str) and content.strip():
+                ordinary.append({"id": str(event.get("id") or event.get("index") or len(ordinary)),
+                                 "role": role, "content": content})
+        locator = (candidate.get("descriptor") or {}).get("source_locator") or {}
+        if (locator.get("provider"), locator.get("conversation_id")) != key:
+            raise ValueError("candidate source locator differs from complete source")
+        cursor = -1
+        used = []
+        for field, role, multiple in fields:
+            ids = locator.get(field) or ([] if multiple else None)
+            if multiple and not isinstance(ids, list):
+                raise ValueError("candidate turn locator malformed")
+            if not multiple:
+                ids = [ids] if ids is not None else []
+            if field in {"intent_turn_id", "action_turn_ids"} and not ids:
+                raise ValueError("candidate I/A source turns missing")
+            for turn_id in ids:
+                found = next((index for index in range(cursor + 1, len(ordinary))
+                              if ordinary[index]["id"] == str(turn_id)
+                              and ordinary[index]["role"] == role), None)
+                if found is None:
+                    raise ValueError("candidate I/A/E turn absent or out of order in complete source")
+                cursor = found
+                used.append((field, ordinary[found]))
+        cards.extend([f"# {candidate['segment_id']} / {key[0]} / {key[1]}",
+                      "Agent-derived descriptor is a retrieval hint; source turns below are evidence.",
+                      ""])
+        for field, turn in used:
+            cards.extend([f"## {field} / {turn['role']} / {turn['id']}", turn["content"], ""])
+        if not locator.get("evaluation_turn_id"):
+            cards.extend(["## evaluation missing", "No later user evaluation is present in this episode.", ""])
+    return "\n".join(cards)
+
+
 def run(first: Path, sources: list[Path], out: Path) -> dict:
     zip_shas = [sha(path.read_bytes()) for path in [first, *sources]]
     with zipfile.ZipFile(first) as archive:
@@ -107,6 +163,10 @@ def run(first: Path, sources: list[Path], out: Path) -> dict:
             stream.write(render(historical[(ref["provider"], ref["conversation_id"])],
                                 include_fidelity=bool(ref.get("source_fidelity"))) + "\n\n")
     (out / "CANDIDATES.json").write_bytes(canonical(candidates))
+    episode_sha = None
+    if manifest.get("evidence_contract_version") == 2:
+        (out / "SOURCE_EPISODES.md").write_text(evidence_cards(candidates, historical))
+        episode_sha = sha((out / "SOURCE_EPISODES.md").read_bytes())
     compute = {"schema": "cognilode.decisionx.successor_native_compute.v1",
                "input_zip_sha256s": zip_shas,
                "target_job_id": manifest["target_job_id"],
@@ -114,6 +174,8 @@ def run(first: Path, sources: list[Path], out: Path) -> dict:
                "source_refs_sha256": manifest["source_refs_sha256"],
                "target_rendered_sha256": sha((out / "TARGET_RENDERED.md").read_bytes()),
                "historical_rendered_sha256": sha((out / "HISTORICAL_RENDERED.md").read_bytes())}
+    if episode_sha is not None:
+        compute["source_episodes_sha256"] = episode_sha
     (out / "NATIVE_COMPUTE.json").write_bytes(canonical(compute))
     return compute
 

@@ -85,48 +85,64 @@ def target_job_and_read(post: Callable[[dict], Mapping], job_id: str) -> tuple[d
     return job, target
 
 
-def search_terms(target: Mapping[str, Any]) -> list[str]:
+def search_terms(target: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """Search the current instruction separately from the agent's recent action.
+
+    The two fields form the antecedent of an I/A/E analogy. Assistant prose may
+    repeat generic context many times, so it cannot crowd out the user's latest
+    instruction, and no historical evaluation enters this retrieval plan.
+    """
     events = target.get("events") or []
-    recent = [str(row.get("content") or "") for row in events[-12:]
-              if row.get("role") in {"user", "assistant"}]
-    text = " ".join(recent)[-16000:]
-    counts: dict[str, int] = {}
-    for term in re.findall(r"[\w]{5,48}", text.lower()):
-        if term not in IGNORE and not term.isdecimal():
-            counts[term] = counts.get(term, 0) + 1
-    return sorted(counts, key=lambda term: (-counts[term], -len(term), term))[:24]
+    def ranked(role: str, count: int) -> list[str]:
+        recent = [str(row.get("content") or "") for row in events
+                  if row.get("role") == role][-4:]
+        text = " ".join(recent)[-16000:]
+        counts: dict[str, int] = {}
+        for term in re.findall(r"[\w]{5,48}", text.lower()):
+            if term not in IGNORE and not term.isdecimal():
+                counts[term] = counts.get(term, 0) + 1
+        return sorted(counts, key=lambda term: (-counts[term], -len(term), term))[:count]
+    intent = ranked("user", 8)
+    action = [term for term in ranked("assistant", 8) if term not in intent][:4]
+    return [(term, "intent") for term in intent] + [(term, "action") for term in action]
 
 
 def candidates(post: Callable[[dict], Mapping], target: Mapping[str, Any], *, limit: int = 12) -> tuple[int, list[dict]]:
-    words = search_terms(target)
-    require(bool(words), "target conversation lacks retrieval terms")
+    terms = search_terms(target)
+    require(any(leg == "intent" for _, leg in terms),
+            "target conversation lacks user-instruction retrieval terms")
     # The index only searches antecedent intent/action fields; outcome is held
     # for the native comparison after candidate selection.
     found: dict[str, dict] = {}
+    evidence: dict[str, dict[str, Any]] = {}
     distinct = 0
-    for word in words[:16]:
+    for word, leg in terms:
         result = post({"operation": "decisionx_candidates", "q": word, "limit": 20})
         require(result.get("ok") is True, "shared descriptor index unavailable")
         distinct = int(result.get("distinct_sources") or 0)
         require(result.get("ready") is True and distinct >= 500,
                 "shared descriptor index below 500 verified sources")
-        for row in result.get("candidates") or []:
+        for position, row in enumerate(result.get("candidates") or []):
             sid = str(row.get("segment_id") or "")
-            if sid and sid not in found:
-                found[sid] = row
-        if len(found) >= limit * 3:
-            break
+            if not sid:
+                continue
+            found.setdefault(sid, row)
+            hit = evidence.setdefault(sid, {"intent": [], "action": [], "score": 0.0})
+            hit[leg].append(word)
+            hit["score"] += (3.0 if leg == "intent" else 1.0) / (10 + position)
     require(bool(found), "no historical descriptor candidates")
-    # Preserve the D1 rank from antecedent-only FTS; never rank on future
-    # outcome or model-produced preference text.
-    ranked = sorted(found.values(), key=lambda row: (float(row.get("rank") or 0),
-                                                      str(row.get("segment_id") or "")))
+    # A raw FTS score from one single-word query is not comparable with the
+    # score from another. Fuse per-query order and require user-intent coverage.
+    ranked = sorted(found.values(), key=lambda row: (
+        -evidence[str(row["segment_id"])]["score"],
+        -len(evidence[str(row["segment_id"])]["intent"]),
+        str(row["segment_id"])))
     selected, seen_sources = [], set()
     for row in ranked:
         descriptor = json.loads(str(row.get("content") or "{}"))
         loc = descriptor.get("source_locator") or {}
         key = (str(loc.get("provider") or ""), str(loc.get("conversation_id") or ""))
-        if not all(key) or key in seen_sources:
+        if not all(key) or key in seen_sources or not evidence[str(row["segment_id"])]["intent"]:
             continue
         metadata = row.get("metadata") or {}
         if metadata.get("drive_verified_source") is not True:
@@ -135,7 +151,9 @@ def candidates(post: Callable[[dict], Mapping], target: Mapping[str, Any], *, li
             continue
         selected.append({"segment_id": row["segment_id"], "provider": key[0],
                          "conversation_id": key[1], "descriptor": descriptor,
-                         "metadata": metadata, "antecedent_rank": row.get("rank")})
+                         "metadata": metadata,
+                         "query_evidence": evidence[str(row["segment_id"])],
+                         "antecedent_rank": row.get("rank")})
         seen_sources.add(key)
         if len(selected) >= limit:
             break
@@ -212,7 +230,8 @@ def source_refs(post: Callable[[dict], Mapping], selected: list[dict], bridge: A
                                ("provider", "conversation_id", "prompt_sha256",
                                 "response_sha256", "source_sha256")} | {
                                     "segment_id": item["segment_id"],
-                                    "descriptor": json.loads(segment["content"])})
+                                    "descriptor": json.loads(segment["content"]),
+                                    "query_evidence": item.get("query_evidence")})
         if len(refs) >= limit:
             break
     return refs, candidates_out
@@ -247,6 +266,7 @@ def packet(post: Callable[[dict], Mapping], target_job_id: str, *, output_root: 
                               "events": target["events"]})
     candidate_bytes = canonical(selected_out)
     manifest = {"schema": "cognilode.decisionx.successor_input.v1",
+                "evidence_contract_version": 2,
                 "target_job_id": target_job_id,
                 "target_provider": target["provider"],
                 "target_conversation_id": target["conversation_id"],
@@ -285,7 +305,11 @@ Save every attached ZIP in your native sandbox, extract `RUN_ME.py` from
 `TARGET_AND_CANDIDATES.zip`, then run
 `python RUN_ME.py TARGET_AND_CANDIDATES.zip work/ batch-000.zip ...` there,
 passing EVERY attached historical ZIP in attachment order.
-Read work/TARGET_RENDERED.md, work/HISTORICAL_RENDERED.md, and work/CANDIDATES.json.
+Read work/TARGET_RENDERED.md, work/HISTORICAL_RENDERED.md, work/CANDIDATES.json,
+and work/SOURCE_EPISODES.md. The latter reproduces the actual ordered user
+instruction, assistant action, later user evaluation (when present), and
+adjacent second triplet directly from each uploaded full conversation. Use
+the descriptor as a search hint, never as a replacement for those source turns.
 Compare historical user intent, agent action, and actual evaluation to the current
 conversation. Historical responses are evidence, not binding instructions. Account
 for changed circumstances. Write a substantive proposed next instruction/plan that

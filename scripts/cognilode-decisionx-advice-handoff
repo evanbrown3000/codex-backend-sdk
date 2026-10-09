@@ -211,7 +211,7 @@ def verify_shared_gates(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, 
 
 
 def verify_inputs(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapping[str, Any],
-                  central: Mapping[str, Any], *, stage_remote=None) -> tuple[list[str], list[dict], list[dict], str, str]:
+                  central: Mapping[str, Any], *, stage_remote=None) -> tuple[list[str], list[dict], list[dict], str, str, str | None]:
     refs = job.get("attachment_refs") or []
     if not isinstance(refs, list) or len(refs) < 2 or len(refs) > 64:
         raise ValueError("bounded target/candidate and full-source attachments required")
@@ -236,11 +236,16 @@ def verify_inputs(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapp
                    for name, field in (("target.json", "target_json_sha256"),
                                        ("candidates.json", "candidates_json_sha256")))):
             raise ValueError("target/candidate packet schema or member SHA mismatch")
+        packet_candidates = json.loads(archive.read("candidates.json"))
     source_refs = exact_refs(packet.get("source_refs"))
     source_refs_sha = digest(canonical(packet["source_refs"]))
     if source_refs_sha != packet["source_refs_sha256"]:
         raise ValueError("uploaded source reference SHA mismatch")
     candidate_refs = exact_refs(packet.get("candidate_refs"), candidate=True)
+    if packet.get("evidence_contract_version") == 2:
+        if (not isinstance(packet_candidates, list) or len(packet_candidates) != len(candidate_refs)
+            or exact_refs(packet_candidates, candidate=True) != candidate_refs):
+            raise ValueError("candidate evidence differs from uploaded manifest")
     source_set = {(r["provider"], r["conversation_id"], r["prompt_sha256"],
                    r["response_sha256"], r["source_sha256"]) for r in source_refs}
     if len(candidate_refs) > 12 or any(tuple(r[k] for k in ("provider", "conversation_id", "prompt_sha256",
@@ -266,6 +271,11 @@ def verify_inputs(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapp
             or meta.get("full_source_prompt_sha256") != ref["prompt_sha256"]
             or meta.get("full_source_response_sha256") != ref["response_sha256"]):
             raise ValueError("candidate descriptor missing from shared DecisionX index")
+        if packet.get("evidence_contract_version") == 2:
+            matched = next((row for row in packet_candidates
+                            if row["segment_id"] == ref["segment_id"]), None)
+            if matched is None or matched.get("descriptor") != json.loads(str(segment.get("content") or "{}")):
+                raise ValueError("candidate descriptor differs from shared source-linked label")
     native_batch = load(HERE / "decisionx_native_batch.py", "dx_advice_full_sources")
     full, full_hashes = native_batch.full_sources(paths[1:])
     if (full_hashes != hashes[1:] or
@@ -288,14 +298,17 @@ def verify_inputs(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapp
     historical_rendered = "".join(native.render(full[(ref["provider"], ref["conversation_id"])],
                                                include_fidelity=bool(ref.get("source_fidelity"))) + "\n\n"
                                   for ref in packet["source_refs"])
-    return hashes, source_refs, candidate_refs, source_refs_sha, digest(historical_rendered.encode("utf-8"))
+    episode_sha = (digest(native.evidence_cards(packet_candidates, full).encode("utf-8"))
+                   if packet.get("evidence_contract_version") == 2 else None)
+    return (hashes, source_refs, candidate_refs, source_refs_sha,
+            digest(historical_rendered.encode("utf-8")), episode_sha)
 
 
 def verify_output(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapping[str, Any],
                   evidence: list, input_hashes: list[str],
                   source_refs: list[dict], candidate_refs: list[dict], source_refs_sha: str,
                   historical_rendered_sha: str,
-                  *, stage_remote=None) -> tuple[dict, bytes, str]:
+                  *, source_episodes_sha: str | None = None, stage_remote=None) -> tuple[dict, bytes, str]:
     artifacts = [row for row in evidence if isinstance(row, Mapping)
                  and row.get("kind") == "chatgpt_sandbox_artifact"]
     if len(artifacts) != 1:
@@ -348,6 +361,8 @@ def verify_output(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapp
         or native.get("source_refs_sha256") != source_refs_sha
         or native.get("historical_rendered_sha256") != historical_rendered_sha):
         raise InvalidProviderDeliverable("provider-native compute proof does not bind uploaded inputs")
+    if source_episodes_sha is not None and native.get("source_episodes_sha256") != source_episodes_sha:
+        raise InvalidProviderDeliverable("provider-native source episodes differ from complete conversations")
     if (not isinstance(advice, Mapping) or advice.get("schema") != "cognilode.decisionx.successor_advice.v1"
         or advice.get("target_job_id") != (job.get("decisionx") or {}).get("target_job_id")
         or not isinstance(advice.get("proposed_next_instruction"), str)
@@ -453,10 +468,11 @@ def handoff(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, job_id: str,
             install: Callable[[Path, Mapping[str, Any]], Mapping[str, Any]] | None = None) -> dict:
     gates = verify_shared_gates(post)
     job, central = provider_job(post, job_id)
-    hashes, sources, candidates, source_refs_sha, historical_sha = verify_inputs(
+    hashes, sources, candidates, source_refs_sha, historical_sha, episodes_sha = verify_inputs(
         post, job, central, stage_remote=stage_remote)
     advice, plan, artifact_sha = verify_output(post, job, job["effect_evidence"], hashes,
                                                 sources, candidates, source_refs_sha, historical_sha,
+                                                source_episodes_sha=episodes_sha,
                                                 stage_remote=stage_remote)
     if install is None:
         root = load(HERE / "cognilode-root-plan-handoff", "dx_advice_taskflow_installer")

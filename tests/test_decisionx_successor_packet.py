@@ -105,6 +105,56 @@ def test_candidate_stock_gate_precedes_use_of_any_retrieved_hit():
     assert len(calls) == 1 and calls[0]["operation"] == "decisionx_candidates"
 
 
+def test_candidate_fusion_favors_user_intent_over_repeated_assistant_boilerplate():
+    target = {"events": [
+        {"role": "user", "content": "Restore biological cadence for chatmode rotor"},
+        {"role": "assistant", "content": "Boilerplate progress progress progress progress progress"}]}
+    rows = {
+        "biological": [("intent", "old-intent")],
+        "cadence": [("intent", "old-intent")],
+        "chatmode": [("intent", "old-intent")],
+        "progress": [("assistant", "old-boilerplate")],
+        "boilerplate": [("assistant", "old-boilerplate")],
+    }
+    def post(body):
+        result = []
+        for _, cid in rows.get(body["q"], []):
+            result.append({"segment_id": cid, "rank": -100 if cid == "old-boilerplate" else -1,
+                           "source_key": "openai-codex:" + cid,
+                           "content": json.dumps({"source_locator": {
+                               "provider": "openai-codex", "conversation_id": cid}}),
+                           "metadata": {"drive_verified_source": True}})
+        return {"ok": True, "ready": True, "distinct_sources": 600, "candidates": result}
+    _, selected = upstream.candidates(post, target)
+    assert [item["conversation_id"] for item in selected] == ["old-intent"]
+    assert set(selected[0]["query_evidence"]["intent"]) == {
+        "biological", "cadence", "chatmode"}
+
+
+def test_native_episode_cards_are_exact_ordered_source_turns():
+    source = {"events": [
+        {"id": "u1", "role": "user", "content": "Build the transport"},
+        {"id": "a1", "role": "assistant", "content": "Transport deployed"},
+        {"id": "u2", "role": "user", "content": "It failed under load; investigate"},
+        {"id": "a2", "role": "assistant", "content": "Found connection leak"},
+        {"id": "u3", "role": "user", "content": "The leak is fixed now"}]}
+    descriptor = {"source_locator": {
+        "provider": "openai-codex", "conversation_id": "older",
+        "intent_turn_id": "u1", "action_turn_ids": ["a1"],
+        "evaluation_turn_id": "u2", "following_action_turn_ids": ["a2"],
+        "following_evaluation_turn_id": "u3"}}
+    candidate = {"provider": "openai-codex", "conversation_id": "older",
+                 "segment_id": "dx-older", "descriptor": descriptor}
+    cards = native.evidence_cards([candidate], {("openai-codex", "older"): source})
+    assert cards.index("Build the transport") < cards.index("Transport deployed")
+    assert cards.index("It failed under load") < cards.index("Found connection leak")
+    assert cards.index("Found connection leak") < cards.index("The leak is fixed")
+    broken = json.loads(json.dumps(candidate))
+    broken["descriptor"]["source_locator"]["evaluation_turn_id"] = "u3"
+    with pytest.raises(ValueError, match="absent or out of order"):
+        native.evidence_cards([broken], {("openai-codex", "older"): source})
+
+
 def test_unattended_tick_does_not_enqueue_or_scan_stock_below_descriptor_gate(tmp_path):
     root_state = tmp_path / "root-cycle.json"
     root_state.write_text(json.dumps({"phase": "complete", "root_job_id": "root-job"}))
@@ -175,16 +225,22 @@ def test_native_reconstructs_exact_full_sources_and_rejects_tampering(tmp_path):
     source = {"provider": "openai-codex", "conversation_id": "source-c",
               "prompt_sha256": "3" * 64, "response_sha256": "4" * 64,
               "capture": {"source_sha256": "5" * 64},
-              "events": [{"role": "user", "content": "Original request"},
-                         {"role": "assistant", "content": "Historical action"}]}
+              "events": [{"id": "u1", "role": "user", "content": "Original request"},
+                         {"id": "a1", "role": "assistant", "content": "Historical action"},
+                         {"id": "u2", "role": "user", "content": "Historical outcome was good"}]}
     ref = {"provider": source["provider"], "conversation_id": source["conversation_id"],
            "prompt_sha256": source["prompt_sha256"], "response_sha256": source["response_sha256"],
            "source_sha256": "5" * 64, "source_at_utc": "2024-01-01T00:00:00+00:00"}
     candidate = {k: ref[k] for k in ("provider", "conversation_id", "prompt_sha256",
                                      "response_sha256", "source_sha256")}
-    candidate.update(segment_id="s1", descriptor={"i": "Original request", "a": "Historical action"})
+    candidate.update(segment_id="s1", descriptor={"i": "Original request", "a": "Historical action",
+        "source_locator": {"provider": "openai-codex", "conversation_id": "source-c",
+                           "intent_turn_id": "u1", "action_turn_ids": ["a1"],
+                           "evaluation_turn_id": "u2", "following_action_turn_ids": [],
+                           "following_evaluation_turn_id": None}})
     target_raw, candidate_raw, source_raw = map(native.canonical, (target, [candidate], source))
     manifest = {"schema": "cognilode.decisionx.successor_input.v1",
+                "evidence_contract_version": 2,
                 "target_job_id": target_id, "target_provider": target["provider"],
                 "target_conversation_id": target["conversation_id"],
                 "target_prompt_sha256": target["prompt_sha256"],
@@ -210,6 +266,8 @@ def test_native_reconstructs_exact_full_sources_and_rejects_tampering(tmp_path):
     assert result["input_zip_sha256s"] == [digest(first.read_bytes()), digest(historical.read_bytes())]
     assert result["source_refs_sha256"] == manifest["source_refs_sha256"]
     assert "Historical action" in (tmp_path / "work/HISTORICAL_RENDERED.md").read_text()
+    assert "Historical outcome was good" in (tmp_path / "work/SOURCE_EPISODES.md").read_text()
+    assert result["source_episodes_sha256"] == digest((tmp_path / "work/SOURCE_EPISODES.md").read_bytes())
     proposed = "Use the independently verified historical conversation to choose the next research step and measure its external effect."
     (tmp_path / "work/DECISIONX_ADVICE.json").write_text(json.dumps({
         "schema": "cognilode.decisionx.successor_advice.v1",

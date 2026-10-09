@@ -90,6 +90,7 @@ def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, 
     """Count distinct, independently reread, complete Drive-backed conversations."""
     cursor = "0"
     seen: set[tuple[str, str]] = set()
+    verified_logical_ids: set[tuple[str, str]] = set()
     verified: list[datetime] = []
     source_refs: list[dict[str, str]] = []
     pages = 0
@@ -108,12 +109,21 @@ def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, 
             if not all(key) or key in seen:
                 continue
             seen.add(key)
+            # Privacy-export-format rows can carry the same original ChatGPT
+            # conversation ID as a later live ChatGPT readback. They remain
+            # separate provenance records, but represent one logical source
+            # for the 500-conversation gate.
+            logical_key = (("chatgpt", key[1]) if key[0] in
+                           {"chatgpt.com", "chatgpt-export-format"} else key)
+            if logical_key in verified_logical_ids:
+                continue
             capture = index.get("capture") or {}
             if capture.get("drive_verified") is not True or capture.get("source_response_complete") is not True:
                 continue
             source_read = post({"operation": "read", "provider": key[0], "conversation_id": key[1]})
             stamp = _complete_source(index, source_read)
             if stamp is not None:
+                verified_logical_ids.add(logical_key)
                 verified.append(stamp)
                 source = source_read["conversation"]
                 source_refs.append({"provider": key[0], "conversation_id": key[1],

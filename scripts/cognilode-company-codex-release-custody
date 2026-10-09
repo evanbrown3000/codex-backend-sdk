@@ -66,6 +66,15 @@ def marker(state: str) -> None:
 
 
 def remote_manifest() -> dict | None:
+    # Missing releases are normal before the first capable builder publishes.
+    # A GET for an absent private key can be reported as AccessDenied by S3;
+    # HEAD distinguishes that state without blocking the recurring builder.
+    probe = aws("head-object", "--bucket", BUCKET, "--key", PREFIX + "/manifest.json",
+                "--output", "json")
+    if probe.returncode:
+        if "404" in probe.stderr or "Not Found" in probe.stderr or "NoSuchKey" in probe.stderr:
+            return None
+        raise RuntimeError("private Codex release manifest lookup failed")
     with tempfile.TemporaryDirectory(prefix="codex-release-manifest-") as temporary:
         path = Path(temporary) / "manifest.json"
         result = aws("get-object", "--bucket", BUCKET, "--key", PREFIX + "/manifest.json",

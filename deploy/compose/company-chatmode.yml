@@ -152,6 +152,7 @@ services:
       HOME: /home/worker
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
       COGNILODE_SOURCE_SYNC_INTERVAL: "300"
+      COGNILODE_SOURCE_SYNC_GENERATION: full-history-v1
       COGNILODE_CODEX_SOURCE_COMMIT: 852bc2da4479b353913c894a9ecfc65a9d8764c8
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro

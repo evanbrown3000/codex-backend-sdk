@@ -173,6 +173,7 @@ def main() -> int:
     subprocess.run(command, env=env, check=True, timeout=180)
     memory_source = runtime / "shared/source/current/memory-stock-canonical"
     memory_minimum = "b4a4878d47abe142b75ab23c74f9b6dc1ce67cba"
+    memory_shallow_accepted = "cdbe5de43b57e23e10f915185e533b02a4aba636"
     source_deadline = time.monotonic() + 360
     while True:
         script_ready = (memory_source / "deploy/conversation-vacuum/company_memory_cutover.py").is_file()
@@ -180,6 +181,13 @@ def main() -> int:
                                    memory_minimum, "HEAD"], stdout=subprocess.DEVNULL,
                                   stderr=subprocess.DEVNULL, check=False).returncode == 0
                     if script_ready else False)
+        if script_ready and not ancestry:
+            # Source-sync's old depth-one checkout can hide an otherwise known
+            # main-branch ancestor. Accept the exact indexed-memory release;
+            # source-sync repairs the shallow ancestry for later revisions.
+            head = subprocess.run(["git", "-C", str(memory_source), "rev-parse", "HEAD"],
+                                  capture_output=True, text=True, check=False).stdout.strip()
+            ancestry = head == memory_shallow_accepted
         if script_ready and ancestry:
             break
         print(f"memory source pending: path={memory_source} script={script_ready} lease_revision={ancestry}",

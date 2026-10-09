@@ -21,6 +21,7 @@ REPOS = ("modified-codex-runtime", "taskflow-orchestration-history",
          "codex-backend-sdk", "cognilode-codex")
 SECRET = "/cognilode/agent-credentials/github/owner"
 CODEX_PIN = os.environ.get("COGNILODE_CODEX_SOURCE_COMMIT", "")
+MEMORY_MINIMUM = "b4a4878d47abe142b75ab23c74f9b6dc1ce67cba"
 
 
 def credential() -> str:
@@ -56,7 +57,7 @@ def install(repo: str, sha: str, token: str) -> None:
                         "COGNILODE_GITHUB_TOKEN": token})
             url = f"https://github.com/evanbrown3000/{repo}.git"
             for command in (["git", "clone", "--filter=blob:none", "--no-checkout", url, str(stage)],
-                            ["git", "-C", str(stage), "fetch", "--depth", "1", "origin", sha],
+                            ["git", "-C", str(stage), "fetch", "origin", sha],
                             ["git", "-C", str(stage), "checkout", "--detach", sha]):
                 result = subprocess.run(command, env=env, capture_output=True, timeout=600)
                 if result.returncode:
@@ -76,6 +77,31 @@ def install(repo: str, sha: str, token: str) -> None:
     temporary_link.replace(link)
 
 
+def ensure_memory_ancestry(checkout: Path, token: str) -> None:
+    """Repair old shallow checkouts before the memory writer's cutover guard."""
+    def ready() -> bool:
+        return subprocess.run(["git", "-C", str(checkout), "merge-base", "--is-ancestor",
+                               MEMORY_MINIMUM, "HEAD"], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, check=False).returncode == 0
+    if ready():
+        return
+    with tempfile.TemporaryDirectory(prefix="memory-history-", dir=ROOT) as temporary:
+        askpass = Path(temporary) / "askpass"
+        askpass.write_text("#!/bin/sh\ncase \"$1\" in *Username*) printf 'x-access-token' ;; *Password*) printf '%s' \"$COGNILODE_GITHUB_TOKEN\" ;; esac\n")
+        askpass.chmod(0o700)
+        env = {**os.environ, "GIT_ASKPASS": str(askpass), "GIT_TERMINAL_PROMPT": "0",
+               "COGNILODE_GITHUB_TOKEN": token}
+        for _ in range(8):
+            result = subprocess.run(["git", "-C", str(checkout), "fetch", "--deepen", "64",
+                                     "origin", "main"], env=env, capture_output=True, timeout=600)
+            if result.returncode == 0 and ready():
+                print("memory source ancestry repaired", flush=True)
+                return
+            if result.returncode:
+                raise RuntimeError("memory source ancestry fetch unavailable")
+    raise RuntimeError("memory source ancestry remains unavailable")
+
+
 def sync_once() -> None:
     token = credential()
     for repo in REPOS:
@@ -88,8 +114,12 @@ def sync_once() -> None:
             current = ROOT / "current" / repo
             if (current.is_symlink() and current.resolve().name == sha and
                     (current.resolve() / ".git").is_dir()):
+                if repo == "memory-stock-canonical":
+                    ensure_memory_ancestry(current.resolve(), token)
                 continue
             install(repo, sha, token)
+            if repo == "memory-stock-canonical":
+                ensure_memory_ancestry((ROOT / "current" / repo).resolve(), token)
             print(f"source ready {repo} {sha[:12]}", flush=True)
         except Exception as error:
             print(f"source pending {repo}: {type(error).__name__}: {error}", flush=True)

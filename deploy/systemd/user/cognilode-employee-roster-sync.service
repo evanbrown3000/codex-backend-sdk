@@ -5,8 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+ExecStartPre=-%h/Projects/codex-backend-sdk/scripts/cognilode-slack-role-collector
 ExecStart=%h/Projects/codex-backend-sdk/scripts/cognilode-employee-roster-sync
+TimeoutStartSec=10min
 NoNewPrivileges=true
 CPUQuota=25%
 MemoryMax=256M
-

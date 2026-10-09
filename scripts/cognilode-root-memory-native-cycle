@@ -617,12 +617,16 @@ def retire_local_source_staging(job: Mapping[str, Any], *, output_root: Path) ->
 
 
 def _retry_due(state_path: Path, state: dict[str, Any], reason: str) -> bool:
-    """Delay definitive bad deliverable successors to avoid Chat-mode prompt spam."""
+    """Keep a bad native deliverable in the live repair loop without flooding it."""
     now = datetime.now(timezone.utc).timestamp()
     due = float(state.get("retry_after_epoch") or 0)
     if not due:
-        state["retry_after_epoch"] = now + 21600
+        state["retry_after_epoch"] = now + 900
         state["retry_reason"] = reason[:240]
+        _atomic_state(state_path, state)
+        return False
+    if due - now > 900:
+        state["retry_after_epoch"] = now + 900
         _atomic_state(state_path, state)
         return False
     return now >= due

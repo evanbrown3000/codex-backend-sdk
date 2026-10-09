@@ -57,6 +57,69 @@ def _load_script(path: Path, name: str) -> Any:
     return module
 
 
+def _codex_d1_messages(raw: list[dict], capture: dict) -> tuple[list[dict], str]:
+    """Rejoin D1 transport segments into source messages and check source hashes."""
+    try:
+        ordered = sorted(raw, key=lambda row: int(row["index"]))
+        if [int(row["index"]) for row in ordered] != list(range(len(ordered))):
+            raise ValueError("Codex D1 segment indices differ")
+        if capture.get("source_event_count") != len(ordered):
+            raise ValueError("Codex D1 source segment count differs")
+        manifest = capture.get("source_message_segments")
+        if manifest is None:
+            # Older admissions predate the manifest. Equal source-message and
+            # segment counts prove there was no split, but cannot recheck the
+            # original message-order hash independently.
+            if (capture.get("source_full_message_count") != len(ordered)
+                or capture.get("source_has_segmented_messages") is True):
+                raise ValueError("Codex D1 legacy admission may contain unjoined segments")
+            return ([{"id": str(row.get("id") or index), "role": str(row["role"]),
+                      "text": str(row["content"]), "occurred_at_utc": row.get("created_at") or ""}
+                     for index, row in enumerate(ordered)],
+                    "admitted_codex_rollout_legacy_unsplit_drive_unverified")
+        if not isinstance(manifest, list) or len(manifest) != capture.get("source_full_message_count"):
+            raise ValueError("Codex D1 source message manifest differs")
+        messages = []
+        digest_rows = []
+        cursor = 0
+        for item in manifest:
+            if not isinstance(item, dict) or item.get("segment_start") != cursor:
+                raise ValueError("Codex D1 source segment order differs")
+            count = item.get("segment_count")
+            ids = item.get("segment_source_ids")
+            role = item.get("role")
+            if (not isinstance(count, int) or count < 1 or not isinstance(ids, list)
+                or len(ids) != count or any(not isinstance(value, str) or not value for value in ids)
+                or role not in {"user", "assistant"}):
+                raise ValueError("Codex D1 source segment manifest is malformed")
+            pieces = ordered[cursor:cursor + count]
+            if len(pieces) != count or any(row.get("role") != role or not isinstance(row.get("content"), str)
+                                           for row in pieces):
+                raise ValueError("Codex D1 segment role or coverage differs")
+            text = "".join(row["content"] for row in pieces)
+            full_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            if full_sha != item.get("content_sha256"):
+                raise ValueError("Codex D1 reconstructed message SHA-256 differs")
+            ordinal = item.get("source_ordinal")
+            if not isinstance(ordinal, int):
+                raise ValueError("Codex D1 source ordinal is malformed")
+            messages.append({"id": ids[0], "role": role, "text": text,
+                             "occurred_at_utc": pieces[0].get("created_at") or "",
+                             "source_segment_ids": ids})
+            digest_rows.append([role, text, full_sha, ordinal])
+            cursor += count
+        if cursor != len(ordered) or capture.get("source_has_segmented_messages") != any(
+                item["segment_count"] > 1 for item in manifest):
+            raise ValueError("Codex D1 segment coverage differs")
+        full_digest = hashlib.sha256(json.dumps(digest_rows, ensure_ascii=False,
+            sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        if full_digest != capture.get("source_full_messages_sha256"):
+            raise ValueError("Codex D1 original message-order SHA-256 differs")
+        return messages, "admitted_codex_rollout_messages_drive_unverified"
+    except (KeyError, TypeError) as exc:
+        raise ValueError("Codex D1 source message manifest is incomplete") from exc
+
+
 def read_conversation(provider: str, conversation_id: str, *, drive_reader: Path = DEFAULT_DRIVE_READER,
                       historical_reader: Path = DEFAULT_HISTORICAL_READER) -> dict:
     if provider in {"historical-s3", "historical_s3"}:
@@ -113,12 +176,15 @@ def read_conversation(provider: str, conversation_id: str, *, drive_reader: Path
                          or capture.get("drive_verified") is not False
                          or not capture.get("source_sha256")):
             raise ValueError("Codex D1 interim source receipt is incomplete")
+        coverage = "admitted_events_only"
+        if d1_codex:
+            events, coverage = _codex_d1_messages(raw, capture)
         return {"provider": hosted_provider, "conversation_id": conversation_id,
                 "source": ("hosted_d1_codex_interim" if d1_codex else "hosted_conversation_service"),
                 "events": events,
                 # This store certifies the admitted prompt/response hashes, but
                 # does not claim that every provider-side branch was ingested.
-                "coverage": ("admitted_codex_rollout_events_drive_unverified" if d1_codex else "admitted_events_only"),
+                "coverage": coverage,
                 "all_provider_events_known": (False if d1_codex else all(row.get("source_content_complete") is True
                                                  for row in raw)),
                 **({"source_receipt": capture} if d1_codex else {})}

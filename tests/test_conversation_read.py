@@ -67,14 +67,15 @@ class ConversationDeltaTests(unittest.TestCase):
     def test_codex_d1_interim_is_explicitly_drive_unverified(self):
         conversation = {"provider": "openai-codex", "conversation_id": "c-1",
                         "capture": {"source_kind": "codex_rollout", "source_sha256": "a" * 64,
-                                    "drive_verified": False},
-                        "events": [{"id": "event-1", "role": "user", "content": "work"}]}
+                                    "drive_verified": False, "source_event_count": 1,
+                                    "source_full_message_count": 1},
+                        "events": [{"id": "event-1", "index": 0, "role": "user", "content": "work"}]}
         sender = mock.Mock()
         sender.operator_memory_post.return_value = {"conversation": conversation}
         with mock.patch.object(reader, "_load_script", return_value=sender):
             result = reader.read_conversation("codex-d1", "c-1")
             self.assertEqual(result["provider"], "openai-codex")
-            self.assertEqual(result["coverage"], "admitted_codex_rollout_events_drive_unverified")
+            self.assertEqual(result["coverage"], "admitted_codex_rollout_legacy_unsplit_drive_unverified")
             self.assertFalse(result["all_provider_events_known"])
             self.assertEqual(result["source_receipt"]["source_sha256"], "a" * 64)
             self.assertEqual(sender.operator_memory_post.call_args.args[0]["provider"], "openai-codex")
@@ -82,6 +83,40 @@ class ConversationDeltaTests(unittest.TestCase):
                 **conversation["capture"], "drive_verified": True}}}
             with self.assertRaisesRegex(ValueError, "source receipt"):
                 reader.read_conversation("codex-d1", "c-1")
+
+    def test_codex_d1_reassembles_and_verifies_long_original_message(self):
+        response = "😀" * 110_000
+        original = [("user", "request", 7), ("assistant", response, 8)]
+        digest_rows = [[role, text, hashlib.sha256(text.encode()).hexdigest(), ordinal]
+                       for role, text, ordinal in original]
+        full_digest = hashlib.sha256(json.dumps(digest_rows, ensure_ascii=False,
+            sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        capture = {"source_kind": "codex_rollout", "source_sha256": "b" * 64,
+                   "drive_verified": False, "source_event_count": 3,
+                   "source_full_message_count": 2,
+                   "source_full_messages_sha256": full_digest,
+                   "source_has_segmented_messages": True,
+                   "source_message_segments": [
+                       {"role": "user", "source_ordinal": 7, "content_sha256": digest_rows[0][2],
+                        "segment_start": 0, "segment_count": 1, "segment_source_ids": ["u"]},
+                       {"role": "assistant", "source_ordinal": 8, "content_sha256": digest_rows[1][2],
+                        "segment_start": 1, "segment_count": 2, "segment_source_ids": ["a1", "a2"]},
+                   ]}
+        events = [{"index": 0, "role": "user", "content": "request"},
+                  {"index": 1, "role": "assistant", "content": response[:80_000]},
+                  {"index": 2, "role": "assistant", "content": response[80_000:]}]
+        sender = mock.Mock()
+        sender.operator_memory_post.return_value = {"conversation": {
+            "provider": "openai-codex", "conversation_id": "c-long", "capture": capture, "events": events}}
+        with mock.patch.object(reader, "_load_script", return_value=sender):
+            result = reader.read_conversation("codex-d1", "c-long")
+            self.assertEqual(len(result["events"]), 2)
+            self.assertEqual(result["events"][1]["text"], response)
+            self.assertEqual(result["events"][1]["source_segment_ids"], ["a1", "a2"])
+            self.assertEqual(result["coverage"], "admitted_codex_rollout_messages_drive_unverified")
+            events[2] = {**events[2], "content": response[80_000:-1] + "x"}
+            with self.assertRaisesRegex(ValueError, "message SHA-256 differs"):
+                reader.read_conversation("codex-d1", "c-long")
 
     def test_deployed_reader_can_import_sibling_and_checkout_package(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -23,6 +23,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 import uuid
 import threading
@@ -265,9 +266,13 @@ def _stage_remote_attachment(url: str, expected: str, *, max_bytes: int = MAX_AT
         raise ValueError("remote attachment requires exact SHA-256")
     expected = expected.lower()
     if url.startswith("s3://"):
-        bucket = os.environ.get("COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET", "").strip()
+        buckets = {value.strip() for value in (
+            os.environ.get("COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET", "") + "," +
+            os.environ.get("COGNILODE_TASKFLOW_ATTACHMENT_S3_READ_BUCKETS", "")
+        ).split(",") if value.strip()}
+        bucket = url[5:].split("/", 1)[0]
         key = f"taskflow-artifacts/sha256/{expected}.zip"
-        if not bucket or url != f"s3://{bucket}/{key}":
+        if bucket not in buckets or url != f"s3://{bucket}/{key}":
             raise ValueError("S3 attachment is outside the configured private launchpad")
         aws = os.environ.get("COGNILODE_AWS_CLI") or shutil.which("aws")
         if not aws:
@@ -345,14 +350,22 @@ def attachment_paths(job: dict) -> list[Path]:
                 if fallback not in mirrors:
                     mirrors.append(fallback)
             staged = None
+            failures = []
             for url in mirrors:
                 try:
                     staged = _stage_remote_attachment(str(url), expected)
                     break
-                except Exception:
-                    continue
+                except Exception as exc:
+                    if isinstance(exc, subprocess.CalledProcessError):
+                        reason = f"aws_exit_{exc.returncode}"
+                    elif isinstance(exc, urllib.error.HTTPError):
+                        reason = f"http_{exc.code}"
+                    else:
+                        reason = type(exc).__name__ + ":" + str(exc)[:100]
+                    failures.append(reason)
             if staged is None:
-                raise ValueError("attachment not readable or stageable on selected network device")
+                raise ValueError("attachment not readable or stageable on selected network device: " +
+                                 "; ".join(failures[:4]))
             path = staged
         if path.stat().st_size > MAX_ATTACHMENT_BYTES:
             raise ValueError("attachment exceeds 20 MiB")

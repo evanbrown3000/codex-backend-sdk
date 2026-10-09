@@ -127,6 +127,7 @@ services:
       COGNILODE_B4PT0R_SDK_ROOT: /runtime/source/current/codex-backend-sdk
       COGNILODE_UNIFIED_PROMPTER: /runtime/source/current/modified-codex-runtime/src/modified_codex/unified_bridge.py
       COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
+      COGNILODE_TASKFLOW_ATTACHMENT_S3_READ_BUCKETS: cognilode-conversation-visibility-362928919715-us-west-2
       COGNILODE_AWS_CLI: /usr/bin/aws
       PATH: /usr/bin:/usr/local/bin:/bin
     volumes:

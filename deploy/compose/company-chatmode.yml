@@ -153,7 +153,7 @@ services:
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
       COGNILODE_SOURCE_SYNC_INTERVAL: "300"
       COGNILODE_SOURCE_SYNC_GENERATION: full-history-v1
-      COGNILODE_CODEX_SOURCE_COMMIT: 852bc2da4479b353913c894a9ecfc65a9d8764c8
+      COGNILODE_CODEX_SOURCE_COMMIT: cbc142bab43c51ba1e0e8837894c24696a068d72
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
@@ -168,7 +168,7 @@ services:
     entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-company-codex-release-custody]
     environment:
       HOME: /root
-      COGNILODE_CODEX_SOURCE_COMMIT: 852bc2da4479b353913c894a9ecfc65a9d8764c8
+      COGNILODE_CODEX_SOURCE_COMMIT: cbc142bab43c51ba1e0e8837894c24696a068d72
       COGNILODE_CODEX_INSTALL_ROOT: /codex
       COGNILODE_CODEX_RELEASE_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
       COGNILODE_AWS_CLI: /usr/bin/aws
@@ -187,7 +187,7 @@ services:
     environment:
       HOME: /root
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
-      COGNILODE_CODEX_SOURCE_COMMIT: 852bc2da4479b353913c894a9ecfc65a9d8764c8
+      COGNILODE_CODEX_SOURCE_COMMIT: cbc142bab43c51ba1e0e8837894c24696a068d72
       COGNILODE_CODEX_INSTALL_ROOT: /codex
       COGNILODE_BUILDER_GENERATION: git-safe-directory-v1
       COGNILODE_CODEX_MIN_BUILD_MEMORY_BYTES: "5368709120"

@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""Restricted company Drive custody for immutable central Codex rollouts."""
+import hashlib
+import json
+import os
+import re
+import shutil
+import socketserver
+import subprocess
+import tempfile
+from pathlib import Path
+
+SOCKET = Path(os.environ.get('COGNILODE_ROLLOUT_SOCKET', '/runtime/drive-rollouts/rollouts.sock'))
+CONFIG = Path(os.environ.get('COGNILODE_MEMORY_DRIVE_CONFIG', '/memory-auth/rclone.conf'))
+REMOTE = os.environ.get('COGNILODE_DRIVE_ROLLOUT_REMOTE',
+    'gdrive:Cognilode/UnifiedConversationStock/v1/codex-rollouts').rstrip('/')
+NAME = re.compile(r'^codex-rollout-[0-9a-fA-F-]{16,80}-[0-9a-f]{64}\.json$')
+
+
+def command(config, *args):
+    binary = shutil.which(os.environ.get('COGNILODE_RCLONE_BIN', 'rclone'))
+    if not binary or not CONFIG.is_file():
+        raise RuntimeError('company Drive custody unavailable')
+    return subprocess.run([binary, '--config', str(config), *args],
+        capture_output=True, timeout=180, check=False)
+
+
+def handle(payload):
+    operation = str(payload.get('operation') or '')
+    name = str(payload.get('name') or '')
+    if not NAME.fullmatch(name):
+        raise ValueError('invalid content-addressed rollout name')
+    value = payload.get('value')
+    revision = name[-69:-5]
+    if operation == 'write':
+        if not isinstance(value, dict):
+            raise ValueError('rollout value must be an object')
+        encoded = json.dumps(value, separators=(',', ':'), ensure_ascii=False).encode()
+        if len(encoded) > 28_000_000 or value.get('revision') != revision or \
+            not isinstance(value.get('rollout_jsonl'), str) or \
+            hashlib.sha256(value['rollout_jsonl'].encode()).hexdigest() != revision:
+            raise ValueError('rollout content does not match immutable filename')
+    elif operation == 'read':
+        encoded = None
+    else:
+        raise ValueError('unsupported rollout operation')
+    remote = f'{REMOTE}/{name}'
+    # Rclone may refresh OAuth. Keep each temporary config private; source custody
+    # stays read-only and never appears in the generic shell container.
+    with tempfile.TemporaryDirectory(prefix='company-drive-rollout-') as directory:
+        config = Path(directory) / 'rclone.conf'
+        config.write_bytes(CONFIG.read_bytes())
+        config.chmod(0o600)
+        if operation == 'write':
+            prior = command(config, 'cat', remote)
+            if prior.returncode:
+                with tempfile.NamedTemporaryFile(dir=directory, prefix='rollout-', delete=False) as source:
+                    source.write(encoded)
+                    source.flush()
+                    os.fsync(source.fileno())
+                    source_path = source.name
+                saved = command(config, 'copyto', source_path, remote)
+                if saved.returncode:
+                    raise RuntimeError('company Drive rollout write unavailable')
+        read = command(config, 'cat', remote)
+        if read.returncode:
+            raise RuntimeError('company Drive rollout readback unavailable')
+        stored = json.loads(read.stdout)
+        if not isinstance(stored, dict) or stored.get('revision') != revision or \
+            not isinstance(stored.get('rollout_jsonl'), str) or \
+            hashlib.sha256(stored['rollout_jsonl'].encode()).hexdigest() != revision:
+            raise RuntimeError('company Drive rollout revision mismatch')
+        if operation == 'write':
+            return {'ok': True, 'file_ref': f'rclone-drive:{name}',
+                'sha256': hashlib.sha256(read.stdout).hexdigest(), 'bytes': len(read.stdout)}
+        return {'ok': True, 'value': stored, 'sha256': hashlib.sha256(read.stdout).hexdigest()}
+
+
+class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+
+class Handler(socketserver.BaseRequestHandler):
+    def handle(self):
+        try:
+            prefix = self.read_exact(4)
+            length = int.from_bytes(prefix, 'big')
+            if length < 1 or length > 30_000_000:
+                raise ValueError('invalid request length')
+            result = handle(json.loads(self.read_exact(length)))
+        except Exception as error:
+            result = {'ok': False, 'error': type(error).__name__}
+        encoded = json.dumps(result, separators=(',', ':')).encode()
+        self.request.sendall(len(encoded).to_bytes(4, 'big') + encoded)
+
+    def read_exact(self, length):
+        chunks = []
+        while length:
+            chunk = self.request.recv(min(length, 1048576))
+            if not chunk:
+                raise ConnectionError('incomplete request')
+            chunks.append(chunk)
+            length -= len(chunk)
+        return b''.join(chunks)
+
+
+if __name__ == '__main__':
+    SOCKET.parent.mkdir(parents=True, exist_ok=True)
+    SOCKET.unlink(missing_ok=True)
+    with Server(str(SOCKET), Handler) as server:
+        os.chmod(SOCKET, 0o600)
+        server.serve_forever()

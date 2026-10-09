@@ -1,5 +1,5 @@
 """Container-only relay node for company source, Codex, and artifact operations."""
-import hashlib, hmac, json, os, re, secrets, shutil, signal, socket, subprocess, tempfile, threading, time, urllib.request
+import hashlib, hmac, json, os, re, secrets, signal, socket, subprocess, threading, time, urllib.request
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -25,62 +25,32 @@ PROVIDER_ROOT=Path(os.environ.get('COGNILODE_PROVIDER_OPERATION_ROOT','/runtime/
 PROVIDER_SOCKET=os.environ.get('COGNILODE_PROVIDER_SOCKET','/runtime/provider.sock')
 PROVIDER_LIVE=set(); PROVIDER_LOCK=threading.RLock()
 PROVIDER_ID=re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,40}$')
-ROLLOUT_NAME=re.compile(r'^codex-rollout-[0-9a-fA-F-]{16,80}-[0-9a-f]{64}\.json$')
-DRIVE_CONFIG=Path(os.environ.get('COGNILODE_MEMORY_DRIVE_CONFIG','/memory-auth/rclone.conf'))
-DRIVE_REMOTE=os.environ.get('COGNILODE_DRIVE_ROLLOUT_REMOTE',
-    'gdrive:Cognilode/UnifiedConversationStock/v1/codex-rollouts').rstrip('/')
-
-def rollout_name(payload):
-    name=str(payload.get('name') or '')
-    if not ROLLOUT_NAME.fullmatch(name): raise ValueError('invalid content-addressed rollout name')
-    return name
-
-def drive_command(config,*args,input_bytes=None):
-    binary=shutil.which(os.environ.get('COGNILODE_RCLONE_BIN','rclone'))
-    if not binary or not DRIVE_CONFIG.is_file(): raise RuntimeError('company Drive custody unavailable')
-    return subprocess.run([binary,'--config',str(config),*args],input=input_bytes,
-        capture_output=True,timeout=180,check=False)
+ROLLOUT_SOCKET=os.environ.get('COGNILODE_ROLLOUT_SOCKET','/runtime/drive-rollouts/rollouts.sock')
 
 def drive_rollout(payload):
-    """Use only the company OAuth profile; never access the personal host."""
-    operation=str(payload.get('operation') or '')
-    name=rollout_name(payload)
-    value=payload.get('value')
-    if operation=='write':
-        if not isinstance(value,dict): raise ValueError('rollout value must be an object')
-        encoded=json.dumps(value,separators=(',',':'),ensure_ascii=False).encode()
-        if len(encoded)>28_000_000: raise ValueError('rollout exceeds central size limit')
-        if str(value.get('revision') or '')!=name[-69:-5] or not isinstance(value.get('rollout_jsonl'),str) or \
-            hashlib.sha256(value['rollout_jsonl'].encode()).hexdigest()!=value['revision']:
-            raise ValueError('rollout content does not match immutable filename')
-    elif operation=='read': encoded=None
-    else: raise ValueError('unsupported rollout operation')
-    remote=f'{DRIVE_REMOTE}/{name}'
-    # Rclone may refresh its OAuth token. Give each call a private writable copy
-    # of the company credential without modifying the read-only custody mount.
-    with tempfile.TemporaryDirectory(prefix='company-drive-rollout-') as directory:
-        config=Path(directory)/'rclone.conf'
-        config.write_bytes(DRIVE_CONFIG.read_bytes()); config.chmod(0o600)
-        if operation=='write':
-            prior=drive_command(config,'cat',remote)
-            if prior.returncode:
-                with tempfile.NamedTemporaryFile(dir=directory,prefix='rollout-',delete=False) as source:
-                    source.write(encoded); source.flush(); os.fsync(source.fileno())
-                    source_path=source.name
-                saved=drive_command(config,'copyto',source_path,remote)
-                if saved.returncode: raise RuntimeError('company Drive rollout write unavailable')
-        read=drive_command(config,'cat',remote)
-        if read.returncode: raise RuntimeError('company Drive rollout readback unavailable')
-        stored=json.loads(read.stdout)
-        revision=name[-69:-5]
-        if not isinstance(stored,dict) or stored.get('revision')!=revision or \
-            not isinstance(stored.get('rollout_jsonl'),str) or \
-            hashlib.sha256(stored['rollout_jsonl'].encode()).hexdigest()!=revision:
-            raise RuntimeError('company Drive rollout revision mismatch')
-        if operation=='write':
-            return {'ok':True,'file_ref':f'rclone-drive:{name}',
-                'sha256':hashlib.sha256(read.stdout).hexdigest(),'bytes':len(read.stdout)}
-        return {'ok':True,'value':stored,'sha256':hashlib.sha256(read.stdout).hexdigest()}
+    """Forward only the restricted rollout operation to local credential custody."""
+    request=json.dumps(payload,separators=(',',':')).encode()
+    if len(request)>30_000_000: raise ValueError('rollout exceeds central size limit')
+    with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as connection:
+        connection.settimeout(190)
+        connection.connect(ROLLOUT_SOCKET)
+        connection.sendall(len(request).to_bytes(4,'big')+request)
+        prefix=b''
+        while len(prefix)<4:
+            chunk=connection.recv(4-len(prefix))
+            if not chunk: raise RuntimeError('incomplete Drive custody response')
+            prefix+=chunk
+        length=int.from_bytes(prefix,'big')
+        if length<1 or length>30_000_000: raise RuntimeError('invalid Drive custody response')
+        chunks=[]
+        while length:
+            chunk=connection.recv(min(length,1048576))
+            if not chunk: raise RuntimeError('incomplete Drive custody response')
+            chunks.append(chunk); length-=len(chunk)
+    response=json.loads(b''.join(chunks))
+    if not isinstance(response,dict) or not response.get('ok'):
+        raise RuntimeError('Drive custody operation unavailable')
+    return response
 
 def provider_file(operation_id):
     if not PROVIDER_ID.fullmatch(str(operation_id)): raise ValueError('invalid provider operation id')

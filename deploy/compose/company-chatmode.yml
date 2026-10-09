@@ -305,6 +305,26 @@ services:
       - codex-builder
       - credential-sync
 
+  drive-rollouts:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /runtime
+    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-drive-rollouts]
+    environment:
+      COGNILODE_ROLLOUT_SOCKET: /runtime/drive-rollouts/rollouts.sock
+      COGNILODE_RCLONE_BIN: /memory-tools/runtime/tools/rclone
+      COGNILODE_MEMORY_DRIVE_CONFIG: /memory-auth/rclone.conf
+      COGNILODE_DRIVE_ROLLOUT_REMOTE: gdrive:Cognilode/UnifiedConversationStock/v1/codex-rollouts
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - memory_data:/memory-tools:ro
+      - memory_drive_auth:/memory-auth:ro
+    depends_on:
+      - credential-sync
+
   remote-shell:
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
@@ -324,9 +344,7 @@ services:
       COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
       COGNILODE_RELAY_NODE_FILE: /relay/node.json
       COGNILODE_HEARTBEAT_STATUS: /runtime/relay/heartbeat.json
-      COGNILODE_RCLONE_BIN: /memory-tools/runtime/tools/rclone
-      COGNILODE_MEMORY_DRIVE_CONFIG: /memory-auth/rclone.conf
-      COGNILODE_DRIVE_ROLLOUT_REMOTE: gdrive:Cognilode/UnifiedConversationStock/v1/codex-rollouts
+      COGNILODE_ROLLOUT_SOCKET: /runtime/drive-rollouts/rollouts.sock
       COGNILODE_CENTRAL_ROLLOUT_HELPER: /codex/bin/central-rollouts
       COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
       PATH: /codex/bin:/usr/bin:/usr/local/bin:/bin
@@ -337,12 +355,12 @@ services:
       - company_codex_release:/codex:ro
       - company_operator:/home/worker/.config/cognilode:ro
       - memory_data:/memory-tools:ro
-      - memory_drive_auth:/memory-auth:ro
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
     depends_on:
       - credential-sync
       - source-sync
       - codex-builder
+      - drive-rollouts
 
   codex-exec-server:
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}

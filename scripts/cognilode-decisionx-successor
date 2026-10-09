@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 from typing import Any, Callable, Mapping
 import zipfile
@@ -25,6 +26,7 @@ BRIDGE = HERE / "cognilode-root-plan-handoff"
 SENDER = HERE / "cognilode-b4pt0r-chatmode"
 NATIVE = HERE / "decisionx_successor_native.py"
 DEFAULT_ROOT = Path.home() / ".local/share/cognilode/decisionx-successor"
+HANDOFF_STATE = DEFAULT_ROOT / "handoff"
 ROOT_STATE = Path.home() / ".local/share/cognilode/root-memory-native-cycle/cycle-state.json"
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 IGNORE = {"about", "after", "again", "agent", "agents", "could", "every", "first", "from",
@@ -332,20 +334,48 @@ def enqueue(post: Callable[[dict], Mapping], built: dict, *, priority: int = 45,
             "input_zip_sha256s": [row["sha256"] for row in built["packets"]]}
 
 
+def installed_handoff(job_id: str, *, state_root: Path = HANDOFF_STATE) -> bool:
+    """Only release an older target after its verified plan is still active."""
+    marker = state_root / (sha(job_id.encode())[:24] + ".json")
+    if not marker.is_file():
+        return False
+    try:
+        row = json.loads(marker.read_text())
+        plan = Path(str(row["plan_path"]))
+        unit = str(row["unit"])
+        if (row.get("job_id") != job_id or not unit.endswith(".service")
+            or not plan.is_file() or sha(plan.read_bytes()) != row.get("plan_sha256")):
+            return False
+        active = subprocess.run(["systemctl", "--user", "is-active", unit],
+                                text=True, capture_output=True, timeout=20, check=False)
+        return active.returncode == 0 and active.stdout.strip() == "active"
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return False
+
+
 def tick(post: Callable[[dict], Mapping], *, output_root: Path = DEFAULT_ROOT,
-         root_state_path: Path = ROOT_STATE) -> dict:
-    if not root_state_path.is_file():
-        return {"ok": False, "reason": "root_cycle_not_yet_available"}
-    root = json.loads(root_state_path.read_text())
-    if root.get("phase") != "complete" or not root.get("root_job_id"):
-        return {"ok": False, "reason": "root_cycle_not_yet_complete"}
-    target_id = str(root["root_job_id"])
+         root_state_path: Path = ROOT_STATE,
+         installed: Callable[[str], bool] = installed_handoff) -> dict:
+    root = json.loads(root_state_path.read_text()) if root_state_path.is_file() else {}
+    latest_target = str(root.get("root_job_id") or "") if root.get("phase") == "complete" else ""
     existing = output_root / "state.json"
+    state = json.loads(existing.read_text()) if existing.is_file() else {}
+    # The root may advance while an earlier successor is queued, rejected, or
+    # still awaiting TaskFlow installation. Keep reconciling that exact job,
+    # including fenced retries, before selecting the newer root target.
+    prior_target = str(state.get("target_job_id") or "")
+    prior_job = str(state.get("job_id") or "")
+    if prior_target and prior_job and not installed(prior_job):
+        target_id = prior_target
+    elif latest_target:
+        target_id = latest_target
+    else:
+        return {"ok": False, "reason": "root_cycle_not_yet_complete"
+                if root_state_path.is_file() else "root_cycle_not_yet_available"}
     attempt = 0
     predecessor_job_id = None
     predecessor_failure = ""
-    if existing.is_file():
-        state = json.loads(existing.read_text())
+    if state:
         if state.get("target_job_id") == target_id and state.get("job_id"):
             prior_id = str(state["job_id"])
             prior_result = post({"operation": "get_job", "job_id": prior_id})

@@ -629,10 +629,37 @@ def test_only_explicit_preaccept_rejections_can_reenter_rhythm(monkeypatch, tmp_
     assert calls[0]['operation'] == 'requeue_definitive_chatmode_rejection'
     assert calls[0]['user_message_id'] == module.stable_user_message_id(job['id'])
     assert json.loads(module.job_state_path(job['id']).read_text())['state'] == 'queued_after_definitive_rejection'
-    for status, state in [(502, 'ambiguous_acceptance'), (200, 'provider_accepted_unfinished')]:
+    for status, state in [(404, 'provider_rejected'), (502, 'ambiguous_acceptance'),
+                          (504, 'ambiguous_acceptance'), (200, 'provider_accepted_unfinished')]:
         assert not module.requeue_definitive_rejection(job, {**rejected, 'http_status': status, 'state': state})
     assert not module.requeue_definitive_rejection(job, {**rejected, 'conversation_id': 'provider-conversation'})
     assert len(calls) == 1
+
+
+def test_ambiguous_gateway_retry_after_defers_exact_id_reconciliation(monkeypatch, tmp_path):
+    module = worker()
+    module.ROOT = tmp_path / 'worker'
+    module.sender.DEFAULT_OUTPUT_ROOT = tmp_path / 'sender'
+    module.sender.DEFAULT_OUTPUT_ROOT.mkdir()
+    prompt = 'Do the attached work in Chat mode.'
+    job = {'id': 'gateway-504', 'prompt': prompt,
+           'prompt_sha256': hashlib.sha256(prompt.encode()).hexdigest(),
+           'claimed_by': 'rhythm:evanpc', 'lease_token': 'fenced', 'lease_generation': 1}
+    monkeypatch.setattr(module, 'attachment_paths', lambda _job: [])
+    monkeypatch.setattr(module, 'result_for_job', lambda _id: None)
+    monkeypatch.setattr(module.sender, 'operator_memory_post', lambda body: {'ok': True})
+    monkeypatch.setattr(module, 'complete_from_result', lambda *_args: False)
+    monkeypatch.setattr(module.subprocess, 'run', lambda *a, **k: SimpleNamespace(
+        returncode=2, stdout=json.dumps({'ok': False, 'state': 'ambiguous_acceptance',
+           'http_status': 504, 'retry_after_seconds': 120,
+           'recovery': {'ambiguous_replay_suppressed': True}})))
+
+    started = time.time()
+    module.execute(job)
+
+    state = json.loads(module.job_state_path(job['id']).read_text())
+    assert state['state'] == 'reconcile_required'
+    assert state['reconcile_next_at'] >= started + 120
 
 
 def test_later_slot_preserves_rejected_receipt_and_unblocks_sender(monkeypatch, tmp_path):

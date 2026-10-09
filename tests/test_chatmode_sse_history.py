@@ -188,6 +188,40 @@ def test_provider_model_receipt_survives_central_readback(tmp_path, monkeypatch)
             result_id='record-1', prompt='Do it', result=result, attachments=[])
 
 
+def test_hydrated_model_receipt_survives_partial_sse_central_readback(tmp_path, monkeypatch):
+    module = sender()
+    monkeypatch.setattr(module, 'archive_provider_sse', lambda path, sha: {
+        'uri': 's3://private/source/' + sha, 'sha256': sha,
+        'bytes': path.stat().st_size, 'readback_verified': True})
+    raw = b'data: {"conversation_id":"provider-c1"}\n\n'
+    path = tmp_path / 'partial.sse'
+    path.write_bytes(raw)
+    hydrated = {'id': 'assistant-1', 'author': {'role': 'assistant'},
+                'metadata': {'resolved_model_slug': 'gpt-5-6-thinking',
+                             'thinking_effort': 'xhigh'},
+                'content': {'parts': ['Done']}}
+    observed = module._hydrated_model_receipt(hydrated)
+    state = {}
+
+    def post(body):
+        if body['operation'] == 'record_conversation':
+            state['receipt'] = body['read_receipt']
+            state['events'] = body['events']
+            return {'ok': True, 'stored': True, 'conversation_id': 'provider-c1'}
+        return {'ok': True, 'conversation': {'prompt': 'Do it', 'response_excerpt': 'Done',
+            'read_receipt': state['receipt'], 'events': state['events']}}
+
+    monkeypatch.setattr(module, 'operator_memory_post', post)
+    result = {'conversation_id': 'provider-c1', 'terminal_assistant_text': 'Done',
+              'terminal_assistant_message_id': 'assistant-1',
+              'provider_model_receipt': observed,
+              'raw_sha256': hashlib.sha256(raw).hexdigest(), 'raw_path_host': str(path)}
+    outcome = module.admit_central_conversation(
+        result_id='record-1', prompt='Do it', result=result, attachments=[])
+    assert outcome['provider_model_receipt'] == observed
+    assert state['receipt']['provider_model_receipt'] == observed
+
+
 def test_readback_rejects_missing_provider_tool_result(tmp_path, monkeypatch):
     module = sender()
     monkeypatch.setattr(module, 'archive_provider_sse', lambda path, sha: {

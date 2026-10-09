@@ -138,16 +138,25 @@ def collect(receipt_path: Path, *, allow_provider_read: bool = False) -> dict:
             prior_terminal_at = prior_result.get("completed_at")
             prior_central = prior_result.get("central_conversation_store") if isinstance(prior_result.get("central_conversation_store"), dict) else {}
             source = prior_central.get("central_raw_sse_source") if isinstance(prior_central.get("central_raw_sse_source"), dict) else {}
-            if (prior_central.get("central_tool_event_count") is None or source.get("readback_verified") is not True) and prior_result.get("raw_sha256") and existing.get("prompt") and prior_result.get("terminal_assistant_text"):
+            files = [item for item in (prior_result.get("downloaded_files") or []) if isinstance(item, dict)]
+            central_files = [item for item in (prior_central.get("central_artifacts") or []) if isinstance(item, dict)]
+            needs_artifact_custody = bool(files) and {str(x.get("sha256")) for x in files} != {
+                str(x.get("sha256")) for x in central_files if x.get("readback_verified") is True}
+            needs_tool_history = bool(prior_result.get("raw_sha256")) and (
+                prior_central.get("central_tool_event_count") is None or
+                source.get("readback_verified") is not True)
+            if ((needs_tool_history or needs_artifact_custody) and existing.get("prompt") and
+                    prior_result.get("terminal_assistant_text") and
+                    (not needs_artifact_custody or all(artifact_matches(item) for item in files))):
                 source_path = str(prior_result.get("raw_path_host") or receipt.get("raw_path_host") or receipt.get("raw_path") or receipt_path.with_name(stem + ".sse"))
-                if Path(source_path).is_file():
+                if not prior_result.get("raw_sha256") or Path(source_path).is_file():
                     upgraded_result = {**prior_result, "raw_path_host": source_path}
                     central = sender.admit_central_conversation(result_id=stem, prompt=str(existing["prompt"]),
                         result=upgraded_result, attachments=list(receipt.get("attached_context_files") or []))
                     upgraded_result["central_conversation_store"] = central
                     atomic_json(collected_path, {**existing, "result": upgraded_result})
                     if not allow_provider_read or has_collected_zip(upgraded_result):
-                        return {"state": "central_tool_history_upgraded", "receipt": str(receipt_path),
+                        return {"state": "central_custody_upgraded", "receipt": str(receipt_path),
                                 "tool_events": central.get("central_tool_event_count", 0), "central_ok": central.get("ok") is True}
             if not allow_provider_read or has_collected_zip(prior_result):
                 return {"state": "already_collected", "receipt": str(receipt_path)}
@@ -166,7 +175,7 @@ def collect(receipt_path: Path, *, allow_provider_read: bool = False) -> dict:
             artifact_matches(item) for item in files))
         if local_prompt and local_text and local_result.get("assistant_terminal") and files_complete and (has_collected_zip(local_result) or not allow_provider_read):
             central = local_result.get("central_conversation_store") or {}
-            if not central.get("ok"):
+            if not central.get("ok") or (files and not central.get("central_artifacts")):
                 central = sender.admit_central_conversation(
                     result_id=stem, prompt=local_prompt, result=local_result,
                     attachments=list(receipt.get("attached_context_files") or []),

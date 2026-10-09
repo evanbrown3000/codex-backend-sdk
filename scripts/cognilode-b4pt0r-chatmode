@@ -598,14 +598,42 @@ def upload_attachments(session, auth: dict, paths: list[str], *, device_id: str)
     return attachments, request_count
 
 
-def hydrate_conversation(session, auth: dict, conversation_id: str, *, device_id: str) -> dict:
+def hydrate_conversation(session, auth: dict, conversation_id: str, *, device_id: str, timeout: int = 120) -> dict:
     value = request_json_any(
-        session.get(BASE + "conversation/" + conversation_id, headers=app_headers(auth, device_id=device_id), timeout=120),
+        session.get(BASE + "conversation/" + conversation_id, headers=app_headers(auth, device_id=device_id), timeout=timeout),
         "GET /backend-api/conversation/" + conversation_id,
     )
     if not isinstance(value, dict):
         raise CapabilityError("provider_bad_response", "conversation hydration returned non-object JSON")
     return value
+
+
+def list_recent_conversations(session, auth: dict, *, device_id: str, offset: int = 0, limit: int = 12) -> dict:
+    """GET-only recent index, matching the historical Chat rotor transport."""
+    value = request_json_any(
+        session.get(BASE + f"conversations?offset={offset}&limit={limit}&order=updated",
+                    headers=app_headers(auth, device_id=device_id), timeout=30),
+        "GET /backend-api/conversations",
+    )
+    if not isinstance(value, dict) or not isinstance(value.get("items"), list):
+        raise CapabilityError("provider_bad_response", "recent conversation index changed shape")
+    return value
+
+
+def atomic_json(path: Path, value: dict) -> None:
+    """Keep a recoverable receipt when an actuator dies during a write."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def _refresh_auth_context(args: argparse.Namespace, session):
@@ -747,6 +775,102 @@ def _reconcile_turn(
     }, session, auth, device_id
 
 
+def discover_recent_turn(
+    args: argparse.Namespace,
+    session,
+    auth: dict,
+    device_id: str,
+    *,
+    user_message_id: str,
+    known_conversation_id: str = "",
+    offset: int = 0,
+    limit: int = 12,
+) -> tuple[dict, object, dict, str]:
+    """Find an accepted ambiguous turn with GETs only and an exact user ID.
+
+    One invocation scans at most one recent-index page. The worker persists the
+    next offset and retries later; a 429 returns Retry-After without sleeping
+    inside its provider actuator. No negative scan authorizes another POST.
+    """
+    events: list[dict] = []
+    offset = max(0, min(int(offset), 48))
+    limit = max(1, min(int(limit), 12))
+
+    def read(operation: str, call):
+        nonlocal session, auth, device_id
+        for attempt in (1, 2):
+            try:
+                return call(), None
+            except ProviderHTTPError as exc:
+                event = {"phase": operation, "attempt": attempt, "http_status": exc.status}
+                if exc.status in (401, 403) and attempt == 1:
+                    try:
+                        session, auth, device_id = _refresh_auth_context(args, session)
+                    except Exception as refresh_error:
+                        event["refresh_error"] = type(refresh_error).__name__
+                    else:
+                        event["action"] = "refresh_auth_then_retry_get"
+                        events.append(event)
+                        continue
+                if exc.status == 429:
+                    delay = _retry_after_seconds(exc.headers)
+                    event.update({"action": "defer_get", "retry_after_seconds": delay})
+                    events.append(event)
+                    return None, {"state": "rate_limited", "retry_after_seconds": delay}
+                event["action"] = "retry_get_later"
+                events.append(event)
+                return None, {"state": "read_transient", "retry_after_seconds": 60}
+            except Exception as exc:
+                events.append({"phase": operation, "attempt": attempt,
+                               "error": f"{type(exc).__name__}: {str(exc)[:200]}"})
+                return None, {"state": "read_transient", "retry_after_seconds": 60}
+        return None, {"state": "read_transient", "retry_after_seconds": 60}
+
+    if known_conversation_id:
+        candidates = [{"id": known_conversation_id}]
+        next_offset = offset
+    else:
+        index, issue = read("recent_index", lambda: list_recent_conversations(
+            session, auth, device_id=device_id, offset=offset, limit=limit))
+        if issue:
+            return {**issue, "events": events, "next_offset": offset}, session, auth, device_id
+        candidates = index["items"]
+        next_offset = 0 if len(candidates) < limit or offset + len(candidates) >= 48 else offset + len(candidates)
+        events.append({"phase": "recent_index", "offset": offset, "candidates": len(candidates)})
+
+    for item in candidates:
+        conversation_id = str(item.get("id") or "") if isinstance(item, dict) else ""
+        if not conversation_id:
+            continue
+        conversation, issue = read("hydrate", lambda cid=conversation_id: hydrate_conversation(
+            session, auth, cid, device_id=device_id, timeout=12))
+        if issue:
+            if issue["state"] == "rate_limited":
+                return {**issue, "events": events, "next_offset": offset}, session, auth, device_id
+            continue
+        messages = branch_messages(conversation)
+        if not any(str(message.get("id") or "") == user_message_id for message in messages):
+            continue
+        events.append({"phase": "hydrate", "conversation_id": conversation_id,
+                       "outcome": "exact_user_message_found"})
+        try:
+            terminal = terminal_response_from_hydration(conversation, user_message_id)
+        except CapabilityError as exc:
+            if exc.code != "provider_turn_unfinished":
+                events.append({"phase": "hydrate", "outcome": exc.code})
+            return {"state": "provider_accepted_unfinished", "accepted": True,
+                    "terminal": False, "conversation_id": conversation_id,
+                    "events": events, "next_offset": offset}, session, auth, device_id
+        return {"state": "provider_accepted_recovered", "accepted": True,
+                "terminal": True, "conversation_id": conversation_id,
+                "assistant_message_id": terminal.get("assistant_message_id"),
+                "assistant_text": terminal.get("assistant_text") or "",
+                "events": events, "next_offset": offset}, session, auth, device_id
+    return {"state": "not_found_in_recent", "accepted": False, "terminal": False,
+            "events": events, "next_offset": next_offset,
+            "retry_after_seconds": 300}, session, auth, device_id
+
+
 def branch_messages(conversation: dict) -> list[dict]:
     mapping = conversation.get("mapping") if isinstance(conversation.get("mapping"), dict) else {}
     current = conversation.get("current_node")
@@ -789,11 +913,12 @@ def terminal_response_from_hydration(conversation: dict, user_message_id: str) -
     if user_index is None:
         raise CapabilityError("provider_reconciliation_failed", "hydrated branch omitted the submitted user message")
     terminal = None
-    for message in reversed(messages[user_index + 1:]):
+    for message in messages[user_index + 1:]:
         author = message.get("author") if isinstance(message.get("author"), dict) else {}
-        if author.get("role") == "assistant" and (message.get("end_turn") is True or message.get("status") == "finished_successfully"):
+        if author.get("role") == "user":
+            break  # A later user turn cannot complete this exact submission.
+        if author.get("role") == "assistant" and message.get("end_turn") is True:
             terminal = message
-            break
     if not terminal:
         raise CapabilityError("provider_turn_unfinished", "hydrated branch has no terminal assistant message after submitted user message")
     return {
@@ -1719,6 +1844,118 @@ def admit_record(args: argparse.Namespace) -> dict:
     }
 
 
+def reconcile_queue_job(args: argparse.Namespace) -> dict:
+    """Recover an ambiguous queued send by exact user ID, without another send."""
+    queue_job_id = str(args.queue_job_id or "").strip()
+    if not queue_job_id:
+        raise CapabilityError("queue_job_id_missing", "reconcile requires --queue-job-id")
+    prompt = Path(args.prompt_file).read_text(encoding="utf-8") if args.prompt_file else ""
+    if not prompt.strip():
+        raise CapabilityError("prompt_missing", "reconcile requires the original queue prompt")
+    output_root = Path(args.output_dir).expanduser() if args.output_dir else DEFAULT_OUTPUT_ROOT
+    output_root.mkdir(parents=True, exist_ok=True)
+    result_id = "b4pt0r-chatmode-job-" + hashlib.sha256(queue_job_id.encode()).hexdigest()[:24]
+    receipt_path = output_root / f"{result_id}.sse.receipt.json"
+    record_path = output_root / f"{result_id}.json"
+    old_receipt = json.loads(receipt_path.read_text(encoding="utf-8")) if receipt_path.is_file() else {}
+    old_record = json.loads(record_path.read_text(encoding="utf-8")) if record_path.is_file() else {}
+    expected_user_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "cognilode-chatmode-queue:" + queue_job_id))
+    for value in (old_receipt, old_record.get("result") or {}):
+        if value.get("queue_job_id") not in (None, queue_job_id) or value.get("user_message_id") not in (None, expected_user_id):
+            raise CapabilityError("recovery_identity_mismatch", "local receipt belongs to another queued send")
+    if old_record.get("prompt") not in (None, prompt):
+        raise CapabilityError("recovery_prompt_mismatch", "local record prompt differs from queue prompt")
+    if args.auth_source == "codex":
+        session, auth, device_id = codex_identity()
+        transport = "codex_desktop_auth_http"
+    else:
+        session = new_session(Path(args.chrome_profile).expanduser(), args.impersonate)
+        auth = identity(session)
+        device_id = device_id_from_cookies(session)
+        transport = "host_chrome_state_http"
+    try:
+        previous = old_record.get("result") if isinstance(old_record.get("result"), dict) else old_receipt
+        known = str(previous.get("conversation_id") or old_receipt.get("conversation_id") or "")
+        found, session, auth, device_id = discover_recent_turn(
+            args, session, auth, device_id, user_message_id=expected_user_id,
+            known_conversation_id=known, offset=args.scan_offset, limit=args.max_candidates,
+        )
+        if known and not found.get("accepted") and found.get("state") not in {"rate_limited", "read_transient"}:
+            fallback, session, auth, device_id = discover_recent_turn(
+                args, session, auth, device_id, user_message_id=expected_user_id,
+                offset=args.scan_offset, limit=args.max_candidates,
+            )
+            fallback["events"] = list(found.get("events") or []) + list(fallback.get("events") or [])
+            found = fallback
+        if not found.get("accepted"):
+            return {"ok": False, "state": found["state"], "queue_job_id": queue_job_id,
+                    "user_message_id": expected_user_id,
+                    "retry_after_seconds": found.get("retry_after_seconds", 300),
+                    "next_offset": found.get("next_offset", args.scan_offset),
+                    "recovery": {"ambiguous_replay_suppressed": True,
+                                 "method": "exact_user_message_recent_get", "events": found.get("events") or []}}
+        result = dict(previous)
+        conversation_id = str(found["conversation_id"])
+        terminal = bool(found.get("terminal"))
+        result.update({
+            "queue_job_id": queue_job_id, "user_message_id": expected_user_id,
+            "transport": transport, "conversation_id": conversation_id,
+            "provider_acceptance_observed": True, "ok": True,
+            "state": "provider_accepted_recovered" if terminal else "provider_accepted_unfinished",
+            "assistant_terminal": terminal,
+            "terminal_assistant_text": found.get("assistant_text") or "",
+            "terminal_assistant_message_id": found.get("assistant_message_id"),
+            "completed_at": time.time(),
+            "recovery": {"ambiguous_replay_suppressed": True,
+                         "method": "exact_user_message_recent_get", "events": found.get("events") or []},
+        })
+        result["provider_summary"] = {
+            **dict(result.get("provider_summary") or {}),
+            "provider_acceptance_observed": True, "conversation_id": conversation_id,
+            "assistant_end_turn": terminal,
+            "terminal_assistant_text": result["terminal_assistant_text"],
+            "terminal_assistant_message_id": result["terminal_assistant_message_id"],
+        }
+        attachments = result.get("attached_context_files") if isinstance(result.get("attached_context_files"), list) else []
+        if terminal and result["terminal_assistant_text"] and result["terminal_assistant_message_id"]:
+            try:
+                artifact_dir = output_root / f"{result_id}.files"
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                result["downloaded_files"] = download_interpreter_artifacts(
+                    session, auth, conversation_id=conversation_id,
+                    assistant_message_id=str(result["terminal_assistant_message_id"]),
+                    assistant_text=result["terminal_assistant_text"],
+                    output_dir=artifact_dir, device_id=device_id,
+                )
+            except Exception as exc:
+                result["artifact_download_error"] = f"{type(exc).__name__}: {str(exc)[:400]}"
+            try:
+                result["central_conversation_store"] = admit_central_conversation(
+                    result_id=result_id, prompt=prompt, result=result, attachments=attachments)
+            except Exception as exc:
+                result["central_conversation_store"] = {"ok": False,
+                    "error": f"{type(exc).__name__}: {str(exc)[:400]}"}
+        record = dict(old_record)
+        record.update({"schema": "cognilode.b4pt0r_chatmode_result.v1",
+                       "record_id": result_id, "prompt": prompt,
+                       "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+                       "result": result,
+                       "semantic_acceptance_pending": not bool(result.get("assistant_terminal"))})
+        if result.get("assistant_terminal") and (result.get("central_conversation_store") or {}).get("central_readback_verified"):
+            record["admitted_terminal_response"] = True
+        atomic_json(receipt_path, result)
+        atomic_json(record_path, record)
+        for directory in (TASKFLOW_DIR, MEMORY_QUEUE_DIR):
+            directory.mkdir(parents=True, exist_ok=True)
+            atomic_json(directory / f"{result_id}.json", record)
+        return result
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
     ensure_runtime()
     parser = argparse.ArgumentParser(prog="cognilode-b4pt0r-chatmode")
@@ -1741,12 +1978,20 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--timeout", type=int, default=900)
     admit = sub.add_parser("admit-record")
     admit.add_argument("--record", required=True)
+    reconcile = sub.add_parser("reconcile")
+    reconcile.add_argument("--queue-job-id", required=True)
+    reconcile.add_argument("--prompt-file", required=True)
+    reconcile.add_argument("--output-dir")
+    reconcile.add_argument("--scan-offset", type=int, default=0)
+    reconcile.add_argument("--max-candidates", type=int, default=12)
     args = parser.parse_args(argv)
     try:
         if args.command == "health":
             value = health(args)
         elif args.command == "admit-record":
             value = admit_record(args)
+        elif args.command == "reconcile":
+            value = reconcile_queue_job(args)
         else:
             value = send(args)
         print(json.dumps(value, ensure_ascii=False, sort_keys=True))

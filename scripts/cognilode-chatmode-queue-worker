@@ -494,16 +494,23 @@ def validated_result(value: dict) -> tuple[str, list[dict]] | None:
 
 def result_for_job(job_id: str) -> dict | None:
     stem = job_stem(job_id)
+    candidates = []
     for suffix in (".collected.json", ".json"):
         path = sender.DEFAULT_OUTPUT_ROOT / (stem + suffix)
         if not path.is_file():
             continue
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
-            return value.get("result", value) if isinstance(value, dict) else None
+            if isinstance(value, dict):
+                candidates.append((path.stat().st_mtime, value.get("result", value)))
         except (OSError, ValueError):
             continue
-    return None
+    if not candidates:
+        return None
+    for _, value in sorted(candidates, reverse=True):
+        if isinstance(value, dict) and validated_result(value):
+            return value
+    return max(candidates, key=lambda row: row[0])[1]
 
 
 def fence(job: dict) -> dict:
@@ -538,13 +545,15 @@ def complete_from_result(job: dict, value: dict) -> bool:
     return False
 
 
-def recover(job: dict) -> None:
+def recover(job: dict, device_id: str = DEVICE_ID) -> None:
     value = result_for_job(job["id"])
     if value and definitive_rejection(value):
         requeue_definitive_rejection(job, value)
         return
     if value and complete_from_result(job, value):
         return
+    if value and validated_result(value):
+        return  # Central/effect admission can retry without more provider reads.
     receipt = sender.DEFAULT_OUTPUT_ROOT / (job_stem(job["id"]) + ".sse.receipt.json")
     if not receipt.exists():
         try:
@@ -564,7 +573,56 @@ def recover(job: dict) -> None:
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180, check=False)
         value = result_for_job(job["id"])
         if value:
-            complete_from_result(job, value)
+            if complete_from_result(job, value) or validated_result(value):
+                return
+    reconcile_ambiguous(job, device_id)
+
+
+def reconcile_ambiguous(job: dict, device_id: str = DEVICE_ID) -> None:
+    """Bounded GET-only lookup after an uncertain provider mutation."""
+    job_id = str(job["id"])
+    prompt = str(job.get("prompt") or "")
+    if not prompt.strip() or hashlib.sha256(prompt.encode()).hexdigest() != job.get("prompt_sha256"):
+        event("reconcile_prompt_mismatch", job_id=job_id)
+        return
+    state_path = job_state_path(job_id)
+    try:
+        prior = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
+    except (OSError, ValueError):
+        prior = {}
+    now = time.time()
+    if now < float(prior.get("reconcile_next_at") or 0):
+        return
+    prompt_path = ROOT / "prompts" / (hashlib.sha256(job_id.encode()).hexdigest() + ".txt")
+    prompt_path.parent.mkdir(parents=True, exist_ok=True)
+    prompt_path.write_text(prompt, encoding="utf-8")
+    command = [sys.executable, str(SENDER_PATH), "reconcile", "--queue-job-id", job_id,
+               "--prompt-file", str(prompt_path), "--scan-offset",
+               str(int(prior.get("reconcile_scan_offset") or 0))]
+    try:
+        response = subprocess.run(command, text=True, capture_output=True, timeout=240, check=False)
+        recovered = json.loads(response.stdout) if response.stdout.strip().startswith("{") else {}
+    except Exception as exc:
+        response = None
+        recovered = {"state": "read_transport_failure", "error": f"{type(exc).__name__}: {str(exc)[:180]}"}
+    delay = max(60, min(900, float(recovered.get("retry_after_seconds") or 300)))
+    atomic_json(state_path, {**prior, "state": "effect_pending_read_recovery", "job_id": job_id,
+                             "reconcile_next_at": now + delay,
+                             "reconcile_retry_after_seconds": recovered.get("retry_after_seconds"),
+                             "reconcile_scan_offset": int(recovered.get("next_offset") or 0),
+                             "reconcile_provider_state": recovered.get("state"),
+                             "reconcile_sender_exit": None if response is None else response.returncode})
+    if recovered.get("provider_acceptance_observed") and recovered.get("conversation_id"):
+        try:
+            record_send_receipt(job, recovered, device_id)
+        except Exception as exc:
+            event("recovered_send_receipt_record_failed", job_id=job_id,
+                  error=type(exc).__name__ + ":" + str(exc)[:180])
+        if complete_from_result(job, recovered):
+            return
+    event("ambiguous_get_reconcile", job_id=job_id, state=recovered.get("state"),
+          conversation_id=recovered.get("conversation_id"),
+          next_scan_offset=int(recovered.get("next_offset") or 0), retry_after_seconds=delay)
 
 
 def stable_user_message_id(job_id: str) -> str:
@@ -659,11 +717,11 @@ def execute(job: dict, device_id: str = DEVICE_ID) -> None:
         if rejected:
             archive_prior_rejected_attempt(job, rejected)
         if not rejected and result_for_job(job_id):
-            recover(job)
+            recover(job, device_id)
             return
         receipt = sender.DEFAULT_OUTPUT_ROOT / (job_stem(job_id) + ".sse.receipt.json")
         if receipt.exists() and not rejected:
-            recover(job)
+            recover(job, device_id)
             return
         prompt = str(job.get("prompt") or "")
         if not prompt.strip() or hashlib.sha256(prompt.encode()).hexdigest() != job.get("prompt_sha256"):
@@ -752,7 +810,7 @@ def poll(device_id: str, active_ids: set[str], lock: threading.Lock) -> None:
             with lock:
                 if str(job.get("id") or "") in active_ids:
                     continue
-            recover(job)
+            recover(job, device_id)
     for job in claimed:
         if not selected_for_device(job, device_id):
             continue

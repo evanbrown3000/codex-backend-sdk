@@ -232,7 +232,7 @@ def test_alternate_device_recovers_pending_turn_when_original_heartbeat_stales(m
         raise AssertionError(body)
     monkeypatch.setattr(module.sender, 'operator_memory_post', post)
     recovered = []
-    monkeypatch.setattr(module, 'recover', lambda item: recovered.append(item['id']))
+    monkeypatch.setattr(module, 'recover', lambda item, device: recovered.append((item['id'], device)))
     import threading
     module.poll('laptop', set(), threading.Lock())
-    assert recovered == ['pending-1']
+    assert recovered == [('pending-1', 'laptop')]

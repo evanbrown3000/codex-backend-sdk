@@ -18,6 +18,9 @@ ADVICE_HANDOFF = HERE / "cognilode-decisionx-advice-handoff"
 STATE_ROOT = Path(os.environ.get("COGNILODE_ROOT_MEMORY_STATE_ROOT",
     str(Path.home() / ".local/share/cognilode/root-memory-native-cycle"))).expanduser()
 INTERVAL = max(300, min(86400, int(os.environ.get("COGNILODE_ROOT_MEMORY_INTERVAL_SECONDS", "3600"))))
+# A verified 500-source D1 readback plus physical ZIP publication can exceed
+# half an hour as the shared stock grows. Each stage still has its own cap.
+ROOT_TICK_TIMEOUT = max(1800, min(5400, int(os.environ.get("COGNILODE_ROOT_TICK_TIMEOUT_SECONDS", "2700"))))
 STOP = False
 
 
@@ -52,7 +55,7 @@ def main():
             started = time.monotonic()
             try:
                 done = subprocess.run([sys.executable, str(CYCLE), "--tick", "--output-root", str(STATE_ROOT)],
-                                      text=True, capture_output=True, timeout=1800, check=False)
+                                      text=True, capture_output=True, timeout=ROOT_TICK_TIMEOUT, check=False)
                 _event({"state": "tick", "returncode": done.returncode,
                         "stdout_tail": done.stdout[-4000:], "stderr_tail": done.stderr[-2000:]})
             except subprocess.TimeoutExpired:

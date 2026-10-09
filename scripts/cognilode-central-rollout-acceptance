@@ -31,7 +31,10 @@ def stock(body: dict) -> dict:
     token = TOKEN_FILE.read_text().strip().removeprefix('Bearer ').strip()
     request = Request(BASE + '/api/operator/conversation-stock',
         data=json.dumps(body, separators=(',', ':')).encode(), method='POST',
-        headers={'authorization': 'Bearer ' + token, 'content-type': 'application/json'})
+        headers={'authorization': 'Bearer ' + token, 'content-type': 'application/json',
+            'accept': 'application/json,text/plain,*/*',
+            'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36',
+            'origin': BASE, 'referer': BASE + '/'})
     with urlopen(request, timeout=60) as response:
         value = json.load(response)
     if not value.get('ok'):

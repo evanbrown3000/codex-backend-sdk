@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import base64
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 import fcntl
 import hashlib
 import importlib.machinery
@@ -385,6 +386,45 @@ def advance_shared_remembered_cursor(reader_id: str, provider: str, conversation
     return result
 
 
+def inbox_updates(provider: str = "", *, cursor: str = "", since_at: str = "",
+                  limit: int = 100) -> dict:
+    """List changed shared conversations without paging an unstable offset."""
+    sender = _load_script(HERE / "cognilode-b4pt0r-chatmode", "cognilode_conversation_inbox")
+    result = sender.operator_memory_post({"operation": "list_conversation_updates",
+                                          "provider": provider, "cursor": cursor,
+                                          "since_at": since_at, "limit": limit})
+    rows = result.get("rows")
+    next_cursor = result.get("next_cursor")
+    if not result.get("ok") or not isinstance(rows, list) or not isinstance(next_cursor, str):
+        raise ValueError("shared conversation inbox response is incomplete")
+    try:
+        next_state = json.loads(next_cursor)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("shared conversation inbox cursor is invalid") from exc
+    if (next_state.get("v") != 1 or next_state.get("provider") != provider
+            or not isinstance(next_state.get("updated_at"), str)
+            or not isinstance(next_state.get("conversation_key"), str)
+            or any(not isinstance(row, dict) or not isinstance(row.get("provider"), str)
+                   or not isinstance(row.get("conversation_id"), str)
+                   or not isinstance(row.get("updated_at"), str) for row in rows)):
+        raise ValueError("shared conversation inbox identity is invalid")
+    return {"provider_filter": provider, "updates": rows, "new_conversations": len(rows),
+            "has_more": result.get("has_more") is True, "next_cursor": next_cursor}
+
+
+def render_inbox(result: dict, output_format: str) -> None:
+    if output_format == "json":
+        print(json.dumps(result, ensure_ascii=False))
+        return
+    print("# Changed conversations\n")
+    for row in result["updates"]:
+        print(f"- {row['updated_at']} · {row['provider']} · {row['conversation_id']} · {row.get('title') or ''}")
+    if not result["updates"]:
+        print("No changes in this page.")
+    if result["has_more"]:
+        print("\nMore updates remain; run this command again with --remember or pass --inbox-cursor.")
+
+
 def render_view(result: dict, output_format: str) -> None:
     if output_format == "json":
         print(json.dumps(result, ensure_ascii=False))
@@ -481,6 +521,10 @@ def main() -> int:
     parser.add_argument("--provider", default="")
     parser.add_argument("--conversation-id", default="")
     parser.add_argument("--job-id", default="", help="resolve a shared queue job to its admitted conversation")
+    parser.add_argument("--inbox", action="store_true", help="list changed conversations across providers")
+    parser.add_argument("--inbox-cursor", default="", help="opaque cursor from a previous inbox page")
+    parser.add_argument("--inbox-since", default="", help="ISO timestamp for first inbox page; default is the last 48 hours")
+    parser.add_argument("--inbox-limit", type=int, default=100)
     parser.add_argument("--since", default="", help="opaque next_cursor from a prior read")
     parser.add_argument("--drive-reader", type=Path, default=DEFAULT_DRIVE_READER)
     parser.add_argument("--historical-reader", type=Path, default=DEFAULT_HISTORICAL_READER)
@@ -496,6 +540,39 @@ def main() -> int:
         parser.error("--remember and --since cannot be combined")
     if args.remember and args.remember_store == "shared" and args.reader_id == "default":
         parser.error("shared --remember requires --reader-id or COGNILODE_READER_ID for the named employee")
+    if args.inbox:
+        if args.job_id or args.conversation_id or args.since or (args.remember and args.inbox_cursor):
+            parser.error("--inbox cannot combine with a conversation, job, --since, or remembered explicit cursor")
+        if not 1 <= args.inbox_limit <= 500:
+            parser.error("--inbox-limit must be between 1 and 500")
+        identity = "provider-" + (args.provider or "all")
+        cursor = args.inbox_cursor
+        generation = None
+        path = None
+        if args.remember:
+            if args.remember_store == "shared":
+                cursor, generation = shared_remembered_cursor(args.reader_id, "cognilode-inbox", identity)
+            else:
+                path = remembered_cursor_path(args.cursor_root,args.reader_id,"cognilode-inbox",identity)
+                with remembered_cursor_lock(path):
+                    cursor = load_remembered_cursor(path,args.reader_id,"cognilode-inbox",identity)
+                    since_at = args.inbox_since or (datetime.now(UTC)-timedelta(hours=48)).isoformat()
+                    result = inbox_updates(args.provider,cursor=cursor,since_at=since_at,limit=args.inbox_limit)
+                    render_inbox(result,args.format)
+                    sys.stdout.flush()
+                    save_remembered_cursor(path,args.reader_id,"cognilode-inbox",identity,result["next_cursor"])
+                return 0
+        since_at = args.inbox_since or (datetime.now(UTC)-timedelta(hours=48)).isoformat()
+        result = inbox_updates(args.provider,cursor=cursor,since_at=since_at,limit=args.inbox_limit)
+        render_inbox(result,args.format)
+        sys.stdout.flush()
+        if args.remember:
+            if args.remember_store == "shared":
+                committed = advance_shared_remembered_cursor(
+                    args.reader_id,"cognilode-inbox",identity,generation,result["next_cursor"])
+                if committed.get("conflict"):
+                    print("shared inbox cursor moved concurrently; reread to reconcile",file=sys.stderr)
+        return 0
     job_link = None
     if args.job_id:
         job_link = resolve_job_conversation(args.job_id, expected_provider=args.provider,

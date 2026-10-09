@@ -295,6 +295,36 @@ class ConversationDeltaTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "identity mismatch"):
                 reader.read_conversation("gemini.com", "g-1")
 
+    def test_shared_inbox_uses_employee_cursor_and_lists_only_changes(self):
+        page = {"provider_filter": "", "updates": [{"provider": "gemini.com",
+                 "conversation_id": "g-1", "updated_at": "2026-10-09T10:00:00Z",
+                 "title": "Plan"}], "new_conversations": 1, "has_more": False,
+                "next_cursor": json.dumps({"v": 1, "provider": "",
+                    "updated_at": "2026-10-09T10:00:00Z", "conversation_key": "gemini.com:g-1"})}
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", ["conversation-read", "--inbox", "--remember",
+                "--reader-id", "Nadia Brooks"]), \
+             mock.patch.object(reader, "shared_remembered_cursor", return_value=("", 0)) as previous, \
+             mock.patch.object(reader, "inbox_updates", return_value=page) as updates, \
+             mock.patch.object(reader, "advance_shared_remembered_cursor",
+                               return_value={"advanced": True}) as advance, redirect_stdout(output):
+            self.assertEqual(reader.main(), 0)
+        self.assertEqual(json.loads(output.getvalue())["updates"][0]["conversation_id"], "g-1")
+        previous.assert_called_once_with("Nadia Brooks", "cognilode-inbox", "provider-all")
+        self.assertEqual(updates.call_args.kwargs["cursor"], "")
+        advance.assert_called_once_with("Nadia Brooks", "cognilode-inbox", "provider-all",
+                                        0, page["next_cursor"])
+
+    def test_inbox_rejects_missing_shared_page_before_advancing(self):
+        sender = mock.Mock()
+        sender.operator_memory_post.return_value = {"ok": True, "rows": [], "next_cursor": "invalid"}
+        with mock.patch.object(reader, "_load_script", return_value=sender):
+            with self.assertRaisesRegex(ValueError, "cursor is invalid"):
+                reader.inbox_updates(cursor="prior")
+            sender.operator_memory_post.assert_called_once_with({
+                "operation": "list_conversation_updates", "provider": "",
+                "cursor": "prior", "since_at": "", "limit": 100})
+
     def test_imported_chatgpt_export_read_keeps_unverified_origin_and_drive_fence(self):
         cid = "8452f74b-bf54-400b-9626-ba99c4578fd6"
         capture = {"source_kind": "historical_s3_rendered",

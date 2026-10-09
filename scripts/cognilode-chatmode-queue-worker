@@ -780,7 +780,11 @@ def decisionx_batch_pump():
         source_refs = _dx_diversified_source_refs(stock.get("verified_source_refs") or [])
         if not source_refs:
             raise RuntimeError("DecisionX verified stock lacks source references")
-        cursor = int(state.get("offset") or 0) % len(source_refs)
+        # Pre-gate scans may have advanced the cursor past rare providers and
+        # years. The first genuinely verified dispatch starts at the head of
+        # the diversified stock, rather than inheriting that stale offset.
+        cursor = (0 if _dx_batch_priority(db) == DX_FIRST_VERIFIED_PRIORITY
+                  else int(state.get("offset") or 0) % len(source_refs))
         end_of_corpus = False
         # The verified stock itself supplies stable source handles. Select one
         # episode from each source on this pass before returning for deeper turns.

@@ -258,6 +258,8 @@ def test_decisionx_ready_stock_enqueues_one_xhigh_chatmode_job_with_full_source_
     module._dx_source_batch_builder=lambda:Builder()
     module.sender=Sender()
     module._dx_stock_snapshot=lambda:Bridge.shared_stock_census(None,minimum=500)
+    # A pre-gate scanner may have advanced beyond rare provider/year cohorts.
+    (tmp_path/'scan.json').write_text(json.dumps({'last_scan':0,'offset':100,'spool':[]}))
     module.decisionx_batch_pump()
     assert len(queued)==1
     assert queued[0]['provider']=='chatgpt.com'
@@ -270,6 +272,7 @@ def test_decisionx_ready_stock_enqueues_one_xhigh_chatmode_job_with_full_source_
         episodes=[json.loads(line) for line in packet.read('episodes.jsonl').splitlines()]
     assert len(episodes)==32
     assert len({row['conversation_id'] for row in episodes})==32
+    assert episodes[0]['conversation_id'] == module._dx_diversified_source_refs(refs)[0]['conversation_id']
     with module._dx_connection() as db:
         db.execute("UPDATE episodes SET state='retry',retry_after=0")
     state=json.loads((tmp_path/'scan.json').read_text())

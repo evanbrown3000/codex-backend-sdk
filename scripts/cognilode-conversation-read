@@ -274,7 +274,15 @@ def read_conversation(provider: str, conversation_id: str, *, drive_reader: Path
             if capture.get("drive_verified") is True:
                 coverage = coverage.replace("drive_unverified", "drive_verified")
         elif privacy_export:
-            coverage = "authenticated_privacy_export_text_projection_drive_verified_media_omitted"
+            scoped = (capture.get("source_text_projection_scope") ==
+                      "standard_message_text_excluding_thoughts"
+                      and isinstance(capture.get("source_omitted_thought_count"), int)
+                      and capture["source_omitted_thought_count"] >= 0
+                      and isinstance(capture.get("source_omitted_thought_sha256"), str)
+                      and SHA256_RE.fullmatch(capture["source_omitted_thought_sha256"]))
+            coverage = ("authenticated_privacy_export_standard_message_text_drive_verified_thoughts_and_media_omitted"
+                        if scoped else
+                        "authenticated_privacy_export_legacy_text_projection_drive_verified_scope_unknown")
         elif historical_export:
             coverage = "complete_imported_render_drive_verified_origin_unverified"
         return {"provider": hosted_provider, "conversation_id": conversation_id,

@@ -64,6 +64,18 @@ class FakeD1:
 
 
 class RootPlanHandoffTests(unittest.TestCase):
+    def test_export_projection_tier_requires_explicit_scope_and_omission_receipt(self):
+        base = {"source_kind": "chatgpt_privacy_export_zip_http_range",
+                "source_provenance": "authenticated_openai_export_email"}
+        self.assertEqual(bridge._source_fidelity(base),
+                         "authenticated_export_legacy_text_projection_scope_unknown")
+        scoped = {**base,
+                  "source_text_projection_scope": "standard_message_text_excluding_thoughts",
+                  "source_omitted_thought_count": 2,
+                  "source_omitted_thought_sha256": "f" * 64}
+        self.assertEqual(bridge._source_fidelity(scoped),
+                         "authenticated_export_standard_message_text_projection_thoughts_and_media_omitted")
+
     def test_stock_distinguishes_rendered_history_from_authenticated_original(self):
         historical = full('chatgpt-export-format','old-2024',0)
         historical['capture'].update({

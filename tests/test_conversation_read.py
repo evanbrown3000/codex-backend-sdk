@@ -424,6 +424,9 @@ class ConversationDeltaTests(unittest.TestCase):
         capture = {"source_kind": "chatgpt_privacy_export_zip_http_range",
                    "source_provenance": "authenticated_openai_export_email",
                    "source_complete": False, "source_text_projection_complete": True,
+                   "source_text_projection_scope": "standard_message_text_excluding_thoughts",
+                   "source_omitted_thought_count": 1,
+                   "source_omitted_thought_sha256": "f" * 64,
                    "source_response_complete": True,
                    "source_conversation_sha256": "a" * 64,
                    "branch_graph_sha256": "b" * 64,
@@ -443,9 +446,16 @@ class ConversationDeltaTests(unittest.TestCase):
         with mock.patch.object(reader, "_load_script", return_value=sender):
             full = reader.read_conversation("chatgpt-export-format", cid)
             self.assertEqual(full["source"], "authenticated_privacy_export_text_d1_drive_verified")
-            self.assertIn("media_omitted", full["coverage"])
+            self.assertIn("thoughts_and_media_omitted", full["coverage"])
             self.assertFalse(full["all_provider_events_known"])
             self.assertEqual([event["text"] for event in full["events"]], ["question", "answer"])
+            conversation["capture"] = {k: v for k, v in capture.items()
+                                       if k not in {"source_text_projection_scope",
+                                                    "source_omitted_thought_count",
+                                                    "source_omitted_thought_sha256"}}
+            legacy = reader.read_conversation("chatgpt-export-format", cid)
+            self.assertEqual(legacy["coverage"],
+                             "authenticated_privacy_export_legacy_text_projection_drive_verified_scope_unknown")
             for mutation in ({"drive_verified": False},
                              {"drive_source_sha256": "e" * 64},
                              {"source_text_projection_complete": False},

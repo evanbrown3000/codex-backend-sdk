@@ -1,0 +1,628 @@
+#!/usr/bin/env python3
+"""Stage shared multi-year source ZIPs for native Chat-mode memory synthesis.
+
+Only source custody and queueing happen here. Semantic comparison and synthesis
+must happen in the hosted ChatGPT Chat-mode agent's native sandbox.
+"""
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+from hashlib import sha256
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from typing import Any, Callable, Mapping
+import zipfile
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent
+BRIDGE = HERE / "cognilode-root-plan-handoff"
+SENDER = HERE / "cognilode-b4pt0r-chatmode"
+CONTROLLER = HERE / "cognilode-taskflow-phase-controller"
+QUEUE_WORKER = HERE / "cognilode-chatmode-queue-worker"
+PLAN = REPO / "plans/root-memory-native-synthesis.plan"
+ROOT_PLAN = REPO / "plans/root-agent-multi-year.plan"
+DEFAULT_ROOT = Path.home() / ".local/share/cognilode/root-memory-native-cycle"
+DEFAULT_BUCKET = "cognilode-conversation-visibility-362928919715-us-west-2"
+MAX_ZIP_BYTES = 20 * 1024 * 1024
+RAW_BATCH_BYTES = 10 * 1024 * 1024
+PART_BYTES = 4 * 1024 * 1024
+
+
+def _load(path: Path, name: str) -> Any:
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    if spec is None:
+        raise ValueError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    loader.exec_module(module)
+    return module
+
+
+def _sha(raw: bytes) -> str:
+    return sha256(raw).hexdigest()
+
+
+def source_selection(stock: Mapping[str, Any], *, count: int = 500) -> list[dict[str, str]]:
+    if stock.get("multi_year_ready") is not True or int(stock.get("distinct_complete") or 0) < count:
+        raise ValueError("at least 500 complete Drive-verified shared sources required")
+    rows = sorted((dict(row) for row in stock.get("verified_source_refs") or []),
+                  key=lambda row: (str(row.get("source_at_utc") or ""),
+                                   str(row.get("provider") or ""), str(row.get("conversation_id") or "")))
+    if len(rows) < count:
+        raise ValueError("stock census lacks exact source references")
+    positions = [round(i * (len(rows) - 1) / (count - 1)) for i in range(count)]
+    chosen = [rows[i] for i in positions]
+    first = datetime.fromisoformat(chosen[0]["source_at_utc"])
+    last = datetime.fromisoformat(chosen[-1]["source_at_utc"])
+    if (last - first).days < 730 or len({(r["provider"], r["conversation_id"]) for r in chosen}) != count:
+        raise ValueError("selected sources are not distinct multi-year stock")
+    return chosen
+
+
+def source_record(post: Callable[[dict[str, Any]], Mapping[str, Any]], ref: Mapping[str, str], bridge: Any) -> bytes:
+    result = post({"operation": "read", "provider": ref["provider"],
+                   "conversation_id": ref["conversation_id"]})
+    if bridge._complete_source(ref, result) is None:
+        raise ValueError("selected full source is no longer complete/Drive-verified")
+    row = result["conversation"]
+    if (row.get("prompt_sha256") != ref["prompt_sha256"]
+        or row.get("response_sha256") != ref["response_sha256"]):
+        raise ValueError("selected source hash changed since census")
+    selected = {"provider": ref["provider"], "conversation_id": ref["conversation_id"],
+                "prompt_sha256": ref["prompt_sha256"], "response_sha256": ref["response_sha256"],
+                "source_at_utc": ref["source_at_utc"], "capture": row.get("capture") or {},
+                "events": row.get("events") or []}
+    return (json.dumps(selected, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _zip_write(archive: zipfile.ZipFile, name: str, raw: bytes) -> None:
+    info = zipfile.ZipInfo(name, (2026, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.external_attr = 0o600 << 16
+    archive.writestr(info, raw, compress_type=zipfile.ZIP_DEFLATED, compresslevel=6)
+
+
+RECONSTRUCTOR = '''#!/usr/bin/env python3
+"""Run inside the ChatGPT Chat-mode native sandbox after unpacking all source ZIPs."""
+from hashlib import sha256
+import json
+from pathlib import Path
+
+root = Path(".")
+parts = {}
+for manifest_path in sorted(root.glob("batch-*/MANIFEST.json")):
+    manifest = json.loads(manifest_path.read_text())
+    if manifest.get("schema") != "cognilode.root_memory_sources.v1":
+        raise ValueError("source batch schema mismatch")
+    for row in manifest["parts"]:
+        raw = (manifest_path.parent / row["path"]).read_bytes()
+        if sha256(raw).hexdigest() != row["part_sha256"]:
+            raise ValueError("source part hash mismatch")
+        key = (row["provider"], row["conversation_id"])
+        parts.setdefault(key, []).append((row["part_index"], row["part_count"], row["source_json_sha256"], raw))
+with Path("reconstructed_sources.jsonl").open("wb") as out:
+    for key, rows in sorted(parts.items()):
+        rows.sort()
+        if len(rows) != rows[0][1] or [row[0] for row in rows] != list(range(rows[0][1])):
+            raise ValueError("source parts missing")
+        raw = b"".join(row[3] for row in rows)
+        if sha256(raw).hexdigest() != rows[0][2]:
+            raise ValueError("full source hash mismatch")
+        out.write(raw)
+print("reconstructed_distinct_sources", len(parts))
+'''
+
+
+PACKET_BUILDER = '''#!/usr/bin/env python3
+"""Package your human/agent-authored synthesis in this Chat-mode native sandbox."""
+from datetime import datetime
+from hashlib import sha256
+import json
+from pathlib import Path
+import zipfile
+
+root = Path(".")
+sources = [json.loads(line) for line in (root / "reconstructed_sources.jsonl").read_text().splitlines()]
+refs = [{key: row[key] for key in ("provider", "conversation_id", "prompt_sha256", "response_sha256", "source_at_utc")}
+        for row in sources]
+if len(refs) != 500 or len({(row["provider"], row["conversation_id"]) for row in refs}) != 500:
+    raise ValueError("expected 500 distinct reconstructed full sources")
+times = sorted(datetime.fromisoformat(row["source_at_utc"]) for row in refs)
+if (times[-1] - times[0]).days < 730:
+    raise ValueError("source span is under two years")
+sections = {}
+for key in ("global", "project", "role"):
+    raw = (root / (key + ".md")).read_bytes()
+    if len(raw.strip()) < 1000:
+        raise ValueError(key + " synthesis is missing or too short")
+    sections[key] = {"path": key + ".md", "sha256": sha256(raw).hexdigest()}
+if not (root / "EXTERNAL_EFFECT_INSTRUCTIONS.md").read_text().strip():
+    raise ValueError("deployment/handoff instructions missing")
+manifest = {"schema": "cognilode.root_memory_packet.v1", "source_refs": refs, "sections": sections}
+with zipfile.ZipFile("root-memory-work-product.zip", "w", compression=zipfile.ZIP_DEFLATED) as out:
+    out.writestr("MANIFEST.json", json.dumps(manifest, sort_keys=True, ensure_ascii=False) + "\\n")
+    for name in ("global.md", "project.md", "role.md", "EXTERNAL_EFFECT_INSTRUCTIONS.md"):
+        out.write(root / name, arcname=name)
+if Path("root-memory-work-product.zip").stat().st_size > 20 * 1024 * 1024:
+    raise ValueError("root-memory output ZIP exceeds 20 MiB")
+print("packet_sha256", sha256(Path("root-memory-work-product.zip").read_bytes()).hexdigest())
+print("packet_sources", len(refs))
+'''
+
+
+def build_source_batches(post: Callable[[dict[str, Any]], Mapping[str, Any]],
+                         refs: list[dict[str, str]], *, output_root: Path,
+                         bridge: Any) -> list[dict[str, Any]]:
+    """Physically stage full sources in <=20 MiB ZIPs; no semantic work here."""
+    output_root.mkdir(parents=True, exist_ok=True)
+    batches: list[list[tuple[str, bytes, dict[str, Any]]]] = [[]]
+    current_bytes = 0
+    for ref in refs:
+        raw = source_record(post, ref, bridge)
+        full_digest = _sha(raw)
+        chunks = [raw[i:i + PART_BYTES] for i in range(0, len(raw), PART_BYTES)]
+        for number, chunk in enumerate(chunks):
+            if current_bytes + len(chunk) > RAW_BATCH_BYTES and batches[-1]:
+                batches.append([])
+                current_bytes = 0
+            name = f"parts/{_sha((ref['provider']+':'+ref['conversation_id']).encode())[:24]}-{number:04d}.part"
+            row = {"provider": ref["provider"], "conversation_id": ref["conversation_id"],
+                   "prompt_sha256": ref["prompt_sha256"], "response_sha256": ref["response_sha256"],
+                   "part_index": number, "part_count": len(chunks), "source_json_sha256": full_digest,
+                   "part_sha256": _sha(chunk), "path": name}
+            batches[-1].append((name, chunk, row))
+            current_bytes += len(chunk)
+    if len(batches) > 64:
+        raise ValueError("source input requires more than 64 Chat-mode attachments")
+    written = []
+    for index, entries in enumerate(batches):
+        target = output_root / f"batch-{index:03d}.zip"
+        manifest = {"schema": "cognilode.root_memory_sources.v1", "batch_index": index,
+                    "batch_count": len(batches), "distinct_source_count": len(refs),
+                    "parts": [row for _, _, row in entries]}
+        with zipfile.ZipFile(target, "w") as archive:
+            _zip_write(archive, "MANIFEST.json", (json.dumps(manifest, sort_keys=True) + "\n").encode())
+            _zip_write(archive, "RECONSTRUCT_IN_NATIVE_SANDBOX.py", RECONSTRUCTOR.encode())
+            _zip_write(archive, "BUILD_MEMORY_PACKET_IN_NATIVE_SANDBOX.py", PACKET_BUILDER.encode())
+            for name, raw, _ in entries:
+                _zip_write(archive, name, raw)
+        if target.stat().st_size > MAX_ZIP_BYTES:
+            raise ValueError("source input ZIP exceeds 20 MiB")
+        written.append({"path": str(target), "sha256": _sha(target.read_bytes()),
+                        "bytes": target.stat().st_size, "part_count": len(entries)})
+    return written
+
+
+def publish_private(batch: Mapping[str, Any], *, bucket: str = DEFAULT_BUCKET,
+                    aws: str = "aws") -> str:
+    digest = str(batch["sha256"])
+    key = f"taskflow-artifacts/sha256/{digest}.zip"
+    path = Path(str(batch["path"]))
+    subprocess.run([aws, "s3api", "put-object", "--bucket", bucket, "--key", key,
+                    "--body", str(path), "--metadata", f"sha256={digest}"],
+                   check=True, capture_output=True, timeout=120)
+    head = subprocess.run([aws, "s3api", "head-object", "--bucket", bucket, "--key", key,
+                           "--output", "json"], check=True, capture_output=True, text=True, timeout=30)
+    metadata = json.loads(head.stdout)
+    if (int(metadata.get("ContentLength") or 0) != path.stat().st_size
+        or (metadata.get("Metadata") or {}).get("sha256") != digest):
+        raise ValueError("private source mirror readback mismatch")
+    return f"s3://{bucket}/{key}"
+
+
+def enqueue_native_synthesis(post: Callable[[dict[str, Any]], Mapping[str, Any]],
+                             batches: list[dict[str, Any]], stock: Mapping[str, Any],
+                             *, controller: Any, attempt: int = 0) -> Mapping[str, Any]:
+    plan = controller.parse_plan(PLAN)
+    controller.verify_plan_revision(plan)
+    step = plan.steps[0]
+    stable = _sha(json.dumps([row["sha256"] for row in batches], sort_keys=True).encode())
+    job_id = "root-memory-native-" + stable[:32] + f"-a{attempt}"
+    prompt = ("Perform the attached TaskFlow plan in your ChatGPT.com Chat-mode native sandbox. "
+              "Physically read every attached ZIP, run RECONSTRUCT_IN_NATIVE_SANDBOX.py there, "
+              "and perform the heavy semantic synthesis there. Write substantive global.md, project.md, "
+              "role.md and EXTERNAL_EFFECT_INSTRUCTIONS.md, then run "
+              "BUILD_MEMORY_PACKET_IN_NATIVE_SANDBOX.py there. Return its root-memory-work-product.zip "
+              "as the single downloadable work ZIP with "
+              "MANIFEST.json schema cognilode.root_memory_packet.v1, exact source_refs for all input "
+              "conversations, global.md, project.md, role.md, and EXTERNAL_EFFECT_INSTRUCTIONS.md. "
+              "Provide a comprehensive in-chat report. Do not write prompts for other agents.\n\n"
+              "--- FULL HUMAN-READABLE PLAN ---\n" + plan.text)
+    refs = [{"ref": "file:" + str(row["path"]), "sha256": row["sha256"],
+             "mirrors": [row["mirror"]], "name": Path(row["path"]).name} for row in batches]
+    job = controller.job_base(plan, step, "chatgpt_sandbox", provider="chatgpt.com",
+                              priority=80, dependencies=[])
+    job.update({"id": job_id, "prompt": prompt, "prompt_sha256": _sha(prompt.encode()),
+                "reasoning_effort": "xhigh", "model": "gpt-5-6-thinking",
+                "assigned_employee": "ChatGPT chat-mode native sandbox",
+                "attachment_refs": refs, "role": "long-horizon-memory-synthesizer"})
+    body = {**job, "operation": "enqueue_job", "job_id": job_id,
+            "prompt_authority": "taskflow_plan", "source": "root-memory-native-cycle"}
+    result = post(body)
+    saved = result.get("job") or {}
+    if (not result.get("ok") or saved.get("id") != job_id
+        or saved.get("prompt_sha256") != job["prompt_sha256"]
+        or saved.get("state") not in ("queued", "claimed", "effect_pending_read_recovery", "complete")):
+        raise ValueError("root memory native job was not durably enqueued in D1")
+    return {"job_id": job_id, "state": saved["state"], "attachment_count": len(refs),
+            "prompt_sha256": job["prompt_sha256"], "reasoning_effort": saved.get("reasoning_effort"),
+            "model": saved.get("requested_model") or saved.get("model")}
+
+
+def _effect_rows(job: Mapping[str, Any], kind: str) -> list[Mapping[str, Any]]:
+    return [row for row in job.get("effect_evidence") or []
+            if isinstance(row, Mapping) and row.get("kind") == kind]
+
+
+def _local_or_mirror(attachment: Mapping[str, Any], *,
+                     stage_remote: Callable[[str, str], Path] | None = None) -> Path:
+    digest = str(attachment.get("sha256") or "")
+    path = Path(str(attachment.get("ref") or "")[5:])
+    if len(digest) != 64 or not all(ch in "0123456789abcdef" for ch in digest):
+        raise ValueError("attachment lacks exact SHA-256")
+    if not path.is_file() or _sha(path.read_bytes()) != digest:
+        stage_remote = stage_remote or _load(QUEUE_WORKER, "root_memory_output_stager")._stage_remote_attachment
+        for mirror in attachment.get("mirrors") or []:
+            try:
+                candidate = stage_remote(str(mirror), digest)
+                if candidate.is_file() and _sha(candidate.read_bytes()) == digest:
+                    path = candidate
+                    break
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                continue
+    if not path.is_file() or _sha(path.read_bytes()) != digest:
+        raise ValueError("attachment exact-SHA readback failed")
+    return path
+
+
+def _native_input_refs(job: Mapping[str, Any], central: Mapping[str, Any], *,
+                       stage_remote: Callable[[str, str], Path] | None = None) -> set[tuple[str, str, str, str]]:
+    """Bind the native work product to the actual physically uploaded source ZIPs."""
+    uploads = {str(row.get("sha256") or "") for row in central.get("provider_structured_uploads") or []
+               if isinstance(row, Mapping)}
+    attachments = job.get("attachment_refs") or []
+    if not isinstance(attachments, list) or not attachments:
+        raise ValueError("native input attachments missing")
+    refs: dict[tuple[str, str], tuple[str, str, str, str]] = {}
+    for attachment in attachments:
+        if not isinstance(attachment, Mapping) or not str(attachment.get("ref") or "").startswith("file:/"):
+            raise ValueError("native input is not a physical file attachment")
+        if str(attachment.get("sha256") or "") not in uploads:
+            raise ValueError("native input lacks provider structured upload proof")
+        path = _local_or_mirror(attachment, stage_remote=stage_remote)
+        if path.stat().st_size > MAX_ZIP_BYTES:
+            raise ValueError("native input ZIP exceeds 20 MiB")
+        with zipfile.ZipFile(path) as archive:
+            if archive.testzip() is not None:
+                raise ValueError("native input ZIP CRC failed")
+            manifest = json.loads(archive.read("MANIFEST.json"))
+            if manifest.get("schema") != "cognilode.root_memory_sources.v1":
+                raise ValueError("native input manifest schema mismatch")
+            for row in manifest.get("parts") or []:
+                key = (str(row["provider"]), str(row["conversation_id"]))
+                identity = (*key, str(row["prompt_sha256"]), str(row["response_sha256"]))
+                if key in refs and refs[key] != identity:
+                    raise ValueError("native input source identity conflicted")
+                refs[key] = identity
+    if len(refs) != 500:
+        raise ValueError("native input must contain exactly 500 distinct full source identities")
+    return set(refs.values())
+
+
+def verify_native_memory_output(post: Callable[[dict[str, Any]], Mapping[str, Any]],
+                                *, job_id: str, stock: Mapping[str, Any],
+                                stage_remote: Callable[[str, str], Path] | None = None) -> dict[str, Any]:
+    result = post({"operation": "get_job", "job_id": job_id})
+    job = result.get("job") or {}
+    cid = str(job.get("conversation_id") or "")
+    if (job.get("id") != job_id or job.get("provider") != "chatgpt.com"
+        or job.get("state") != "complete" or job.get("phase") != "chatgpt_sandbox"
+        or job.get("taskflow_step") != "MEMORY-BUILD" or not cid
+        or len(_effect_rows(job, "provider_observed_functions_exec")) < 1
+        or len(_effect_rows(job, "provider_conversation")) != 1
+        or len(_effect_rows(job, "central_conversation_readback")) != 1
+        or _effect_rows(job, "provider_conversation")[0].get("ref") != cid
+        or _effect_rows(job, "central_conversation_readback")[0].get("ref") != cid):
+        raise ValueError("native memory job lacks provider execution and central completion")
+    conversation = post({"operation": "read", "provider": "chatgpt.com", "conversation_id": cid}).get("conversation") or {}
+    if (conversation.get("conversation_id") != cid
+        or not any(isinstance(row, Mapping) and row.get("role") == "assistant"
+                   and str(row.get("content") or "").strip() for row in conversation.get("events") or [])):
+        raise ValueError("native memory chat report unreadable")
+    input_refs = _native_input_refs(job, conversation, stage_remote=stage_remote)
+    artifacts = _effect_rows(job, "chatgpt_sandbox_artifact")
+    if len(artifacts) != 1:
+        raise ValueError("native memory work ZIP missing or ambiguous")
+    artifact = artifacts[0]
+    digest = str(artifact.get("ref") or "")
+    path = Path(str(artifact.get("path") or ""))
+    if len(digest) != 64 or not all(ch in "0123456789abcdef" for ch in digest):
+        raise ValueError("native work ZIP digest invalid")
+    if not path.is_file() or _sha(path.read_bytes()) != digest:
+        path = _local_or_mirror({"ref": "file:" + str(path), "sha256": digest,
+                                 "mirrors": artifact.get("mirrors") or []}, stage_remote=stage_remote)
+    if not path.is_file() or _sha(path.read_bytes()) != digest or path.stat().st_size > MAX_ZIP_BYTES:
+        raise ValueError("native work ZIP cannot be independently read by SHA")
+    with zipfile.ZipFile(path) as archive:
+        names = set(archive.namelist())
+        if (archive.testzip() is not None
+            or not {"MANIFEST.json", "global.md", "project.md", "role.md",
+                    "EXTERNAL_EFFECT_INSTRUCTIONS.md"} <= names):
+            raise ValueError("native memory packet is incomplete")
+        manifest = json.loads(archive.read("MANIFEST.json"))
+        if manifest.get("schema") != "cognilode.root_memory_packet.v1":
+            raise ValueError("native memory packet schema mismatch")
+        refs = manifest.get("source_refs") or []
+        cited = {(str(row.get("provider") or ""), str(row.get("conversation_id") or ""),
+                  str(row.get("prompt_sha256") or ""), str(row.get("response_sha256") or ""))
+                 for row in refs if isinstance(row, Mapping)}
+        current = {(str(row["provider"]), str(row["conversation_id"]),
+                    str(row["prompt_sha256"]), str(row["response_sha256"]))
+                   for row in stock.get("verified_source_refs") or []}
+        if cited != input_refs or not cited <= current:
+            raise ValueError("native memory packet sources do not exactly match uploaded live shared stock")
+        sections = manifest.get("sections") or {}
+        for key in ("global", "project", "role"):
+            section = sections.get(key) or {}
+            body = archive.read(key + ".md")
+            if (section.get("path") != key + ".md"
+                or section.get("sha256") != _sha(body)
+                or len(body.strip()) < 1000):
+                raise ValueError("native memory synthesis section missing, short, or unhashed")
+    return {"path": str(path), "sha256": digest, "bytes": path.stat().st_size,
+            "conversation_id": cid, "source_count": len(cited)}
+
+
+def enqueue_root_planning(post: Callable[[dict[str, Any]], Mapping[str, Any]],
+                          memory: Mapping[str, Any], *, mirror: str,
+                          controller: Any, attempt: int = 0) -> Mapping[str, Any]:
+    plan = controller.parse_plan(ROOT_PLAN)
+    controller.verify_plan_revision(plan)
+    step = plan.steps[0]
+    digest = str(memory["sha256"])
+    job_id = "root-agent-" + digest[:32] + f"-a{attempt}"
+    prompt = ("Carry out the attached long-horizon root-agent TaskFlow plan in ChatGPT.com Chat mode. "
+              "Read the physically attached multi-year global/project/role memory ZIP. "
+              "Write plans for the company, teams, and individual employees, not prompts for them. "
+              "The final in-chat response must contain one exact "
+              "COGNILODE_ROOT_TASKFLOW_PLAN_JSON_BEGIN / COGNILODE_ROOT_TASKFLOW_PLAN_JSON_END "
+              "block with schema cognilode.root_taskflow_plan.v1 and a full report. Return one downloadable "
+              "planning ZIP with EXTERNAL_EFFECT_INSTRUCTIONS.md.\n\n--- FULL PLAN ---\n" + plan.text)
+    job = controller.job_base(plan, step, "chatgpt_sandbox", provider="chatgpt.com",
+                              priority=90, dependencies=[])
+    job.update({"id": job_id, "prompt": prompt, "prompt_sha256": _sha(prompt.encode()),
+                "reasoning_effort": "xhigh", "model": "gpt-5-6-thinking",
+                "assigned_employee": "ChatGPT root agent in chat mode", "role": "root-manager",
+                "attachment_refs": [{"ref": "file:" + str(memory["path"]), "sha256": digest,
+                                     "mirrors": [mirror], "name": "root-memory.zip"}]})
+    result = post({**job, "operation": "enqueue_job", "job_id": job_id,
+                   "prompt_authority": "taskflow_plan", "source": "root-memory-native-cycle"})
+    saved = result.get("job") or {}
+    if (not result.get("ok") or saved.get("id") != job_id
+        or saved.get("prompt_sha256") != job["prompt_sha256"]
+        or saved.get("provider") != "chatgpt.com"):
+        raise ValueError("root planning job was not durably enqueued in D1")
+    return {"job_id": job_id, "state": saved.get("state"), "packet_sha256": digest,
+            "reasoning_effort": saved.get("reasoning_effort"),
+            "model": saved.get("requested_model") or saved.get("model")}
+
+
+def finalize(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, native_job_id: str,
+             bucket: str = DEFAULT_BUCKET, bridge: Any | None = None,
+             controller: Any | None = None,
+             publish: Callable[[Mapping[str, Any]], str] | None = None,
+             root_attempt: int = 0) -> dict[str, Any]:
+    bridge = bridge or _load(BRIDGE, "root_memory_bridge_finalize")
+    controller = controller or _load(CONTROLLER, "root_memory_taskflow_finalize")
+    stock = bridge.shared_stock_census(post, minimum=500)
+    if not stock["multi_year_ready"]:
+        return {"ok": False, "reason": "shared_multi_year_stock_incomplete", "provider_requests_created": 0}
+    memory = verify_native_memory_output(post, job_id=native_job_id, stock=stock)
+    publish = publish or (lambda row: publish_private(row, bucket=bucket))
+    mirror = publish(memory)
+    root = enqueue_root_planning(post, memory, mirror=mirror, controller=controller,
+                                 attempt=root_attempt)
+    return {"ok": True, "native_job_id": native_job_id, "root_job": root,
+            "source_count": memory["source_count"], "provider_requests_created": 0}
+
+
+def prepare(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, output_root: Path,
+            bucket: str = DEFAULT_BUCKET, publish: Callable[[Mapping[str, Any]], str] | None = None,
+            controller: Any | None = None, bridge: Any | None = None,
+            attempt: int = 0) -> dict[str, Any]:
+    bridge = bridge or _load(BRIDGE, "root_memory_bridge")
+    controller = controller or _load(CONTROLLER, "root_memory_taskflow")
+    stock = bridge.shared_stock_census(post, minimum=500)
+    if not stock["multi_year_ready"]:
+        return {"ok": False, "reason": "shared_multi_year_stock_incomplete",
+                "distinct_complete": stock["distinct_complete"], "span_days": stock["span_days"],
+                "provider_requests_created": 0}
+    refs = source_selection(stock)
+    batch_root = output_root / _sha(json.dumps(refs, sort_keys=True).encode())[:24]
+    batches = build_source_batches(post, refs, output_root=batch_root, bridge=bridge)
+    publish = publish or (lambda row: publish_private(row, bucket=bucket))
+    for row in batches:
+        row["mirror"] = publish(row)
+    queued = enqueue_native_synthesis(post, batches, stock, controller=controller, attempt=attempt)
+    return {"ok": True, "source_count": len(refs), "batch_count": len(batches),
+            "source_set_sha256": _sha(json.dumps(refs, sort_keys=True).encode()),
+            "job": queued, "provider_requests_created": 0}
+
+
+def _atomic_state(path: Path, value: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".next")
+    with temporary.open("w", encoding="utf-8") as out:
+        json.dump(value, out, sort_keys=True)
+        out.write("\n")
+        out.flush()
+        os.fsync(out.fileno())
+    os.replace(temporary, path)
+
+
+def retire_local_source_staging(job: Mapping[str, Any], *, output_root: Path) -> int:
+    """Remove transient 500-source input ZIPs after shared mirror+native readback."""
+    removed = 0
+    root = output_root.resolve()
+    for attachment in job.get("attachment_refs") or []:
+        if not isinstance(attachment, Mapping) or not str(attachment.get("ref") or "").startswith("file:"):
+            continue
+        if not attachment.get("mirrors"):
+            continue
+        path = Path(str(attachment["ref"])[5:]).resolve()
+        if (path.is_relative_to(root) and path.is_file()
+            and _sha(path.read_bytes()) == attachment.get("sha256")):
+            path.unlink()
+            removed += 1
+    return removed
+
+
+def _retry_due(state_path: Path, state: dict[str, Any], reason: str) -> bool:
+    """Delay definitive bad deliverable successors to avoid Chat-mode prompt spam."""
+    now = datetime.now(timezone.utc).timestamp()
+    due = float(state.get("retry_after_epoch") or 0)
+    if not due:
+        state["retry_after_epoch"] = now + 21600
+        state["retry_reason"] = reason[:240]
+        _atomic_state(state_path, state)
+        return False
+    return now >= due
+
+
+def tick(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, output_root: Path,
+         plan_output_root: Path, bucket: str = DEFAULT_BUCKET,
+         prepare_fn: Callable[..., dict[str, Any]] = prepare,
+         finalize_fn: Callable[..., dict[str, Any]] = finalize,
+         handoff_fn: Callable[..., dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Advance one causal stage; hosted historical rhythm alone sends provider turns."""
+    state_path = output_root / "cycle-state.json"
+    state = json.loads(state_path.read_text()) if state_path.exists() else {"phase": "ready"}
+    phase = state.get("phase")
+    if phase == "await_native":
+        native_id = str(state["native_job_id"])
+        job = post({"operation": "get_job", "job_id": native_id}).get("job") or {}
+        if job.get("state") not in ("complete", "failed", "cancelled"):
+            return {"ok": True, "phase": phase, "native_job_id": native_id,
+                    "job_state": job.get("state"), "provider_requests_created": 0}
+        try:
+            if job.get("state") != "complete":
+                raise ValueError("native job ended without a complete Chat-mode deliverable")
+            result = finalize_fn(post, native_job_id=native_id, bucket=bucket)
+        except (ValueError, OSError, KeyError) as exc:
+            reason = type(exc).__name__ + ": " + str(exc)
+            if not _retry_due(state_path, state, reason):
+                return {"ok": False, "phase": phase, "reason": "native_deliverable_retry_delayed",
+                        "retry_after_epoch": state["retry_after_epoch"], "provider_requests_created": 0}
+            attempt = int(state.get("native_attempt") or 0) + 1
+            replacement = prepare_fn(post, output_root=output_root, bucket=bucket, attempt=attempt)
+            if not replacement.get("ok"):
+                return replacement
+            successor_id = str(replacement["job"]["job_id"])
+            _atomic_state(state_path, {"phase": "await_native", "native_job_id": successor_id,
+                                       "native_attempt": attempt,
+                                       "source_set_sha256": replacement["source_set_sha256"]})
+            return {"ok": True, "phase": "await_native", "native_job_id": successor_id,
+                    "replaced_bad_job_id": native_id, "provider_requests_created": 0}
+        if not result.get("ok"):
+            return result
+        root_id = str(result["root_job"]["job_id"])
+        retired = retire_local_source_staging(job, output_root=output_root)
+        _atomic_state(state_path, {"phase": "await_root", "native_job_id": native_id,
+                                   "root_job_id": root_id,
+                                   "root_attempt": 0,
+                                   "source_set_sha256": state["source_set_sha256"]})
+        return {"ok": True, "phase": "await_root", "root_job_id": root_id,
+                "retired_local_source_zips": retired,
+                "provider_requests_created": 0}
+    if phase == "await_root":
+        root_id = str(state["root_job_id"])
+        job = post({"operation": "get_job", "job_id": root_id}).get("job") or {}
+        if job.get("state") not in ("complete", "failed", "cancelled"):
+            return {"ok": True, "phase": phase, "root_job_id": root_id,
+                    "job_state": job.get("state"), "provider_requests_created": 0}
+        if handoff_fn is None:
+            bridge = _load(BRIDGE, "root_memory_bridge_handoff")
+            handoff_fn = lambda operator, job_id, output_root: bridge.handoff(
+                operator, job_id=job_id, output_root=output_root, install=bridge.install_taskflow)
+        try:
+            if job.get("state") != "complete":
+                raise ValueError("root job ended without a complete Chat-mode plan")
+            result = handoff_fn(post, job_id=root_id, output_root=plan_output_root)
+            if result.get("ok") is not True or result.get("secretary_taskflow_installation", {}).get("ok") is not True:
+                raise ValueError("root TaskFlow plan was not installed through Secretary")
+        except (ValueError, OSError, KeyError) as exc:
+            reason = type(exc).__name__ + ": " + str(exc)
+            if not _retry_due(state_path, state, reason):
+                return {"ok": False, "phase": phase, "reason": "root_plan_retry_delayed",
+                        "retry_after_epoch": state["retry_after_epoch"], "provider_requests_created": 0}
+            attempt = int(state.get("root_attempt") or 0) + 1
+            replacement = finalize_fn(post, native_job_id=str(state["native_job_id"]),
+                                      bucket=bucket, root_attempt=attempt)
+            if not replacement.get("ok"):
+                return replacement
+            successor_id = str(replacement["root_job"]["job_id"])
+            _atomic_state(state_path, {"phase": "await_root", "native_job_id": state["native_job_id"],
+                                       "root_job_id": successor_id, "root_attempt": attempt,
+                                       "source_set_sha256": state["source_set_sha256"]})
+            return {"ok": True, "phase": "await_root", "root_job_id": successor_id,
+                    "replaced_bad_job_id": root_id, "provider_requests_created": 0}
+        _atomic_state(state_path, {"phase": "complete", "native_job_id": state["native_job_id"],
+                                   "root_job_id": root_id, "plan_sha256": result["plan_sha256"],
+                                   "source_set_sha256": state["source_set_sha256"],
+                                   "completed_at": datetime.now(timezone.utc).isoformat()})
+        return {"ok": True, "phase": "complete", "root_job_id": root_id,
+                "plan_sha256": result["plan_sha256"], "provider_requests_created": 0}
+    if phase == "complete":
+        completed = datetime.fromisoformat(str(state["completed_at"]))
+        if (datetime.now(timezone.utc) - completed).total_seconds() < 86400:
+            return {"ok": True, "phase": "complete", "root_job_id": state["root_job_id"],
+                    "provider_requests_created": 0}
+        bridge = _load(BRIDGE, "root_memory_bridge_fingerprint")
+        stock = bridge.shared_stock_census(post, minimum=500)
+        if not stock["multi_year_ready"]:
+            return {"ok": False, "reason": "shared_multi_year_stock_incomplete",
+                    "distinct_complete": stock["distinct_complete"], "provider_requests_created": 0}
+        fingerprint = _sha(json.dumps(source_selection(stock), sort_keys=True).encode())
+        if fingerprint == state.get("source_set_sha256"):
+            return {"ok": True, "phase": "complete", "reason": "shared_source_packet_unchanged",
+                    "root_job_id": state["root_job_id"], "provider_requests_created": 0}
+    result = prepare_fn(post, output_root=output_root, bucket=bucket, attempt=0)
+    if not result.get("ok"):
+        return result
+    native_id = str(result["job"]["job_id"])
+    _atomic_state(state_path, {"phase": "await_native", "native_job_id": native_id,
+                               "native_attempt": 0,
+                               "source_set_sha256": result["source_set_sha256"]})
+    return {"ok": True, "phase": "await_native", "native_job_id": native_id,
+            "provider_requests_created": 0}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument("--bucket", default=DEFAULT_BUCKET)
+    parser.add_argument("--finalize-native-job", default="")
+    parser.add_argument("--tick", action="store_true")
+    parser.add_argument("--plan-output-root", type=Path, default=REPO / "plans/root-generated")
+    args = parser.parse_args()
+    sender = _load(SENDER, "root_memory_d1_reader")
+    if args.tick:
+        result = tick(sender.operator_memory_post, output_root=args.output_root,
+                      plan_output_root=args.plan_output_root, bucket=args.bucket)
+    elif args.finalize_native_job:
+        result = finalize(sender.operator_memory_post, native_job_id=args.finalize_native_job, bucket=args.bucket)
+    else:
+        result = prepare(sender.operator_memory_post, output_root=args.output_root, bucket=args.bucket)
+    print(json.dumps(result, sort_keys=True))
+    return 0 if result["ok"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

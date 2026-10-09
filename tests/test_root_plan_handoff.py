@@ -26,7 +26,7 @@ def full(provider: str, cid: str, day: int) -> dict:
     at = (datetime(2024, 1, 1, tzinfo=timezone.utc) + timedelta(days=day)).isoformat()
     return {"provider": provider, "conversation_id": cid,
             "prompt_sha256": "a" * 64, "response_sha256": "b" * 64,
-            "capture": {"drive_verified": True, "source_response_complete": True,
+            "capture": {"drive_verified": True, "source_complete": True, "source_response_complete": True,
                         "source_sha256": "c" * 64, "drive_source_sha256": "c" * 64,
                         "drive_object_sha256": "d" * 64, "drive_verified_at": at,
                         "drive_conversation_id": cid},
@@ -63,6 +63,20 @@ class FakeD1:
 
 
 class RootPlanHandoffTests(unittest.TestCase):
+    def test_drive_complete_source_accepts_interim_flags_and_flagless_snapshot(self):
+        source = full("openai-codex", "interim", 0)
+        source["events"][0]["source_content_complete"] = False
+        source["events"].insert(1, {"role": "assistant", "content": "interim summary",
+                                     "source_content_complete": False})
+        self.assertIsNotNone(bridge._complete_source(source, {"ok": True, "conversation": source}))
+        source["events"][-1]["source_content_complete"] = False
+        self.assertIsNone(bridge._complete_source(source, {"ok": True, "conversation": source}))
+        for event in source["events"]:
+            event.pop("source_content_complete", None)
+        self.assertIsNotNone(bridge._complete_source(source, {"ok": True, "conversation": source}))
+        source["capture"].pop("source_complete")
+        self.assertIsNone(bridge._complete_source(source, {"ok": True, "conversation": source}))
+
     def test_stock_counts_500_distinct_complete_sources_across_years(self):
         rows = []
         sources = {}
@@ -179,7 +193,7 @@ class RootPlanHandoffTests(unittest.TestCase):
             self.assertEqual(installed[0][1], plan)
             self.assertTrue(installed[0][0].is_file())
             self.assertIn("Carry out the manager plan literally.", installed[0][0].read_text())
-            source = subprocess.run(["git", "-C", directory, "show", "HEAD:root-project.plan"],
+            source = subprocess.run(["git", "-C", directory, "show", "HEAD:" + installed[0][0].name],
                                     check=True, capture_output=True, text=True)
             self.assertEqual(source.stdout, installed[0][0].read_text())
             self.assertEqual(result["provider_requests_created"], 0)

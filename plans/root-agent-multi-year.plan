@@ -1,0 +1,12 @@
+project Long-Horizon Root Agent
+id root-agent
+
+[ ] ROOT-PLAN Produce company, team, and employee plans from multi-year memory
+    owner: Root Agent
+    role: Company manager
+    do:
+      - Read the physically attached global, project, and role memory ZIP in the ChatGPT Chat-mode native sandbox; preserve its exact source references and state where the synthesis does not justify a claim.
+      - Produce plans for the company, teams, and individual employees; do not write prompts for another agent.
+      - Preserve the distinction between long-term patterns, recent changes, disagreements, and uncertainty.
+      - Put the resulting machine-readable TaskFlow plan in exactly one COGNILODE_ROOT_TASKFLOW_PLAN_JSON_BEGIN and COGNILODE_ROOT_TASKFLOW_PLAN_JSON_END block in the final provider-visible chat response.
+      - Provide a comprehensive in-chat report and one downloadable ZIP containing planning artifacts and EXTERNAL_EFFECT_INSTRUCTIONS.md.

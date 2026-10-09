@@ -46,6 +46,8 @@ services:
       - cognilode/http-gate-operator-token=/deploy/operator-bearer
       - --credential
       - cognilode/memory-drive/rclone-config#rclone_config=/memory-auth/rclone.conf
+      - --credential
+      - cognilode/google-drive/rollout-service-account=/deploy/drive-rollout.json
       - --writer-secret
       - cognilode/chatmode/codex-auth
       - --writer-secret
@@ -114,6 +116,8 @@ services:
       COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
       COGNILODE_COMPANY_ROOT: /company
       COGNILODE_B4PT0R_SDK_ROOT: /company/codex-backend-sdk
+      COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
+      COGNILODE_AWS_CLI: /usr/bin/aws
       PATH: /usr/bin:/usr/local/bin:/bin
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
@@ -187,6 +191,34 @@ services:
       - source-sync
       - credential-sync
 
+  drive-provisioner:
+    image: node:22-bookworm
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /runtime/source/current/cognilode-cloudflare-pages-site
+    entrypoint: [sh, -c]
+    command:
+      - >-
+        while :; do
+          if test -f /runtime/source/current/cognilode-cloudflare-pages-site/scripts/provision-drive-rollout-pages-secrets.py; then
+            python3 /runtime/source/current/cognilode-cloudflare-pages-site/scripts/provision-drive-rollout-pages-secrets.py || true;
+          fi;
+          sleep 300;
+        done
+    environment:
+      HOME: /tmp
+      COGNILODE_DRIVE_ROLLOUT_CUSTODY_FILE: /deploy/drive-rollout.json
+      COGNILODE_CLOUDFLARE_TOKEN_FILE: /deploy/pages-token.json
+      COGNILODE_DRIVE_PAGES_SYNC_STATE: /runtime/drive-pages-sync.json
+      PATH: /usr/bin:/usr/local/bin:/bin
+    volumes:
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - company_deploy_custody:/deploy:ro
+    depends_on:
+      - source-sync
+      - credential-sync
+
   taskflow-worker:
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
@@ -205,6 +237,7 @@ services:
       COGNILODE_CODEX_BIN: /codex/bin/codex
       COGNILODE_CENTRAL_ROLLOUT_HELPER: /codex/bin/central-rollouts
       CODEX_HOME: /home/worker/.codex
+      COGNILODE_DEFAULT_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
       - company_auth:/home/worker/.codex
@@ -307,6 +340,35 @@ services:
       - source-sync
       - credential-sync
       - codex-builder
+
+  effect-reviewer:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /runtime/source/current/modified-codex-runtime
+    entrypoint: [python3, -m, modified_codex.taskflow_effect_reviewer]
+    command: [--runs, /runtime/worker/rpe-runs, --interval, "300"]
+    environment:
+      HOME: /home/worker
+      PYTHONPATH: /runtime/source/current/modified-codex-runtime/src:/runtime/source/current/taskflow-orchestration-history/src
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+      COGNILODE_REPOSITORIES_ROOT: /runtime/source/current
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
+      COGNILODE_TASKFLOW_SECRETARY_COMMAND: python3 -m modified_codex.taskflow_secretary submit
+      COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
+      COGNILODE_TASKFLOW_SECRETARY_ROOT: /runtime/worker/taskflow-secretary
+      COGNILODE_AWS_CLI: /usr/bin/aws
+      COGNILODE_DEFAULT_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
+    volumes:
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - ${COMPANY_RUNTIME_ROOT}/worker:/runtime/worker
+      - company_operator:/home/worker/.config/cognilode:ro
+      - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+    depends_on:
+      - source-sync
+      - credential-sync
+      - taskflow-worker
 
 volumes:
   company_auth:

@@ -214,6 +214,7 @@ services:
       COGNILODE_CLOUDFLARE_TOKEN_FILE: /deploy/pages-token.json
       COGNILODE_CLOUDFLARE_WORKER_TOKEN_FILE: /deploy/worker-token.json
       COGNILODE_OPERATOR_TOKEN_FILE: /deploy/operator-bearer
+      COGNILODE_SITE_PUBLISH_INTERVAL: "60"
       PATH: /usr/bin:/usr/local/bin:/bin
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro

@@ -530,6 +530,91 @@ def secretary_succeeded(receipt: Mapping[str, Any]) -> bool:
     return receipt.get("taskflow_route_verified") is True
 
 
+CODEX_SESSION_HEADER = re.compile(r"session id: ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
+
+
+def codex_header_session_id(stderr: str) -> str | None:
+    """Read the Codex CLI's own header, not a response/echoed session ID."""
+    lines = stderr.splitlines()
+    if not lines or not lines[0].startswith("OpenAI Codex v"):
+        return None
+    fences = [index for index, line in enumerate(lines[:80]) if line == "--------"]
+    if len(fences) < 2 or fences[0] != 1:
+        return None
+    ids = [match.group(1) for line in lines[fences[0] + 1:fences[1]]
+           if (match := CODEX_SESSION_HEADER.fullmatch(line))]
+    return ids[0] if len(ids) == 1 else None
+
+
+def codex_session_identity_evidence(receipt_path: Path, job_id: str) -> dict[str, Any] | None:
+    """Bind a D1 job to a physical Codex stderr header and exact Secretary run.
+
+    Older successful Secretary receipts have no identity fields and remain
+    admissible without this optional row. Partial or conflicting new fields
+    fail closed rather than turning echoed model text into a session identity.
+    """
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    attempts = receipt.get("attempts") or []
+    if not isinstance(attempts, list):
+        raise ValueError("Secretary attempts are malformed")
+    # A current Codex receipt can hash stderr yet have no parseable CLI header.
+    # That is absence of identity, not a contradictory claimed identity.
+    identity_attempts = [a for a in attempts if isinstance(a,dict) and isinstance(a.get("result"),dict)
+                         and any(a["result"].get(k) is not None for k in
+                                 ("conversation_id", "conversation_id_source"))]
+    if not identity_attempts:
+        return None
+    if len(identity_attempts) != 1 or identity_attempts[0] is not attempts[-1]:
+        raise ValueError("Secretary session identity does not belong to the final attempt")
+    attempt = identity_attempts[0]
+    result = attempt["result"]
+    cid = str(result.get("conversation_id") or "")
+    stderr_sha = str(result.get("codex_stderr_sha256") or "")
+    if (result.get("conversation_id_source") != "codex_cli_stderr_header"
+        or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", cid)
+        or not HEX64.fullmatch(stderr_sha)):
+        raise ValueError("Secretary session identity fields are incomplete or unsupported")
+    run_id = str(receipt.get("run_id") or "")
+    run_dir_text = str(receipt.get("run_dir") or "")
+    if not re.fullmatch(r"[A-Za-z0-9T-]{10,80}", run_id) or not run_dir_text:
+        raise ValueError("Secretary session identity lacks a valid run ID/directory")
+    run_dir = Path(run_dir_text).expanduser().resolve(strict=True)
+    if not run_dir.is_dir() or run_dir.name != run_id:
+        raise ValueError("Secretary run directory does not match run ID")
+    full_ref = str(attempt.get("full_receipt_ref") or "")
+    if not full_ref:
+        raise ValueError("Secretary final attempt lacks a full receipt reference")
+    full_path = Path(full_ref).expanduser().resolve(strict=True)
+    if not full_path.is_file() or not full_path.is_relative_to(run_dir) or full_path.name != "receipt.json":
+        raise ValueError("Secretary full receipt is outside the selected run")
+    full = json.loads(full_path.read_text(encoding="utf-8"))
+    full_result = full.get("result") or {}
+    if (full_result.get("conversation_id") != cid
+        or full_result.get("conversation_id_source") != "codex_cli_stderr_header"
+        or full_result.get("codex_stderr_sha256") != stderr_sha):
+        raise ValueError("Secretary full and compact session results disagree")
+    stderr_path = full_path.with_name("codex.stderr")
+    if not stderr_path.is_file() or not stderr_path.resolve().is_relative_to(run_dir):
+        raise ValueError("Codex stderr source is outside the selected Secretary run")
+    raw = stderr_path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != stderr_sha:
+        raise ValueError("Codex stderr SHA-256 differs from Secretary result")
+    if codex_header_session_id(raw.decode("utf-8")) != cid:
+        raise ValueError("Codex stderr header session ID differs from Secretary result")
+    return {"kind":"codex_session_identity", "ref":cid, "job_id":job_id,
+            "conversation_id":cid, "conversation_id_source":"codex_cli_stderr_header",
+            "run_id":run_id, "run_dir":str(run_dir),
+            "compact_receipt_sha256":sha256_file(receipt_path), "codex_stderr_sha256":stderr_sha,
+            "central_readback_verified":False}
+
+
+def codex_identity_readback(job: Mapping[str, Any] | None, identity: Mapping[str, Any] | None) -> bool:
+    if identity is None:
+        return True
+    return bool(job and any(isinstance(row,dict) and row == identity
+                            for row in job.get("effect_evidence") or []))
+
+
 def verify_effect_receipt(path: Path, *, plan: Plan, step: Step, work_sha256: str) -> dict[str, Any]:
     if not path.is_file(): raise ValueError("external effect receipt missing")
     body=json.loads(path.read_text(encoding="utf-8"))
@@ -1307,13 +1392,15 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
             if not secretary_succeeded(json.loads(receipt_path.read_text(encoding="utf-8"))):
                 raise ValueError("Codex invocation was not verified")
             meta=verify_manifest_zip(out_zip,expected_plan_sha256=plan.sha256)
+            identity=codex_session_identity_evidence(receipt_path,str(pending["id"]))
         except Exception:
             action["actions"].append({"step":step.step_id,"phase":"research_reconcile","ok":False,"state":"awaiting_readback"}); continue
         evidence=[{"kind":"research_zip","ref":meta["sha256"],"path":meta["path"]}]
         evidence.append({"kind":"research_invocation","ref":sha256_file(receipt_path),"path":str(receipt_path)})
+        if identity: evidence.append(identity)
         done=queue.complete(pending,evidence)
         committed=queue.get(str(pending["id"])) if done.get("ok") else None
-        readback_ok=bool(committed and committed.get("state")=="complete" and any(e.get("kind")=="research_zip" and e.get("ref")==meta["sha256"] for e in committed.get("effect_evidence") or [] if isinstance(e,dict)))
+        readback_ok=bool(committed and committed.get("state")=="complete" and codex_identity_readback(committed,identity) and any(e.get("kind")=="research_zip" and e.get("ref")==meta["sha256"] for e in committed.get("effect_evidence") or [] if isinstance(e,dict)))
         if readback_ok: ensure_chat_job(queue,plan,step,meta,priority)
         action["actions"].append({"step":step.step_id,"phase":"research_reconcile","ok":readback_ok,"zip":meta["sha256"]})
 
@@ -1340,9 +1427,14 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
                 try:
                     if not secretary_succeeded(receipt): raise ValueError("installed Codex invocation did not complete")
                     meta=verify_manifest_zip(out_zip,expected_plan_sha256=plan.sha256)
-                    done=queue.complete(rjob,[{"kind":"research_zip","ref":meta["sha256"],"path":meta["path"]},{"kind":"research_invocation","ref":sha256_file(run_dir/"secretary_receipt.json")}])
+                    receipt_path=run_dir/"secretary_receipt.json"
+                    identity=codex_session_identity_evidence(receipt_path,str(rjob["id"]))
+                    evidence=[{"kind":"research_zip","ref":meta["sha256"],"path":meta["path"]},
+                              {"kind":"research_invocation","ref":sha256_file(receipt_path)}]
+                    if identity: evidence.append(identity)
+                    done=queue.complete(rjob,evidence)
                     committed=queue.get(str(rjob["id"])) if done.get("ok") else None
-                    readback_ok=bool(committed and committed.get("state")=="complete" and any(e.get("kind")=="research_zip" and e.get("ref")==meta["sha256"] for e in committed.get("effect_evidence") or [] if isinstance(e,dict)))
+                    readback_ok=bool(committed and committed.get("state")=="complete" and codex_identity_readback(committed,identity) and any(e.get("kind")=="research_zip" and e.get("ref")==meta["sha256"] for e in committed.get("effect_evidence") or [] if isinstance(e,dict)))
                     if readback_ok: ensure_chat_job(queue,plan,step,meta,priority)
                     action["actions"].append({"step":step.step_id,"phase":"research_effect","ok":readback_ok,"zip":meta["sha256"]})
                 except Exception as exc:
@@ -1468,11 +1560,13 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
             work=verified_work_attachment(pending,plan)
             effect=verify_effect_receipt(receipt_path,plan=plan,step=step,work_sha256=work["sha256"])
             probe=verify_effect_probe(step)
+            identity=codex_session_identity_evidence(invocation_path,str(pending["id"]))
         except Exception:
             action["actions"].append({"step":step.step_id,"phase":"external_effect_reconcile","ok":False,"state":"awaiting_readback"}); continue
         evidence=[{"kind":"external_effect","ref":effect["effect_ref"],"environment":effect["environment"]},{"kind":"external_effect_receipt","ref":effect["receipt_sha256"],"path":str(receipt_path)},{"kind":"chatgpt_work_zip","ref":work["sha256"],"path":work["path"]},{"kind":"independent_effect_probe","ref":probe["sha256"],"observed":probe["observed"],"command":probe["command"]}]
+        if identity: evidence.append(identity)
         done=queue.complete(pending,evidence); committed=queue.get(str(pending["id"])) if done.get("ok") else None
-        readback_ok=bool(committed and committed.get("state")=="complete")
+        readback_ok=bool(committed and committed.get("state")=="complete" and codex_identity_readback(committed,identity))
         action["actions"].append({"step":step.step_id,"phase":"external_effect_reconcile","ok":bool(done.get("ok") and readback_ok),"central_readback_verified":readback_ok,"effect_ref":effect["effect_ref"]})
 
     ejob=None
@@ -1497,10 +1591,12 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
                     if not secretary_succeeded(invocation): raise ValueError("installed Codex invocation did not complete")
                     effect=verify_effect_receipt(effect_receipt,plan=plan,step=step,work_sha256=work["sha256"])
                     probe=verify_effect_probe(step)
+                    identity=codex_session_identity_evidence(run_dir/"secretary_receipt.json",str(ejob["id"]))
                     evidence=[{"kind":"external_effect","ref":effect["effect_ref"],"environment":effect["environment"]},{"kind":"external_effect_receipt","ref":effect["receipt_sha256"],"path":str(effect_receipt)},{"kind":"chatgpt_work_zip","ref":work["sha256"],"path":work["path"]},{"kind":"independent_effect_probe","ref":probe["sha256"],"observed":probe["observed"],"command":probe["command"]}]
+                    if identity: evidence.append(identity)
                     done=queue.complete(ejob,evidence)
                     committed=queue.get(str(ejob["id"])) if done.get("ok") else None
-                    readback_ok=bool(committed and committed.get("state")=="complete" and any(isinstance(e,dict) and e.get("kind")=="external_effect" and e.get("ref")==effect["effect_ref"] for e in committed.get("effect_evidence") or []))
+                    readback_ok=bool(committed and committed.get("state")=="complete" and codex_identity_readback(committed,identity) and any(isinstance(e,dict) and e.get("kind")=="external_effect" and e.get("ref")==effect["effect_ref"] for e in committed.get("effect_evidence") or []))
                     action["actions"].append({"step":step.step_id,"phase":"external_effect_complete","ok":bool(done.get("ok") and readback_ok),"central_readback_verified":readback_ok,"effect_ref":effect["effect_ref"]})
                 except Exception as exc:
                     action["actions"].append({"step":step.step_id,"phase":"external_effect_complete","ok":False,"error":f"{type(exc).__name__}:{exc}"})

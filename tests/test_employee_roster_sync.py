@@ -27,6 +27,8 @@ def test_factual_candidate_discovery_rejects_status_lines(tmp_path):
     found = module.discover([tmp_path])
     assert sorted(found["candidates"]) == ["Daniel Reyes", "Maya Chen"]
     assert found["candidates"]["Maya Chen"]["slack_message"].endswith("p1791232623547069")
+    assert module.role_from_message("Iris Vale — Collaboration Systems Engineer — durable handoff") is None
+    assert module.role_from_message("Iris Vale — Collaboration Systems Engineer — Platform Engineering")
 
 
 def test_activation_requires_named_completed_job_and_central_readback(tmp_path, monkeypatch):

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import importlib.machinery
+import json
 from pathlib import Path
 import uuid
 
@@ -140,6 +142,10 @@ def test_queue_job_has_stable_user_id_and_existing_receipt_prevents_resend(monke
     install_common(monkeypatch, mod, tmp_path, session)
     args = args_for(tmp_path)
     args.queue_job_id = "agent-memory:AM-7:chatgpt"
+    monkeypatch.setenv("COGNILODE_CHATMODE_SEND_FENCE", __import__("json").dumps({
+        "job_id": args.queue_job_id, "worker_id": "rhythm:evanpc", "lease_token": "fenced",
+        "lease_generation": 1, "device_id": "evanpc"}))
+    monkeypatch.setattr(mod, "operator_memory_post", lambda body: {"ok": True})
 
     result = mod.send(args)
     expected = str(uuid.uuid5(uuid.NAMESPACE_URL, "cognilode-chatmode-queue:" + args.queue_job_id))
@@ -149,6 +155,80 @@ def test_queue_job_has_stable_user_id_and_existing_receipt_prevents_resend(monke
         mod.send(args)
     assert duplicate.value.code == "existing_queue_send_requires_reconciliation"
     assert len(session.posts) == 1
+
+
+def test_physical_zip_upload_is_durable_and_d1_boundary_precedes_chat_post(monkeypatch, tmp_path):
+    mod = load_transport()
+    marked = []
+
+    def post(kwargs):
+        assert marked and marked[-1]["operation"] == "record_chatmode_post_started"
+        return sse_success(kwargs)
+
+    session = SequenceSession([post])
+    install_common(monkeypatch, mod, tmp_path, session)
+    zip_path = tmp_path / "research.zip"
+    zip_path.write_bytes(b"PK\x03\x04physical zip payload")
+    calls = []
+
+    def upload(_session, _auth, path, *, device_id):
+        calls.append(path)
+        return {"id": "file_abc123", "name": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "size": path.stat().st_size}, 3
+
+    monkeypatch.setattr(mod, "upload_attachment", upload)
+    monkeypatch.setattr(mod, "operator_memory_post", lambda body: marked.append(body) or {"ok": True})
+    args = args_for(tmp_path)
+    args.attach = [str(zip_path)]
+    args.queue_job_id = "physical-zip-job"
+    monkeypatch.setenv("COGNILODE_CHATMODE_SEND_FENCE", json.dumps({
+        "job_id": args.queue_job_id, "worker_id": "rhythm:evanpc", "lease_token": "fenced",
+        "lease_generation": 1, "device_id": "evanpc"}))
+
+    result = mod.send(args)
+
+    assert result["ok"] is True
+    assert len(calls) == len(session.posts) == 1
+    assert marked[0]["uploads"] == [{"id": "file_abc123", "name": "research.zip",
+        "sha256": hashlib.sha256(zip_path.read_bytes()).hexdigest(), "size": zip_path.stat().st_size}]
+    assert len(marked[0]["receipt_sha256"]) == 64
+    ledger = json.loads((Path(args.output_dir) / ("b4pt0r-chatmode-job-" +
+        hashlib.sha256(args.queue_job_id.encode()).hexdigest()[:24] + ".uploads.json")).read_text())
+    assert next(iter(ledger["files"].values()))["id"] == "file_abc123"
+    ledger_path = Path(args.output_dir) / ("b4pt0r-chatmode-job-" +
+        hashlib.sha256(args.queue_job_id.encode()).hexdigest()[:24] + ".uploads.json")
+    reused, provider_requests, *_ = mod.upload_attachments_durable(
+        args, session, {"access_token": "token", "account_id": "acct"}, "device",
+        [str(zip_path)], ledger_path)
+    assert reused[0]["id"] == "file_abc123"
+    assert provider_requests == 0
+    assert len(calls) == 1
+
+
+def test_upload_retry_after_defers_without_chat_post_or_post_boundary(monkeypatch, tmp_path):
+    mod = load_transport()
+    session = SequenceSession([])
+    install_common(monkeypatch, mod, tmp_path, session)
+    zip_path = tmp_path / "research.zip"
+    zip_path.write_bytes(b"PK\x03\x04physical zip payload")
+    monkeypatch.setattr(mod, "upload_attachment", lambda *a, **k: (_ for _ in ()).throw(
+        mod.ProviderHTTPError("upload", FakeResponse(502, content=b"gateway", headers={"Retry-After": "120"}))))
+    marked = []
+    monkeypatch.setattr(mod, "operator_memory_post", lambda body: marked.append(body) or {"ok": True})
+    args = args_for(tmp_path)
+    args.attach = [str(zip_path)]
+    args.queue_job_id = "failed-upload-job"
+    monkeypatch.setenv("COGNILODE_CHATMODE_SEND_FENCE", json.dumps({
+        "job_id": args.queue_job_id, "worker_id": "rhythm:evanpc", "lease_token": "fenced",
+        "lease_generation": 1, "device_id": "evanpc"}))
+
+    with pytest.raises(mod.PrepostUploadError) as failure:
+        mod.send(args)
+
+    assert failure.value.http_status == 502
+    assert failure.value.retry_after_seconds == 120
+    assert session.posts == []
+    assert marked == []
 
 
 @pytest.mark.parametrize("status", [502, 503])

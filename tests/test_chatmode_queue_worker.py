@@ -647,10 +647,12 @@ def test_ambiguous_gateway_retry_after_defers_exact_id_reconciliation(monkeypatc
            'claimed_by': 'rhythm:evanpc', 'lease_token': 'fenced', 'lease_generation': 1}
     monkeypatch.setattr(module, 'attachment_paths', lambda _job: [])
     monkeypatch.setattr(module, 'result_for_job', lambda _id: None)
-    monkeypatch.setattr(module.sender, 'operator_memory_post', lambda body: {'ok': True})
+    monkeypatch.setattr(module.sender, 'operator_memory_post', lambda body: (
+        {'ok': False, 'error': 'post_may_have_started'} if
+        body['operation'] == 'requeue_chatmode_prepost_failure' else {'ok': True}))
     monkeypatch.setattr(module, 'complete_from_result', lambda *_args: False)
     monkeypatch.setattr(module.subprocess, 'run', lambda *a, **k: SimpleNamespace(
-        returncode=2, stdout=json.dumps({'ok': False, 'state': 'ambiguous_acceptance',
+        returncode=2, stderr='', stdout=json.dumps({'ok': False, 'state': 'ambiguous_acceptance',
            'http_status': 504, 'retry_after_seconds': 120,
            'recovery': {'ambiguous_replay_suppressed': True}})))
 
@@ -660,6 +662,46 @@ def test_ambiguous_gateway_retry_after_defers_exact_id_reconciliation(monkeypatc
     state = json.loads(module.job_state_path(job['id']).read_text())
     assert state['state'] == 'reconcile_required'
     assert state['reconcile_next_at'] >= started + 120
+
+
+def test_upload_only_failure_requeues_for_later_rhythm_and_keeps_zip_ledger(monkeypatch, tmp_path):
+    module = worker()
+    module.ROOT = tmp_path / 'worker'
+    module.sender.DEFAULT_OUTPUT_ROOT = tmp_path / 'sender'
+    module.sender.DEFAULT_OUTPUT_ROOT.mkdir()
+    prompt = 'Process this ZIP in your native sandbox.'
+    job = {'id': 'upload-502', 'prompt': prompt,
+           'prompt_sha256': hashlib.sha256(prompt.encode()).hexdigest(),
+           'claimed_by': 'rhythm:evanpc', 'lease_token': 'fenced', 'lease_generation': 1}
+    stem = module.job_stem(job['id'])
+    ledger = module.sender.DEFAULT_OUTPUT_ROOT / (stem + '.uploads.json')
+    ledger.write_text('{"files":{"sha":{"id":"file_abc"}}}')
+    monkeypatch.setattr(module, 'attachment_paths', lambda _job: [])
+    monkeypatch.setattr(module, 'result_for_job', lambda _id: None)
+    calls = []
+
+    def operator(body):
+        calls.append(body)
+        return {'ok': True}
+
+    monkeypatch.setattr(module.sender, 'operator_memory_post', operator)
+
+    def run(_command, **kwargs):
+        boundary = json.loads(kwargs['env']['COGNILODE_CHATMODE_SEND_FENCE'])
+        assert boundary['job_id'] == job['id']
+        return SimpleNamespace(returncode=2, stdout='', stderr=json.dumps({
+            'state': 'prepost_attachment_upload_failed', 'http_status': 502,
+            'retry_after_seconds': 120}))
+
+    monkeypatch.setattr(module.subprocess, 'run', run)
+    module.execute(job)
+
+    state = json.loads(module.job_state_path(job['id']).read_text())
+    assert state['state'] == 'queued_after_prepost_failure'
+    assert ledger.is_file()
+    requeue = next(c for c in calls if c['operation'] == 'requeue_chatmode_prepost_failure')
+    assert requeue['retry_after_ms'] == 120000
+    assert requeue['user_message_id'] == module.stable_user_message_id(job['id'])
 
 
 def test_later_slot_preserves_rejected_receipt_and_unblocks_sender(monkeypatch, tmp_path):

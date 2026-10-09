@@ -58,6 +58,14 @@ class ProviderHTTPError(CapabilityError):
         )
 
 
+class PrepostUploadError(CapabilityError):
+    def __init__(self, cause: Exception, retry_after_seconds: float = 0) -> None:
+        self.http_status = cause.status if isinstance(cause, ProviderHTTPError) else None
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__("prepost_attachment_upload_failed",
+                         f"{type(cause).__name__}: {str(cause)[:500]}")
+
+
 SAFE_AUTH_REFRESHES = 1
 SAFE_RATE_RETRIES = 2
 SAFE_PREPARE_SERVER_RETRIES = 2
@@ -871,7 +879,7 @@ def upload_attachment(session, auth: dict, source: Path, *, device_id: str) -> t
         timeout=180,
     )
     if put.status_code >= 300:
-        raise CapabilityError("attachment_put_failed", f"attachment PUT HTTP {put.status_code}: {put.text[:500]}")
+        raise ProviderHTTPError("attachment PUT", put)
     finalized = request_json(
         session.post(BASE + f"files/{file_id}/uploaded", headers=headers, json={}, timeout=120),
         f"POST /backend-api/files/{file_id}/uploaded",
@@ -893,6 +901,93 @@ def upload_attachments(session, auth: dict, paths: list[str], *, device_id: str)
         attachments.append(attachment)
         request_count += requests_created
     return attachments, request_count
+
+
+def upload_attachments_durable(args: argparse.Namespace, session, auth: dict, device_id: str,
+                               paths: list[str], ledger_path: Path) -> tuple[list[dict], int, object, dict, str]:
+    """Persist completed physical uploads before the Chat turn can be posted.
+
+    A retry may create an orphan provider file, but never a second Chat turn.
+    Finalized file IDs keyed by the exact ZIP bytes survive process restarts.
+    """
+    try:
+        ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        ledger = {}
+    if not isinstance(ledger, dict):
+        ledger = {}
+    entries = ledger.get("files") if isinstance(ledger.get("files"), dict) else {}
+    attachments: list[dict] = []
+    request_count = 0
+    for item in paths:
+        path = Path(item).expanduser().resolve(strict=True)
+        raw = path.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        key = hashlib.sha256((str(path) + "\0" + digest).encode()).hexdigest()
+        cached = entries.get(key) if isinstance(entries.get(key), dict) else None
+        if cached and cached.get("sha256") == digest and cached.get("name") == path.name and cached.get("id"):
+            attachments.append(cached)
+            continue
+        last_error = None
+        for attempt in range(1, 5):
+            try:
+                attachment, created = upload_attachment(session, auth, path, device_id=device_id)
+                attachments.append(attachment)
+                request_count += created
+                entries[key] = attachment
+                atomic_json(ledger_path, {"schema": "cognilode.chatmode_uploads.v1", "files": entries})
+                last_error = None
+                break
+            except ProviderHTTPError as exc:
+                last_error = exc
+                if exc.status in (401, 403) and attempt < 4:
+                    session, auth, device_id = _refresh_auth_context(args, session, auth)
+                    continue
+                if (exc.status == 429 or exc.status == 408 or 500 <= exc.status <= 599) and attempt < 4:
+                    delay = (_retry_after_seconds(exc.headers) if any(
+                        str(k).lower() == "retry-after" for k in exc.headers) else min(float(attempt), 3.0))
+                    if delay > 30:
+                        break  # Preserve provider advice as the next D1 due time.
+                    time.sleep(delay)
+                    continue
+                break
+            except (TimeoutError, ConnectionError, OSError) as exc:
+                last_error = exc
+                if attempt < 4:
+                    time.sleep(min(float(attempt), 3.0))
+                    continue
+                break
+        if last_error is not None:
+            delay = (_retry_after_seconds(last_error.headers) if isinstance(last_error, ProviderHTTPError)
+                     and any(str(k).lower() == "retry-after" for k in last_error.headers) else 0)
+            raise PrepostUploadError(last_error, delay) from last_error
+    return attachments, request_count, session, auth, device_id
+
+
+def _queue_fence(queue_job_id: str) -> dict:
+    if not queue_job_id:
+        return {}
+    try:
+        fence = json.loads(os.environ.get("COGNILODE_CHATMODE_SEND_FENCE", ""))
+    except (ValueError, TypeError):
+        fence = None
+    if not isinstance(fence, dict) or fence.get("job_id") != queue_job_id or not all(
+        fence.get(key) for key in ("worker_id", "lease_token", "lease_generation", "device_id")):
+        raise CapabilityError("queue_send_fence_missing", "queued Chat turn requires the active D1 lease fence")
+    return fence
+
+
+def _record_post_boundary(fence: dict, user_message_id: str, receipt_path: Path,
+                          attachments: list[dict]) -> None:
+    if not fence:
+        return
+    receipt_sha = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+    uploads = [{key: item.get(key) for key in ("id", "sha256", "size", "name")}
+               for item in attachments]
+    response = operator_memory_post({"operation": "record_chatmode_post_started", **fence,
+        "user_message_id": user_message_id, "receipt_sha256": receipt_sha, "uploads": uploads})
+    if not response.get("ok"):
+        raise CapabilityError("post_boundary_rejected", str(response.get("error") or "D1 rejected Chat POST boundary"))
 
 
 def hydrate_conversation(session, auth: dict, conversation_id: str, *, device_id: str, timeout: int = 120) -> dict:
@@ -1716,6 +1811,7 @@ def send(args: argparse.Namespace) -> dict:
     artifact_dir = output_root / f"{result_id}.files"
     if queue_job_id and (receipt_path.exists() or record_path.exists()):
         raise CapabilityError("existing_queue_send_requires_reconciliation", f"existing send receipt for queue job {queue_job_id}; reconcile exact user message before any new mutation")
+    fence = _queue_fence(queue_job_id)
 
     if args.auth_source == "codex":
         session, auth, device_id = codex_identity()
@@ -1727,7 +1823,8 @@ def send(args: argparse.Namespace) -> dict:
         device_id = device_id_from_cookies(session)
         transport = "host_chrome_state_http"
 
-    attachments, attachment_requests = upload_attachments(session, auth, args.attach, device_id=device_id)
+    attachments, attachment_requests, session, auth, device_id = upload_attachments_durable(
+        args, session, auth, device_id, args.attach, output_root / f"{result_id}.uploads.json")
     message_id, payload = build_payload(
         prompt,
         conversation_id=args.conversation_id,
@@ -1752,7 +1849,7 @@ def send(args: argparse.Namespace) -> dict:
         "raw_path": str(raw_path),
         "started_at": time.time(),
     }
-    receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_json(receipt_path, receipt)
 
     recovery_events: list[dict] = []
     auth_refreshes = 0
@@ -1856,6 +1953,7 @@ def send(args: argparse.Namespace) -> dict:
             selected_raw = str(exc).encode("utf-8", "replace")
             break
 
+        _record_post_boundary(fence, message_id, receipt_path, attachments)
         mutation_attempts += 1
         attempt_path = output_root / f"{result_id}.attempt-{mutation_attempts:02d}.sse"
         try:
@@ -2388,7 +2486,9 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(value, ensure_ascii=False, sort_keys=True))
         return 0 if value.get("ok") else 2
     except CapabilityError as exc:
-        print(json.dumps({"ok": False, "state": exc.code, "error": str(exc)}, sort_keys=True), file=sys.stderr)
+        print(json.dumps({"ok": False, "state": exc.code, "error": str(exc),
+                          "http_status": getattr(exc, "http_status", None),
+                          "retry_after_seconds": getattr(exc, "retry_after_seconds", 0)}, sort_keys=True), file=sys.stderr)
         return 2
 
 

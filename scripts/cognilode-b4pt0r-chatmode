@@ -982,9 +982,9 @@ def connector_hints(connector_ids: list[str]) -> list[str]:
     return result
 
 
-def build_payload(prompt: str, *, conversation_id: str | None, parent_message_id: str | None, model: str, effort: str, connector_ids: list[str] | None = None, attachments: list[dict] | None = None) -> tuple[str, dict]:
+def build_payload(prompt: str, *, conversation_id: str | None, parent_message_id: str | None, model: str, effort: str, connector_ids: list[str] | None = None, attachments: list[dict] | None = None, user_message_id: str | None = None) -> tuple[str, dict]:
     wire_effort = {"medium": "standard", "high": "extended", "xhigh": "xhigh"}[effort]
-    message_id = str(uuid.uuid4())
+    message_id = str(uuid.UUID(user_message_id)) if user_message_id else str(uuid.uuid4())
     system_hints = connector_hints(connector_ids or [])
     metadata = {
         **({"system_hints": system_hints} if system_hints else {}),
@@ -1190,11 +1190,15 @@ def send(args: argparse.Namespace) -> dict:
         raise CapabilityError("empty_prompt", "send requires --prompt or --prompt-file")
     output_root = Path(args.output_dir).expanduser() if args.output_dir else DEFAULT_OUTPUT_ROOT
     output_root.mkdir(parents=True, exist_ok=True)
-    result_id = "b4pt0r-chatmode-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:8]
+    queue_job_id = str(getattr(args, "queue_job_id", "") or "").strip()
+    result_id = ("b4pt0r-chatmode-job-" + hashlib.sha256(queue_job_id.encode()).hexdigest()[:24]) if queue_job_id else (
+        "b4pt0r-chatmode-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:8])
     raw_path = output_root / f"{result_id}.sse"
     receipt_path = output_root / f"{result_id}.sse.receipt.json"
     record_path = output_root / f"{result_id}.json"
     artifact_dir = output_root / f"{result_id}.files"
+    if queue_job_id and (receipt_path.exists() or record_path.exists()):
+        raise CapabilityError("existing_queue_send_requires_reconciliation", f"existing send receipt for queue job {queue_job_id}; reconcile exact user message before any new mutation")
 
     if args.auth_source == "codex":
         session, auth, device_id = codex_identity()
@@ -1214,10 +1218,12 @@ def send(args: argparse.Namespace) -> dict:
         effort=args.effort,
         connector_ids=args.connector_id,
         attachments=attachments,
+        user_message_id=str(uuid.uuid5(uuid.NAMESPACE_URL, "cognilode-chatmode-queue:" + queue_job_id)) if queue_job_id else None,
     )
     receipt = {
         "state": "send_started",
         "transport": transport,
+        "queue_job_id": queue_job_id or None,
         "user_message_id": message_id,
         "parent_message_id": payload.get("parent_message_id"),
         "conversation_id": args.conversation_id or None,
@@ -1731,6 +1737,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--output-dir")
     p.add_argument("--connector-id", action="append", default=[])
     p.add_argument("--attach", action="append", default=[])
+    p.add_argument("--queue-job-id", default="")
     p.add_argument("--timeout", type=int, default=900)
     admit = sub.add_parser("admit-record")
     admit.add_argument("--record", required=True)

@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""Home-network actuator for rhythm-claimed ChatGPT.com chat-mode jobs.
+
+The hosted D1 queue owns priority, dependency readiness, and slot claims. This
+worker owns only the authenticated provider send and its fenced completion.
+An ambiguous send is never replayed; the exact receipt is recovered instead.
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import zipfile
+
+SENDER_PATH = Path(__file__).with_name("cognilode-b4pt0r-chatmode")
+COLLECTOR_PATH = Path(__file__).with_name("cognilode-b4pt0r-collect")
+loader = importlib.machinery.SourceFileLoader("cognilode_chatmode_sender", str(SENDER_PATH))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+assert spec is not None
+sender = importlib.util.module_from_spec(spec)
+loader.exec_module(sender)
+
+ROOT = Path.home() / ".local/share/cognilode/chatmode-queue-worker"
+DEVICE_ID = os.environ.get("COGNILODE_CHATMODE_DEVICE_ID", "evanpc")
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+
+
+def atomic_json(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
+        json.dump(value, tmp, ensure_ascii=False, sort_keys=True)
+        tmp.write("\n")
+        name = tmp.name
+    os.replace(name, path)
+
+
+def event(kind: str, **fields) -> None:
+    print(json.dumps({"at": time.time(), "kind": kind, **fields}, sort_keys=True), flush=True)
+
+
+def job_stem(job_id: str) -> str:
+    return "b4pt0r-chatmode-job-" + hashlib.sha256(job_id.encode()).hexdigest()[:24]
+
+
+def job_state_path(job_id: str) -> Path:
+    return ROOT / "jobs" / (hashlib.sha256(job_id.encode()).hexdigest() + ".json")
+
+
+def selected_for_device(job: dict, device_id: str = DEVICE_ID) -> bool:
+    return (job.get("provider") == "chatgpt.com"
+            and job.get("rhythm_tape_sha256")
+            and job.get("rhythm_slot_index") is not None
+            and str(job.get("claimed_by") or "").startswith("rhythm:" + device_id + ":"))
+
+
+def attachment_paths(job: dict) -> list[Path]:
+    paths = []
+    for row in job.get("attachment_refs") or []:
+        ref = row if isinstance(row, str) else str(row.get("ref") or "")
+        if ref.startswith("file:"):
+            ref = ref.removeprefix("file:")
+        path = Path(ref).expanduser()
+        if not path.is_absolute() or not path.is_file():
+            raise ValueError("attachment not readable on selected network device")
+        if path.stat().st_size > MAX_ATTACHMENT_BYTES:
+            raise ValueError("attachment exceeds 20 MiB")
+        expected = "" if isinstance(row, str) else str(row.get("sha256") or "")
+        if expected and hashlib.sha256(path.read_bytes()).hexdigest() != expected.lower():
+            raise ValueError("attachment SHA-256 mismatch")
+        if path.suffix.lower() == ".zip" and not zipfile.is_zipfile(path):
+            raise ValueError("attachment ZIP invalid")
+        paths.append(path)
+    return paths
+
+
+def validated_result(value: dict) -> tuple[str, list[dict]] | None:
+    central = value.get("central_conversation_store") or {}
+    conversation_id = str(value.get("conversation_id") or "")
+    if not (value.get("assistant_terminal") is True and central.get("central_readback_verified") is True
+            and central.get("conversation_id") == conversation_id and conversation_id):
+        return None
+    files = []
+    for item in value.get("downloaded_files") or []:
+        path = Path(str(item.get("path") or ""))
+        digest = str(item.get("sha256") or "")
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            return None
+        files.append({"path": str(path), "sha256": digest, "name": item.get("name")})
+    if len([f for f in files if str(f["name"] or "").lower().endswith(".zip")]) != 1:
+        return None
+    return conversation_id, files
+
+
+def result_for_job(job_id: str) -> dict | None:
+    stem = job_stem(job_id)
+    for suffix in (".collected.json", ".json"):
+        path = sender.DEFAULT_OUTPUT_ROOT / (stem + suffix)
+        if not path.is_file():
+            continue
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            return value.get("result", value) if isinstance(value, dict) else None
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def fence(job: dict) -> dict:
+    return {"job_id": job["id"], "worker_id": job["claimed_by"],
+            "lease_token": job["lease_token"], "lease_generation": job["lease_generation"]}
+
+
+def complete_from_result(job: dict, value: dict) -> bool:
+    checked = validated_result(value)
+    if not checked:
+        return False
+    conversation_id, files = checked
+    evidence = [{"kind": "provider_conversation", "ref": conversation_id},
+                {"kind": "central_conversation_readback", "ref": conversation_id}]
+    evidence.extend({"kind": "chatgpt_sandbox_artifact", "ref": row["sha256"], "path": row["path"]} for row in files)
+    reply = sender.operator_memory_post({"operation": "complete_job", **fence(job),
+                                          "conversation_id": conversation_id, "effect_evidence": evidence})
+    if reply.get("ok"):
+        atomic_json(job_state_path(job["id"]), {"state": "complete", "job_id": job["id"],
+                                               "conversation_id": conversation_id, "artifacts": files})
+        event("job_completed", job_id=job["id"], conversation_id=conversation_id, artifacts=len(files))
+        return True
+    event("completion_rejected", job_id=job["id"], error=reply.get("error"))
+    return False
+
+
+def recover(job: dict) -> None:
+    value = result_for_job(job["id"])
+    if value and complete_from_result(job, value):
+        return
+    receipt = sender.DEFAULT_OUTPUT_ROOT / (job_stem(job["id"]) + ".sse.receipt.json")
+    if receipt.exists():
+        subprocess.run([sys.executable, str(COLLECTOR_PATH), "--limit", "40"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180, check=False)
+        value = result_for_job(job["id"])
+        if value:
+            complete_from_result(job, value)
+
+
+def execute(job: dict) -> None:
+    job_id = str(job["id"])
+    try:
+        if result_for_job(job_id):
+            recover(job)
+            return
+        receipt = sender.DEFAULT_OUTPUT_ROOT / (job_stem(job_id) + ".sse.receipt.json")
+        if receipt.exists():
+            recover(job)
+            return
+        prompt = str(job.get("prompt") or "")
+        if not prompt.strip() or hashlib.sha256(prompt.encode()).hexdigest() != job.get("prompt_sha256"):
+            raise ValueError("queue prompt missing or hash mismatch")
+        attachments = attachment_paths(job)
+        prompt_path = ROOT / "prompts" / (hashlib.sha256(job_id.encode()).hexdigest() + ".txt")
+        prompt_path.parent.mkdir(parents=True, exist_ok=True)
+        prompt_path.write_text(prompt, encoding="utf-8")
+        atomic_json(job_state_path(job_id), {"state": "prepared", "job_id": job_id,
+                                            "prompt_sha256": job["prompt_sha256"],
+                                            "attachments": [str(p) for p in attachments]})
+        begun = sender.operator_memory_post({"operation": "begin_effect", **fence(job)})
+        if not begun.get("ok"):
+            event("begin_effect_rejected", job_id=job_id, error=begun.get("error"))
+            return
+        atomic_json(job_state_path(job_id), {"state": "effect_pending", "job_id": job_id,
+                                            "prompt_sha256": job["prompt_sha256"]})
+        command = [sys.executable, str(SENDER_PATH), "send", "--prompt-file", str(prompt_path),
+                   "--queue-job-id", job_id, "--effort", str(job.get("reasoning_effort") or "xhigh"),
+                   "--timeout", "1800"]
+        for path in attachments:
+            command.extend(["--attach", str(path)])
+        response = subprocess.run(command, text=True, capture_output=True, timeout=2100, check=False)
+        value = json.loads(response.stdout) if response.stdout.strip().startswith("{") else {}
+        if value and complete_from_result(job, value):
+            return
+        atomic_json(job_state_path(job_id), {"state": "reconcile_required", "job_id": job_id,
+                                            "sender_exit": response.returncode,
+                                            "sender_state": value.get("state"),
+                                            "receipt": str(receipt)})
+        event("send_reconcile_required", job_id=job_id, sender_exit=response.returncode,
+              sender_state=value.get("state"))
+    except Exception as exc:
+        event("job_error_reconcile_required", job_id=job_id, error=type(exc).__name__ + ":" + str(exc)[:250])
+
+
+def health_ready() -> bool:
+    try:
+        response = subprocess.run([sys.executable, str(SENDER_PATH), "health"],
+                                  capture_output=True, text=True, timeout=30, check=False)
+        return response.returncode == 0 and json.loads(response.stdout).get("ok") is True
+    except Exception:
+        return False
+
+
+def heartbeat(device_id: str, active: int) -> None:
+    ready = health_ready()
+    sender.operator_memory_post({"operation": "rhythm_gate_update", "gate": {
+        "active_turns": active, "max_active_turns": 1,
+        "quota_units": 1, "quota_remaining": 1,
+        "estimated_cost": 0, "cost_remaining": 1,
+        "devices": [{"id": device_id, "available": ready, "chatgpt_eligible": True, "priority": 100}],
+    }})
+    event("heartbeat", device_id=device_id, available=ready, active=active)
+
+
+def poll(device_id: str, active_ids: set[str], lock: threading.Lock) -> None:
+    claimed = sender.operator_memory_post({"operation": "list_jobs", "provider": "chatgpt.com",
+                                           "state": "claimed", "limit": 100}).get("jobs") or []
+    pending = sender.operator_memory_post({"operation": "list_jobs", "provider": "chatgpt.com",
+                                           "state": "effect_pending", "limit": 100}).get("jobs") or []
+    for job in pending:
+        if selected_for_device(job, device_id):
+            with lock:
+                if str(job.get("id") or "") in active_ids:
+                    continue
+            recover(job)
+    for job in claimed:
+        if not selected_for_device(job, device_id):
+            continue
+        job_id = str(job.get("id") or "")
+        with lock:
+            if job_id in active_ids:
+                continue
+            active_ids.add(job_id)
+        def run(item=job, key=job_id):
+            try:
+                execute(item)
+            finally:
+                with lock:
+                    active_ids.discard(key)
+        threading.Thread(target=run, daemon=True, name="chatmode-" + job_id[:24]).start()
+
+
+def main() -> int:
+    sender.ensure_runtime()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--device-id", default=DEVICE_ID)
+    parser.add_argument("--interval", type=int, default=60)
+    parser.add_argument("--once", action="store_true")
+    args = parser.parse_args()
+    if not args.device_id or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for c in args.device_id):
+        raise SystemExit("invalid device id")
+    ROOT.mkdir(parents=True, exist_ok=True)
+    with (ROOT / (args.device_id + ".lock")).open("a+") as file:
+        try:
+            fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        active_ids: set[str] = set()
+        lock = threading.Lock()
+        while True:
+            try:
+                with lock:
+                    active = len(active_ids)
+                heartbeat(args.device_id, active)
+                poll(args.device_id, active_ids, lock)
+            except Exception as exc:
+                event("loop_error", error=type(exc).__name__ + ":" + str(exc)[:250])
+            if args.once:
+                return 0
+            time.sleep(max(10, args.interval))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,15 @@
+[Unit]
+Description=Cognilode home-network ChatGPT chat-mode queue actuator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/evan/Projects/codex-backend-sdk/scripts/cognilode-chatmode-queue-worker --device-id evanpc --interval 60
+Restart=always
+RestartSec=15
+CPUQuota=25%
+MemoryMax=1G
+
+[Install]
+WantedBy=default.target

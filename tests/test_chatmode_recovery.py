@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import importlib.machinery
 from pathlib import Path
+import uuid
 
 import pytest
 
@@ -131,6 +132,23 @@ def test_429_honors_retry_after_and_retries_only_explicit_rejection(monkeypatch,
     assert result["recovery"]["ambiguous_replay_suppressed"] is False
     assert len(session.posts) == 2
     assert Path(result["raw_path_host"]).exists()
+
+
+def test_queue_job_has_stable_user_id_and_existing_receipt_prevents_resend(monkeypatch, tmp_path):
+    mod = load_transport()
+    session = SequenceSession([lambda kwargs: sse_success(kwargs)])
+    install_common(monkeypatch, mod, tmp_path, session)
+    args = args_for(tmp_path)
+    args.queue_job_id = "agent-memory:AM-7:chatgpt"
+
+    result = mod.send(args)
+    expected = str(uuid.uuid5(uuid.NAMESPACE_URL, "cognilode-chatmode-queue:" + args.queue_job_id))
+    assert result["user_message_id"] == expected
+    assert result["queue_job_id"] == args.queue_job_id
+    with pytest.raises(mod.CapabilityError) as duplicate:
+        mod.send(args)
+    assert duplicate.value.code == "existing_queue_send_requires_reconciliation"
+    assert len(session.posts) == 1
 
 
 @pytest.mark.parametrize("status", [502, 503])

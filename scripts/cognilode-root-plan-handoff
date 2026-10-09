@@ -1,0 +1,352 @@
+#!/usr/bin/env python3
+"""Transfer a provider-visible root manager plan into the existing TaskFlow engine.
+
+This reader never sends a provider prompt. It carries manager-authored plans as
+instructions; the Secretary/TaskFlow path handles employee dispatch. The shared
+conversation store is checked before claiming multi-year root-memory readiness.
+"""
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+from hashlib import sha256
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+from typing import Any, Callable, Mapping
+import zipfile
+
+HERE = Path(__file__).resolve().parent
+SENDER = HERE / "cognilode-b4pt0r-chatmode"
+CONTROLLER = HERE / "cognilode-taskflow-phase-controller"
+INSTALLER = HERE / "cognilode-taskflow-install-project"
+QUEUE_WORKER = HERE / "cognilode-chatmode-queue-worker"
+BEGIN = "COGNILODE_ROOT_TASKFLOW_PLAN_JSON_BEGIN"
+END = "COGNILODE_ROOT_TASKFLOW_PLAN_JSON_END"
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+IDENT = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,79}$")
+
+
+def _sha(value: str) -> str:
+    return sha256(value.encode("utf-8")).hexdigest()
+
+
+def _load(path: Path, name: str) -> Any:
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    if spec is None:
+        raise ValueError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    loader.exec_module(module)
+    return module
+
+
+def _complete_source(index: Mapping[str, Any], read: Mapping[str, Any]) -> datetime | None:
+    """An index identity or an interim prefix is not a complete stock source."""
+    source = read.get("conversation") or {}
+    if not read.get("ok") or (source.get("provider"), source.get("conversation_id")) != (index.get("provider"), index.get("conversation_id")):
+        return None
+    capture = source.get("capture") or {}
+    if capture.get("drive_verified") is not True or capture.get("source_response_complete") is not True:
+        return None
+    events = source.get("events") or []
+    if not isinstance(events, list) or len(events) < 2 or not all(
+        isinstance(row, Mapping) and row.get("source_content_complete") is True
+        and isinstance(row.get("content"), str) for row in events
+    ):
+        return None
+    if not any(row.get("role") == "user" and row["content"].strip() for row in events):
+        return None
+    if not any(row.get("role") == "assistant" and row["content"].strip() for row in events):
+        return None
+    if (not HEX64.fullmatch(str(source.get("prompt_sha256") or ""))
+        or not HEX64.fullmatch(str(source.get("response_sha256") or ""))):
+        return None
+    times = []
+    for row in events:
+        try:
+            times.append(datetime.fromisoformat(str(row.get("created_at") or "").replace("Z", "+00:00")).astimezone(timezone.utc))
+        except ValueError:
+            continue
+    return min(times) if times else None
+
+
+def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, minimum: int = 500) -> dict[str, Any]:
+    """Count distinct, independently reread, complete Drive-backed conversations."""
+    cursor = "0"
+    seen: set[tuple[str, str]] = set()
+    verified: list[datetime] = []
+    source_refs: list[dict[str, str]] = []
+    pages = 0
+    while True:
+        page = post({"operation": "conversations", "limit": 60, "cursor": cursor})
+        if not page.get("ok") or not isinstance(page.get("records") or page.get("rows") or [], list):
+            raise ValueError("shared conversation index read failed")
+        rows = page.get("records") or page.get("rows") or []
+        pages += 1
+        if pages > 1000:
+            raise ValueError("shared conversation index did not terminate")
+        for index in rows:
+            if not isinstance(index, Mapping):
+                continue
+            key = (str(index.get("provider") or ""), str(index.get("conversation_id") or ""))
+            if not all(key) or key in seen:
+                continue
+            seen.add(key)
+            capture = index.get("capture") or {}
+            if capture.get("drive_verified") is not True or capture.get("source_response_complete") is not True:
+                continue
+            source_read = post({"operation": "read", "provider": key[0], "conversation_id": key[1]})
+            stamp = _complete_source(index, source_read)
+            if stamp is not None:
+                verified.append(stamp)
+                source = source_read["conversation"]
+                source_refs.append({"provider": key[0], "conversation_id": key[1],
+                                    "prompt_sha256": str(source["prompt_sha256"]),
+                                    "response_sha256": str(source["response_sha256"])})
+        next_cursor = str(page.get("next_cursor") or "")
+        if not next_cursor:
+            break
+        if next_cursor == cursor:
+            raise ValueError("shared conversation index cursor stalled")
+        cursor = next_cursor
+    span_days = (max(verified) - min(verified)).days if verified else 0
+    source_refs.sort(key=lambda row: (row["provider"], row["conversation_id"]))
+    return {"schema": "cognilode.root_shared_stock_census.v1", "distinct_complete": len(verified),
+            "earliest_source_utc": min(verified).isoformat() if verified else None,
+            "latest_source_utc": max(verified).isoformat() if verified else None,
+            "span_days": span_days, "minimum": minimum,
+            "multi_year_ready": len(verified) >= minimum and span_days >= 730,
+            "index_identities_seen": len(seen), "pages": pages,
+            "verified_source_refs": source_refs}
+
+
+def verify_root_memory_packet(job: Mapping[str, Any], central: Mapping[str, Any],
+                              stock: Mapping[str, Any], *, minimum: int = 500,
+                              stage_remote: Callable[[str, str], Path] | None = None) -> str:
+    """Ensure the root actually received multi-layer memory from the shared stock."""
+    expected_refs = {(str(row["provider"]), str(row["conversation_id"]),
+                      str(row["prompt_sha256"]), str(row["response_sha256"]))
+                     for row in stock.get("verified_source_refs") or []}
+    uploads = central.get("provider_structured_uploads") or []
+    for attachment in job.get("attachment_refs") or []:
+        if not isinstance(attachment, Mapping) or not str(attachment.get("ref") or "").startswith("file:/"):
+            continue
+        path = Path(str(attachment["ref"])[5:])
+        digest = str(attachment.get("sha256") or "")
+        if (not HEX64.fullmatch(digest)
+            or not any(isinstance(row, Mapping) and row.get("sha256") == digest for row in uploads)):
+            continue
+        if not path.is_file() or sha256(path.read_bytes()).hexdigest() != digest:
+            if stage_remote is None:
+                stage_remote = _load(QUEUE_WORKER, "root_plan_attachment_stager")._stage_remote_attachment
+            for mirror in attachment.get("mirrors") or []:
+                try:
+                    candidate = stage_remote(str(mirror), digest)
+                    if candidate.is_file() and sha256(candidate.read_bytes()).hexdigest() == digest:
+                        path = candidate
+                        break
+                except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                    continue
+        if not path.is_file() or sha256(path.read_bytes()).hexdigest() != digest:
+            continue
+        try:
+            with zipfile.ZipFile(path) as archive:
+                if archive.testzip() is not None or "MANIFEST.json" not in archive.namelist():
+                    continue
+                manifest = json.loads(archive.read("MANIFEST.json"))
+                if manifest.get("schema") != "cognilode.root_memory_packet.v1":
+                    continue
+                rows = manifest.get("source_refs") or []
+                cited = {(str(row["provider"]), str(row["conversation_id"]),
+                          str(row["prompt_sha256"]), str(row["response_sha256"]))
+                         for row in rows if isinstance(row, Mapping)}
+                if len(cited) < minimum or not cited <= expected_refs:
+                    continue
+                sections = manifest.get("sections") or {}
+                if not isinstance(sections, Mapping) or not all(k in sections for k in ("global", "project", "role")):
+                    continue
+                if any(not isinstance(sections[k], Mapping) or not str(sections[k].get("path") or "")
+                       or sections[k]["path"] not in archive.namelist()
+                       or sha256(archive.read(sections[k]["path"])).hexdigest() != sections[k].get("sha256")
+                       or len(archive.read(sections[k]["path"]).strip()) < 100
+                       for k in ("global", "project", "role")):
+                    continue
+                return digest
+        except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile):
+            continue
+    raise ValueError("no provider-uploaded, shared-source-verified root memory packet")
+
+
+def extract_plan(job: Mapping[str, Any], central: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
+    if (job.get("state") != "complete" or job.get("provider") != "chatgpt.com"
+        or job.get("project") != "root-agent" or not job.get("rhythm_tape_sha256")
+        or job.get("conversation_id") != central.get("conversation_id")):
+        raise ValueError("completed rhythm-queued root Chat-mode job required")
+    evidence = job.get("effect_evidence") or []
+    if not all(any(isinstance(row, Mapping) and row.get("kind") == kind
+                   and row.get("ref") == job["conversation_id"] for row in evidence)
+               for kind in ("provider_conversation", "central_conversation_readback")):
+        raise ValueError("root provider turn and central readback not proven")
+    assistant = [str(row.get("content")) for row in central.get("events") or []
+                 if isinstance(row, Mapping) and row.get("role") == "assistant"
+                 and row.get("source_content_complete") is True]
+    if not assistant:
+        raise ValueError("no complete provider-visible root assistant response")
+    text = assistant[-1]
+    if text.count(BEGIN) != 1 or text.count(END) != 1:
+        raise ValueError("root response needs one exact plan block")
+    raw = text.split(BEGIN, 1)[1].split(END, 1)[0].strip()
+    plan = json.loads(raw)
+    if not isinstance(plan, dict) or plan.get("schema") != "cognilode.root_taskflow_plan.v1":
+        raise ValueError("root plan schema mismatch")
+    return plan, _sha(text)
+
+
+def render_taskflow(plan: Mapping[str, Any], *, conversation_id: str, assistant_sha256: str) -> str:
+    project_id = str(plan.get("project_id") or "")
+    name = str(plan.get("project_name") or "").strip()
+    if (not IDENT.fullmatch(project_id) or not name or "\n" in name
+        or not str(plan.get("research_employee") or "").strip()
+        or not str(plan.get("external_employee") or "").strip()
+        or plan.get("research_employee") == plan.get("external_employee")):
+        raise ValueError("invalid root project")
+    steps = plan.get("steps") or []
+    if not isinstance(steps, list) or not steps or len(steps) > 64:
+        raise ValueError("root plan needs 1-64 steps")
+    ids: set[str] = set()
+    lines = [f"project {name}", f"id {project_id}",
+             f"root_conversation_id {conversation_id}", f"root_assistant_sha256 {assistant_sha256}", ""]
+    for item in steps:
+        if not isinstance(item, Mapping):
+            raise ValueError("step is not an object")
+        sid = str(item.get("id") or "")
+        title = str(item.get("title") or "").strip()
+        owner = str(item.get("owner") or "").strip()
+        role = str(item.get("role") or "").strip()
+        instructions = item.get("instructions") or []
+        deps = item.get("depends_on") or []
+        if (not IDENT.fullmatch(sid) or sid in ids or not title or "\n" in title
+            or not owner or "\n" in owner or not role or "\n" in role
+            or not isinstance(instructions, list) or not instructions
+            or not isinstance(deps, list) or any(not IDENT.fullmatch(str(d)) for d in deps)):
+            raise ValueError("invalid root plan step")
+        ids.add(sid)
+        lines.extend([f"[ ] {sid} {title}", f"    owner: {owner}", f"    role: {role}"])
+        if deps:
+            lines.append("    depends_on: " + ", ".join(str(d) for d in deps))
+        lines.append("    do:")
+        for instruction in instructions:
+            value = str(instruction).strip()
+            if not value or "\n" in value:
+                raise ValueError("instruction must be one literal plan line")
+            lines.append("      - " + value)
+        probe = item.get("effect_probe") or {}
+        command = str(probe.get("command") or "") if isinstance(probe, Mapping) else ""
+        expected = str(probe.get("expected") or "") if isinstance(probe, Mapping) else ""
+        argv = shlex.split(command)
+        if (not isinstance(probe, Mapping) or "\n" in command or "\n" in expected
+            or len(argv) < 4
+            or argv[:2] != ["/usr/bin/python3", "-I"]
+            or not Path(argv[2]).is_absolute()
+            or not expected.strip()):
+            raise ValueError("independent effect probe command required")
+        lines.extend(["    effect_probe_command: " + str(probe["command"]),
+                      "    effect_probe_expected: " + expected.strip(), ""])
+    if any(str(d) not in ids for item in steps for d in item.get("depends_on") or []):
+        raise ValueError("dependency references absent step")
+    rendered = "\n".join(lines)
+    controller = _load(CONTROLLER, "root_plan_taskflow_parser")
+    controller.parse_plan_text(rendered)
+    return rendered
+
+
+def handoff(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, job_id: str,
+            output_root: Path, minimum: int = 500,
+            install: Callable[[Path, Mapping[str, Any]], Mapping[str, Any]] | None = None) -> dict[str, Any]:
+    stock = shared_stock_census(post, minimum=minimum)
+    if not stock["multi_year_ready"]:
+        public_stock = {key: value for key, value in stock.items() if key != "verified_source_refs"}
+        return {"ok": False, "reason": "shared_multi_year_stock_incomplete", "stock": public_stock,
+                "provider_requests_created": 0, "plan_written": False}
+    result = post({"operation": "get_job", "job_id": job_id})
+    job = result.get("job") or {}
+    read = post({"operation": "read", "provider": "chatgpt.com",
+                 "conversation_id": job.get("conversation_id")})
+    central = read.get("conversation") or {}
+    plan, source_sha = extract_plan(job, central)
+    memory_packet_sha = verify_root_memory_packet(job, central, stock, minimum=minimum)
+    rendered = render_taskflow(plan, conversation_id=job["conversation_id"], assistant_sha256=source_sha)
+    target = output_root / (str(plan["project_id"]) + ".plan")
+    output_root.mkdir(parents=True, exist_ok=True)
+    repo = subprocess.run(["git", "-C", str(output_root), "rev-parse", "--show-toplevel"],
+                          text=True, capture_output=True, timeout=10, check=False)
+    if repo.returncode != 0:
+        raise ValueError("root plan destination must be inside the existing TaskFlow Git project")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        if target.read_text(encoding="utf-8") != rendered:
+            raise ValueError("root plan target already exists with different source")
+    else:
+        tmp = target.with_suffix(".plan.next")
+        tmp.write_text(rendered, encoding="utf-8")
+        os.replace(tmp, target)
+    project_repo = Path(repo.stdout.strip()).resolve()
+    relative = target.resolve().relative_to(project_repo).as_posix()
+    committed = subprocess.run(["git", "-C", str(project_repo), "show", f"HEAD:{relative}"],
+                               capture_output=True, timeout=10, check=False)
+    if committed.returncode != 0 or _sha(committed.stdout.decode("utf-8")) != _sha(rendered):
+        subprocess.run(["git", "-C", str(project_repo), "add", "--", relative],
+                       timeout=15, check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(project_repo), "commit", "--only", "-m",
+                        f"Record provider-root plan {plan['project_id']} {source_sha[:12]}", "--", relative],
+                       timeout=30, check=True, capture_output=True)
+    controller = _load(CONTROLLER, "root_plan_taskflow_commit_verifier")
+    controller.verify_plan_revision(controller.parse_plan(target))
+    installation = install(target, plan) if install is not None else None
+    if installation is not None and installation.get("ok") is not True:
+        raise ValueError("TaskFlow/Secretary service installation did not verify")
+    public_stock = {key: value for key, value in stock.items() if key != "verified_source_refs"}
+    return {"ok": True, "plan_path": str(target), "plan_sha256": _sha(rendered),
+            "root_assistant_sha256": source_sha, "root_memory_packet_sha256": memory_packet_sha,
+            "stock": public_stock,
+            "provider_requests_created": 0, "plan_written": True,
+            "secretary_taskflow_installation": installation}
+
+
+def install_taskflow(path: Path, plan: Mapping[str, Any]) -> Mapping[str, Any]:
+    command = [str(INSTALLER), "--instance", str(plan["project_id"]), "--plan", str(path),
+               "--research-employee", str(plan["research_employee"]),
+               "--external-employee", str(plan["external_employee"]),
+               "--priority", str(int(plan.get("priority") or 50))]
+    done = subprocess.run(command, text=True, capture_output=True, timeout=90, check=False)
+    if done.returncode != 0:
+        raise ValueError(f"TaskFlow installer failed: {done.stderr[-800:]}")
+    value = json.loads(done.stdout)
+    if value.get("ok") is not True or value.get("single_queue") != "cloudflare-d1":
+        raise ValueError("TaskFlow installation missing single-queue readback")
+    return value
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root-job-id", required=True)
+    parser.add_argument("--output-root", type=Path, required=True,
+                        help="directory inside an existing Git project; source plan is committed before installation")
+    args = parser.parse_args()
+    sender = _load(SENDER, "root_plan_d1_reader")
+    result = handoff(sender.operator_memory_post, job_id=args.root_job_id,
+                     output_root=args.output_root, install=install_taskflow)
+    print(json.dumps(result, sort_keys=True))
+    return 0 if result["ok"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

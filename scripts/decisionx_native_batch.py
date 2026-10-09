@@ -96,9 +96,20 @@ def run(source_zip: Path, output_dir: Path, source_zips: list[Path]) -> dict:
         if ("user", row["intent_turn"]["text"]) not in messages or any(
                 ("assistant", action["text"]) not in messages for action in row["action_turns"]):
             raise ValueError("episode text is absent from its complete source")
+        if row.get("next_user_turn") and (
+                "user", row["next_user_turn"]["text"]) not in messages:
+            raise ValueError("episode evaluation absent from complete source")
+        if any(("assistant", action["text"]) not in messages
+               for action in row.get("following_action_turns") or []):
+            raise ValueError("adjacent action absent from complete source")
+        if row.get("following_user_turn") and (
+                "user", row["following_user_turn"]["text"]) not in messages:
+            raise ValueError("adjacent evaluation absent from complete source")
         text = "\n".join([row["intent_turn"]["text"],
                           *(item["text"] for item in row["action_turns"]),
-                          (row.get("next_user_turn") or {}).get("text", "")])
+                          (row.get("next_user_turn") or {}).get("text", ""),
+                          *(item["text"] for item in row.get("following_action_turns") or []),
+                          (row.get("following_user_turn") or {}).get("text", "")])
         term_docs.append(Counter(TERMS.findall(text.casefold())))
     document_frequency = Counter(term for bag in term_docs for term in bag)
     neighbors = []

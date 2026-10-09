@@ -42,6 +42,7 @@ HERE = Path(__file__).resolve().parent
 SENDER_PATH = HERE / "cognilode-b4pt0r-chatmode"
 QUEUE_WORKER_PATH = HERE / "cognilode-chatmode-queue-worker"
 SLACK_ROLES_PATH = HERE.parent / "config/employee-slack-roles.json"
+SLACK_CANDIDATES_PATH = HERE.parent / "config/employee-slack-candidates.json"
 DEFAULT_SECRETARY = Path.home() / "bin/modified-codex-secretary"
 DEFAULT_STATE_ROOT = Path.home() / ".local/share/cognilode/taskflow-phase-controller"
 MAX_ZIP_BYTES = 20 * 1024 * 1024
@@ -89,6 +90,11 @@ def stable_id(*parts: str) -> str:
 def slack_role_context(employee: str) -> str:
     directory=json.loads(SLACK_ROLES_PATH.read_text(encoding="utf-8"))
     entry=(directory.get("employees") or {}).get(employee)
+    if entry is None and SLACK_CANDIDATES_PATH.is_file():
+        # A candidate may run a bounded TaskFlow onboarding turn, but root
+        # planning still sees only the separately verified installed roster.
+        candidates=json.loads(SLACK_CANDIDATES_PATH.read_text(encoding="utf-8"))
+        entry=(candidates.get("candidates") or {}).get(employee)
     if not isinstance(entry,dict) or not entry.get("role") or not entry.get("slack_message"):
         raise ValueError(f"Slack role missing for named employee: {employee}")
     return f"{employee} — {entry['role']} — {entry.get('org','')}\nSlack role source: {entry['slack_message']}"

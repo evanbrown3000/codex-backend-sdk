@@ -1,0 +1,541 @@
+{
+  "candidates": {
+    "Daniel Reyes": {
+      "org": "Platform Engineering (cross-team: Infrastructure & Reliability, Provider Integrations, Data Platform, Research Engineering)",
+      "role": "Staff Agent Runtime & Systems Engineer",
+      "role_variants": [
+        {
+          "org": "Interaction & Execution Platform",
+          "role": "Staff Agent Runtime & Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791232877519509"
+        },
+        {
+          "org": "Interaction & Execution Platform",
+          "role": "Staff Agent Runtime & Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791233225884869"
+        },
+        {
+          "org": "Platform Engineering (cross-team: Infrastructure & Reliability, Provider Integrations, Data Platform, Research Engineering)",
+          "role": "Staff Agent Runtime & Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791233484414669"
+        },
+        {
+          "org": "Interaction & Execution Platform",
+          "role": "Staff Agent Runtime & Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791232882994419"
+        },
+        {
+          "org": "Interaction & Execution Platform",
+          "role": "Staff Agent Runtime & Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791233227421259"
+        },
+        {
+          "org": "Platform Engineering (cross-team: Infrastructure & Reliability, Provider Integrations, Data Platform, Research Engineering)",
+          "role": "Staff Agent Runtime & Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791233481500049"
+        },
+        {
+          "org": "Platform Engineering (cross-team: Infrastructure & Reliability, Provider Integrations, Data Platform, Research Engineering)",
+          "role": "Staff Agent Runtime & Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C7RGTBC6L/p1791233405285829"
+        }
+      ],
+      "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791233484414669",
+      "sources": [
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791232882994419",
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791233227421259",
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791233481500049",
+        "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791232877519509",
+        "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791233225884869",
+        "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791233484414669",
+        "https://everything-ces8532.slack.com/archives/C0C7RGTBC6L/p1791233405285829"
+      ]
+    },
+    "Elliot Mercer": {
+      "org": "Platform Engineering; Research Engineering; Infrastructure & Reliability",
+      "role": "Principal Platform Systems Engineer",
+      "role_variants": [
+        {
+          "org": "Platform Engineering; Research Engineering; Infrastructure & Reliability",
+          "role": "Principal Platform Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791233507811289"
+        },
+        {
+          "org": "Platform Engineering; Research Engineering; Infrastructure & Reliability",
+          "role": "Principal Platform Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791233545551179"
+        },
+        {
+          "org": "Platform Engineering; Research Engineering; Infrastructure & Reliability",
+          "role": "Principal Platform Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C7RGTBC6L/p1791233549776129"
+        }
+      ],
+      "slack_message": "https://everything-ces8532.slack.com/archives/C0C7RGTBC6L/p1791233549776129",
+      "sources": [
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791233545551179",
+        "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791233507811289",
+        "https://everything-ces8532.slack.com/archives/C0C7RGTBC6L/p1791233549776129"
+      ]
+    },
+    "Jordan Vale": {
+      "org": "Infrastructure & Reliability / Provider Integrations",
+      "role": "Staff Systems Capability Engineer",
+      "role_variants": [
+        {
+          "org": "Infrastructure & Reliability / Provider Integrations",
+          "role": "Staff Systems Capability Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791263475664799"
+        },
+        {
+          "org": "Infrastructure & Reliability / Provider Integrations",
+          "role": "Staff Systems Capability Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791263473783309"
+        }
+      ],
+      "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791263475664799",
+      "sources": [
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791263473783309",
+        "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791263475664799"
+      ]
+    },
+    "Lena Ortiz": {
+      "org": "Platform Engineering; embedded Data Platform and Research Engineering",
+      "role": "Staff Platform & Knowledge Systems Engineer",
+      "role_variants": [
+        {
+          "org": "Platform Engineering; embedded with Data Platform and Research Engineering",
+          "role": "Staff Platform & Knowledge Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791238987353439"
+        },
+        {
+          "org": "Platform Engineering; embedded Data Platform and Research Engineering",
+          "role": "Staff Platform & Knowledge Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791244931539229"
+        },
+        {
+          "org": "Platform Engineering; embedded with Data Platform and Research Engineering",
+          "role": "Staff Platform & Knowledge Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791238986070729"
+        },
+        {
+          "org": "Platform Engineering; embedded Data Platform and Research Engineering",
+          "role": "Staff Platform & Knowledge Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C4JH8N4JZ/p1791244210045579"
+        },
+        {
+          "org": "Platform Engineering; embedded Data Platform and Research Engineering",
+          "role": "Staff Platform & Knowledge Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C4JH8N4JZ/p1791244928585709"
+        },
+        {
+          "org": "Platform Engineering; embedded Data Platform and Research Engineering",
+          "role": "Staff Platform & Knowledge Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C4JH8N4JZ/p1791245753596119"
+        },
+        {
+          "org": "Platform Engineering; embedded with Data Platform and Research Engineering",
+          "role": "Staff Platform & Knowledge Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C7RGTBC6L/p1791238989474959"
+        }
+      ],
+      "slack_message": "https://everything-ces8532.slack.com/archives/C0C4JH8N4JZ/p1791245753596119",
+      "sources": [
+        "https://everything-ces8532.slack.com/archives/C0C4JH8N4JZ/p1791244210045579",
+        "https://everything-ces8532.slack.com/archives/C0C4JH8N4JZ/p1791244928585709",
+        "https://everything-ces8532.slack.com/archives/C0C4JH8N4JZ/p1791245753596119",
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791238986070729",
+        "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791238987353439",
+        "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791244931539229",
+        "https://everything-ces8532.slack.com/archives/C0C7RGTBC6L/p1791238989474959"
+      ]
+    },
+    "Leo Hart": {
+      "org": "Platform Engineering; secondary: Research Engineering",
+      "role": "Staff Platform Systems Engineer",
+      "role_variants": [
+        {
+          "org": "Platform Engineering; secondary: Research Engineering",
+          "role": "Staff Platform Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791243653081069"
+        },
+        {
+          "org": "Platform Engineering; secondary: Research Engineering",
+          "role": "Staff Platform Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791243651870209"
+        }
+      ],
+      "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791243653081069",
+      "sources": [
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791243651870209",
+        "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791243653081069"
+      ]
+    },
+    "Mara Voss": {
+      "org": "Autonomous Systems; cross-team Provider Integrations",
+      "role": "Principal Autonomy Integration Engineer",
+      "role_variants": [
+        {
+          "org": "Autonomous Systems",
+          "role": "Principal Autonomy Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C7047KMS5/p1791243776114989"
+        },
+        {
+          "org": "Autonomous Systems",
+          "role": "Principal Autonomy Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791238712735289"
+        },
+        {
+          "org": "Autonomous Systems (primary); cross-team Data Platform and AI Research",
+          "role": "Principal Autonomy Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791243735598689"
+        },
+        {
+          "org": "Autonomous Systems / Data Platform",
+          "role": "Principal Autonomy Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791252626883059"
+        },
+        {
+          "org": "Autonomous Systems",
+          "role": "Principal Autonomy Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791238711385129"
+        },
+        {
+          "org": "Autonomous Systems (primary); cross-team Provider Integrations and Data Platform",
+          "role": "Principal Autonomy Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791243734444289"
+        },
+        {
+          "org": "Autonomous Systems / Provider Integrations",
+          "role": "Principal Autonomy Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791252630251969"
+        },
+        {
+          "org": "Autonomous Systems; cross-team Provider Integrations",
+          "role": "Principal Autonomy Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791264813744289"
+        }
+      ],
+      "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791264813744289",
+      "sources": [
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791238711385129",
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791243734444289",
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791252630251969",
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791264813744289",
+        "https://everything-ces8532.slack.com/archives/C0C7047KMS5/p1791243776114989",
+        "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791238712735289",
+        "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791243735598689",
+        "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791252626883059"
+      ]
+    },
+    "Maya Chen": {
+      "org": "Platform Engineering",
+      "role": "Staff Systems Integration Engineer",
+      "role_variants": [
+        {
+          "org": "Interaction & Execution Platform",
+          "role": "Staff Systems Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791232623547069"
+        },
+        {
+          "org": "Platform Engineering",
+          "role": "Staff Systems Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791233431131339"
+        },
+        {
+          "org": "Interaction & Execution Platform",
+          "role": "Staff Systems Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791232624789609"
+        },
+        {
+          "org": "Platform Engineering",
+          "role": "Staff Systems Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791233388051249"
+        },
+        {
+          "org": "Platform Engineering",
+          "role": "Staff Systems Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791233715823319"
+        },
+        {
+          "org": "Platform Engineering",
+          "role": "Staff Systems Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C7RGTBC6L/p1791233385692289"
+        },
+        {
+          "org": "Platform Engineering",
+          "role": "Staff Systems Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70S09ZPE/p1791233468381269"
+        }
+      ],
+      "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791233715823319",
+      "sources": [
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791232624789609",
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791233388051249",
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791233715823319",
+        "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791232623547069",
+        "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791233431131339",
+        "https://everything-ces8532.slack.com/archives/C0C70S09ZPE/p1791233468381269",
+        "https://everything-ces8532.slack.com/archives/C0C7RGTBC6L/p1791233385692289"
+      ]
+    },
+    "Nadia Brooks": {
+      "org": "Research Engineering (liaison: Data Platform)",
+      "role": "Staff Knowledge Systems Engineer",
+      "role_variants": [
+        {
+          "org": "Research Engineering (liaison: Data Platform)",
+          "role": "Staff Knowledge Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791233489315229"
+        },
+        {
+          "org": "Research Engineering (liaison: Data Platform)",
+          "role": "Staff Knowledge Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791233867573459"
+        },
+        {
+          "org": "Research Engineering (liaison: Data Platform)",
+          "role": "Staff Knowledge Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791233492333689"
+        }
+      ],
+      "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791233867573459",
+      "sources": [
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791233492333689",
+        "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791233489315229",
+        "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791233867573459"
+      ]
+    },
+    "Priya Nandakumar": {
+      "org": "Platform Engineering (consumer of Provider Integrations)",
+      "role": "Principal Platform Integration Engineer",
+      "role_variants": [
+        {
+          "org": "Platform Engineering (cross-team: Data Platform, AI Research)",
+          "role": "Principal Platform Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791233634460129"
+        },
+        {
+          "org": "Platform Engineering (cross-team: Provider Integrations)",
+          "role": "Principal Platform Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791233649604249"
+        },
+        {
+          "org": "Platform Engineering (cross-team: AI Research)",
+          "role": "Principal Platform Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C4JH8N4JZ/p1791233726930109"
+        },
+        {
+          "org": "Platform Engineering (cross-team: Data Platform)",
+          "role": "Principal Platform Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C7RGTBC6L/p1791233679886699"
+        },
+        {
+          "org": "Platform Engineering (consumer of Provider Integrations)",
+          "role": "Principal Platform Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70S09ZPE/p1791233827092529"
+        }
+      ],
+      "slack_message": "https://everything-ces8532.slack.com/archives/C0C70S09ZPE/p1791233827092529",
+      "sources": [
+        "https://everything-ces8532.slack.com/archives/C0C4JH8N4JZ/p1791233726930109",
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791233649604249",
+        "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791233634460129",
+        "https://everything-ces8532.slack.com/archives/C0C70S09ZPE/p1791233827092529",
+        "https://everything-ces8532.slack.com/archives/C0C7RGTBC6L/p1791233679886699"
+      ]
+    },
+    "Rina Hale": {
+      "org": "Platform Engineering & Infrastructure/Reliability",
+      "role": "Principal Systems Integration Engineer",
+      "role_variants": [
+        {
+          "org": "Platform Engineering & Infrastructure/Reliability",
+          "role": "Principal Systems Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C33L4P3N1/p1791233206000479"
+        },
+        {
+          "org": "Platform Engineering & Infrastructure/Reliability",
+          "role": "Principal Systems Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C33L4PD53/p1791233207400369"
+        },
+        {
+          "org": "Platform Engineering & Infrastructure/Reliability",
+          "role": "Principal Systems Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791233135538629"
+        },
+        {
+          "org": "Platform Engineering & Infrastructure/Reliability",
+          "role": "Principal Systems Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791233107482579"
+        },
+        {
+          "org": "Platform Engineering & Infrastructure/Reliability",
+          "role": "Principal Systems Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C4JH8N4JZ/p1791233138373119"
+        },
+        {
+          "org": "Platform Engineering & Infrastructure/Reliability",
+          "role": "Principal Systems Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C7RGTBC6L/p1791233106009519"
+        },
+        {
+          "org": "Platform Engineering & Infrastructure/Reliability",
+          "role": "Principal Systems Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70S09ZPE/p1791233056079829"
+        }
+      ],
+      "slack_message": "https://everything-ces8532.slack.com/archives/C0C33L4PD53/p1791233207400369",
+      "sources": [
+        "https://everything-ces8532.slack.com/archives/C0C33L4P3N1/p1791233206000479",
+        "https://everything-ces8532.slack.com/archives/C0C33L4PD53/p1791233207400369",
+        "https://everything-ces8532.slack.com/archives/C0C4JH8N4JZ/p1791233138373119",
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791233107482579",
+        "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791233135538629",
+        "https://everything-ces8532.slack.com/archives/C0C70S09ZPE/p1791233056079829",
+        "https://everything-ces8532.slack.com/archives/C0C7RGTBC6L/p1791233106009519"
+      ]
+    },
+    "Rowan Hale": {
+      "org": "Operator & Product Experience",
+      "role": "Staff Platform Integration Engineer",
+      "role_variants": [
+        {
+          "org": "Operator & Product Experience",
+          "role": "Staff Platform Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C33L4P3N1/p1791233092109239"
+        },
+        {
+          "org": "Operator & Product Experience",
+          "role": "Staff Platform Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C33L4PD53/p1791233096855379"
+        },
+        {
+          "org": "Platform Engineering (embedded with Operator & Product Experience)",
+          "role": "Staff Platform Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791232985117299"
+        },
+        {
+          "org": "Operator & Product Experience",
+          "role": "Staff Platform Integration Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791233001621739"
+        }
+      ],
+      "slack_message": "https://everything-ces8532.slack.com/archives/C0C33L4PD53/p1791233096855379",
+      "sources": [
+        "https://everything-ces8532.slack.com/archives/C0C33L4P3N1/p1791233092109239",
+        "https://everything-ces8532.slack.com/archives/C0C33L4PD53/p1791233096855379",
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791233001621739",
+        "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791232985117299"
+      ]
+    },
+    "Sofia Park": {
+      "org": "Provider Integrations",
+      "role": "Principal Hosted-Agent Systems Engineer",
+      "role_variants": [
+        {
+          "org": "Provider Integrations",
+          "role": "Principal Hosted-Agent Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791239120642839"
+        },
+        {
+          "org": "Provider Integrations",
+          "role": "Principal Hosted-Agent Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791244370205429"
+        },
+        {
+          "org": "Provider Integrations",
+          "role": "Principal Hosted-Agent Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791238598162079"
+        },
+        {
+          "org": "Provider Integrations",
+          "role": "Principal Hosted-Agent Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791238806529249"
+        },
+        {
+          "org": "Provider Integrations",
+          "role": "Principal Hosted-Agent Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791239119051019"
+        },
+        {
+          "org": "Provider Integrations",
+          "role": "Principal Hosted-Agent Systems Engineer",
+          "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791244348358239"
+        }
+      ],
+      "slack_message": "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791244370205429",
+      "sources": [
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791238598162079",
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791238806529249",
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791239119051019",
+        "https://everything-ces8532.slack.com/archives/C0C6RR0D66R/p1791244348358239",
+        "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791239120642839",
+        "https://everything-ces8532.slack.com/archives/C0C70QMKCEQ/p1791244370205429"
+      ]
+    }
+  },
+  "channels": {
+    "agent-team-chatgpt-transport": [
+      "Rina Hale",
+      "Rowan Hale"
+    ],
+    "agent-team-decisionx-history": [
+      "Rina Hale",
+      "Rowan Hale"
+    ],
+    "cognilode-remote-environments": [
+      "Mara Voss"
+    ],
+    "proj-agent-memory": [
+      "Daniel Reyes",
+      "Elliot Mercer",
+      "Jordan Vale",
+      "Lena Ortiz",
+      "Leo Hart",
+      "Mara Voss",
+      "Maya Chen",
+      "Nadia Brooks",
+      "Priya Nandakumar",
+      "Rina Hale",
+      "Rowan Hale",
+      "Sofia Park"
+    ],
+    "proj-hosted-agents": [
+      "Daniel Reyes",
+      "Elliot Mercer",
+      "Jordan Vale",
+      "Lena Ortiz",
+      "Leo Hart",
+      "Mara Voss",
+      "Maya Chen",
+      "Nadia Brooks",
+      "Priya Nandakumar",
+      "Rina Hale",
+      "Rowan Hale",
+      "Sofia Park"
+    ],
+    "proj-rpe-taskflow": [
+      "Lena Ortiz",
+      "Priya Nandakumar",
+      "Rina Hale"
+    ],
+    "proj-unified-storage": [
+      "Daniel Reyes",
+      "Elliot Mercer",
+      "Lena Ortiz",
+      "Maya Chen",
+      "Priya Nandakumar",
+      "Rina Hale"
+    ],
+    "team-provider-integrations": [
+      "Maya Chen",
+      "Priya Nandakumar",
+      "Rina Hale"
+    ]
+  },
+  "schema": "cognilode.employee_slack_candidates.v1",
+  "sources": [
+    "/home/evan/.local/share/cognilode/spine-rpe-decisionx-batches-20261007T223721Z/decisionx-spine/slack"
+  ]
+}

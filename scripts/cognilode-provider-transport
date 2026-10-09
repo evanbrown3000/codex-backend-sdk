@@ -18,19 +18,26 @@ COUNTER_LOCK = threading.Lock()
 ACTIVE_SENDS = 0
 
 
-def transport(args: list[str]) -> dict:
+def transport(args: list[str], send_fence: dict | None = None) -> dict:
     global ACTIVE_SENDS
     if not isinstance(args, list) or len(args) > 150 or any(not isinstance(x, str) or len(x) > 4096 for x in args):
         return {"exit_code": 64, "stderr": "invalid provider arguments"}
     if len(args) < 3 or args[:2] != ["--auth-source", "codex"] or args[2] not in {"send", "reconcile", "health"}:
         return {"exit_code": 64, "stderr": "unsupported provider operation"}
     verb = args[2]
+    if verb == "send" and (not isinstance(send_fence, dict) or
+            not all(send_fence.get(key) for key in
+                    ("job_id", "worker_id", "lease_token", "lease_generation", "device_id"))):
+        return {"exit_code": 64, "stderr": "queued provider send requires effect fence"}
     if verb == "send":
         with COUNTER_LOCK:
             ACTIVE_SENDS += 1
     try:
         try:
-            result = subprocess.run([sys.executable, str(SENDER), *args],
+            child_env = os.environ.copy()
+            if send_fence:
+                child_env["COGNILODE_CHATMODE_SEND_FENCE"] = json.dumps(send_fence, separators=(",", ":"))
+            result = subprocess.run([sys.executable, str(SENDER), *args], env=child_env,
                                     capture_output=True, text=True,
                                     timeout=1900 if verb == "send" else 300, check=False)
             return {"exit_code": result.returncode, "stdout": result.stdout[-1048576:],
@@ -46,12 +53,12 @@ def transport(args: list[str]) -> dict:
 class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         try:
-            request = json.loads(self.rfile.readline(65536))
+            request = json.loads(self.rfile.readline(1048576))
             if request.get("operation") == "active":
                 with COUNTER_LOCK:
                     response = {"active": ACTIVE_SENDS}
             elif request.get("operation") == "transport":
-                response = transport(request.get("args"))
+                response = transport(request.get("args"), request.get("send_fence"))
             else:
                 response = {"exit_code": 64, "stderr": "unsupported transport operation"}
         except Exception as exc:

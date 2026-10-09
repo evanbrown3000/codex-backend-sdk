@@ -1,5 +1,5 @@
 """Container-only relay node for company source, Codex, and artifact operations."""
-import hmac, json, os, secrets, signal, socket, subprocess, threading, time, urllib.request
+import hashlib, hmac, json, os, re, secrets, signal, socket, subprocess, threading, time, urllib.request
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -21,6 +21,78 @@ WORKSPACE=os.environ.get('COGNILODE_WORKSPACE','/runtime/source/current')
 HB_STATUS=os.environ.get('COGNILODE_HEARTBEAT_STATUS','')
 MAX_OUTPUT=4*1024*1024
 PROCESSES={}; LOCK=threading.RLock()
+PROVIDER_ROOT=Path(os.environ.get('COGNILODE_PROVIDER_OPERATION_ROOT','/runtime/relay/provider-operations'))
+PROVIDER_SOCKET=os.environ.get('COGNILODE_PROVIDER_SOCKET','/runtime/provider.sock')
+PROVIDER_LIVE=set(); PROVIDER_LOCK=threading.RLock()
+PROVIDER_ID=re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,40}$')
+
+def provider_file(operation_id):
+    if not PROVIDER_ID.fullmatch(str(operation_id)): raise ValueError('invalid provider operation id')
+    return PROVIDER_ROOT/(operation_id+'.json')
+
+def provider_write(path, value):
+    PROVIDER_ROOT.mkdir(parents=True,exist_ok=True)
+    temporary=path.with_name(path.name+'.'+secrets.token_hex(8)+'.tmp')
+    with os.fdopen(os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w') as stream:
+        json.dump(value,stream,separators=(',',':'))
+        stream.flush(); os.fsync(stream.fileno())
+    os.replace(temporary,path)
+
+def provider_run(operation_id,args,send_fence,fingerprint):
+    path=provider_file(operation_id)
+    try:
+        with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as channel:
+            channel.settimeout(2000)
+            channel.connect(PROVIDER_SOCKET)
+            channel.sendall((json.dumps({'operation':'transport','args':args,
+                'send_fence':send_fence},separators=(',',':'))+'\n').encode())
+            result=bytearray()
+            while b'\n' not in result and len(result)<4*1024*1024:
+                piece=channel.recv(65536)
+                if not piece: break
+                result.extend(piece)
+        if b'\n' not in result: raise RuntimeError('provider socket response incomplete')
+        value=json.loads(result.split(b'\n',1)[0]);
+        if not isinstance(value,dict): raise RuntimeError('provider socket result invalid')
+        provider_write(path,{'state':'done','operation_id':operation_id,'args_sha256':fingerprint,
+            'result':value,'at':time.time()})
+    except Exception as error:
+        provider_write(path,{'state':'ambiguous','operation_id':operation_id,'args_sha256':fingerprint,
+            'error':type(error).__name__,'at':time.time()})
+    finally:
+        with PROVIDER_LOCK: PROVIDER_LIVE.discard(operation_id)
+
+def provider_operation(payload):
+    operation=str(payload.get('operation') or '')
+    operation_id=str(payload.get('operation_id') or '')
+    path=provider_file(operation_id)
+    with PROVIDER_LOCK:
+        if path.is_file():
+            value=json.loads(path.read_text())
+            if operation=='start':
+                requested=hashlib.sha256(json.dumps(payload.get('args'),separators=(',',':')).encode()).hexdigest()
+                if value.get('args_sha256')!=requested:
+                    return {'ok':False,'state':'conflict','operation_id':operation_id,
+                        'error':'provider_operation_id_reused_with_different_arguments'}
+            if value.get('state')=='started' and operation_id not in PROVIDER_LIVE:
+                return {'ok':False,'state':'ambiguous','operation_id':operation_id,
+                    'retry_start':False,'error':'credential_container_restarted_after_start'}
+            return {'ok':True,**value}
+        if operation!='start': return {'ok':False,'state':'missing','operation_id':operation_id}
+        args=payload.get('args'); fence=payload.get('send_fence')
+        if not isinstance(args,list) or len(args)<3 or len(args)>150 or any(not isinstance(x,str) or len(x)>4096 for x in args):
+            raise ValueError('invalid provider arguments')
+        if args[:2]!=['--auth-source','codex'] or args[2] not in ('send','reconcile','health'):
+            raise ValueError('unsupported credential-bearing operation')
+        if args[2]=='send' and (not isinstance(fence,dict) or
+            not all(fence.get(key) for key in ('job_id','worker_id','lease_token','lease_generation','device_id'))):
+            raise ValueError('queue effect fence required')
+        fingerprint=hashlib.sha256(json.dumps(args,separators=(',',':')).encode()).hexdigest()
+        provider_write(path,{'state':'started','operation_id':operation_id,
+            'args_sha256':fingerprint,'at':time.time()})
+        PROVIDER_LIVE.add(operation_id)
+        threading.Thread(target=provider_run,args=(operation_id,args,fence,fingerprint),daemon=True).start()
+        return {'ok':True,'state':'started','operation_id':operation_id}
 
 def write_hb(ok, **extra):
     if not HB_STATUS: return
@@ -111,12 +183,13 @@ class H(BaseHTTPRequestHandler):
         if self.path=='/healthz': return self.sendj({'ok':True,'node_id':NODE_ID,'workspace':WORKSPACE,'container':True})
         self.sendj({'error':'not found'},404)
     def do_POST(self):
-        if self.path!='/mcp': return self.sendj({'error':'not found'},404)
+        if self.path not in ('/mcp','/provider'): return self.sendj({'error':'not found'},404)
         if not hmac.compare_digest(self.headers.get('Authorization',''),'Bearer '+BEARER): return self.sendj({'error':'unauthorized'},401)
         payload={}
         try:
             n=int(self.headers.get('Content-Length','0'))
-            if n<1 or n>65536: raise ValueError('invalid request length')
+            if n<1 or n>(1048576 if self.path=='/provider' else 65536): raise ValueError('invalid request length')
+            if self.path=='/provider': return self.sendj(provider_operation(json.loads(self.rfile.read(n))))
             payload=json.loads(self.rfile.read(n)); method=payload.get('method'); rid=payload.get('id')
             if method=='initialize': result={'protocolVersion':'2025-06-18','capabilities':{'tools':{}},'serverInfo':{'name':'cognilode-company-remote-shell','version':'3.0.0'}}
             elif method=='tools/list': result={'tools':[{'name':x,'description':x,'inputSchema':{'type':'object'}} for x in ('shell_execute','shell_start','shell_poll','shell_write','shell_terminate')]}

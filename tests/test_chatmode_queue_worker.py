@@ -185,6 +185,169 @@ def test_decisionx_scan_migrates_text_spool_to_source_refs(tmp_path):
     assert 'private source text' not in (tmp_path / 'scan.json').read_text()
 
 
+def test_decisionx_batch_waits_for_500_drive_verified_multi_year_sources(tmp_path):
+    module = worker()
+    module.DX_HOME = tmp_path
+    class Bridge:
+        @staticmethod
+        def shared_stock_census(_post, minimum):
+            assert minimum == 500
+            return {'multi_year_ready': False, 'distinct_complete': 42, 'span_days': 36}
+    class Sender:
+        @staticmethod
+        def operator_memory_post(_body):
+            raise AssertionError('a sub-500 population must not scan or enqueue')
+    module._dx_bridge = lambda: Bridge()
+    module.sender = Sender()
+    module.decisionx_batch_pump()
+    assert not (tmp_path / 'progress.sqlite3').exists()
+    assert json.loads((tmp_path / 'scan.json').read_text())['spool'] == []
+
+
+def test_decisionx_ready_stock_enqueues_one_xhigh_chatmode_job_with_full_source_zip(tmp_path):
+    module = worker()
+    module.DX_HOME = tmp_path
+    source = {'provider': 'openai-codex', 'conversation_id': 'verified-1',
+              'events': [turn for n in range(8) for turn in (
+                  {'id': f'u{n}', 'role': 'user', 'content': f'Investigate source lineage number {n}.'},
+                  {'id': f'a{n}', 'role': 'assistant', 'content': f'I compared source lineage number {n}.'})]}
+    refs = [{'provider':'openai-codex','conversation_id': f'verified-{n}',
+             'prompt_sha256':'1'*64,'response_sha256':'2'*64,'source_at_utc':'2024-01-01T00:00:00+00:00'}
+            for n in range(1,501)]
+    class Bridge:
+        @staticmethod
+        def shared_stock_census(_post, minimum):
+            assert minimum == 500
+            return {'multi_year_ready':True,'distinct_complete':500,'span_days':800,
+                    'verified_source_refs':refs}
+        @staticmethod
+        def _complete_source(_index,_read):
+            return datetime.now(timezone.utc)
+    class Builder:
+        @staticmethod
+        def build_source_batches(_post, selected, *, output_root, bridge):
+            assert selected == refs[:1]
+            output_root.mkdir(parents=True)
+            path = output_root / 'batch-000.zip'
+            path.write_bytes(b'full source packet')
+            return [{'path':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}]
+        @staticmethod
+        def publish_private(packet):
+            return 's3://private-bucket/taskflow-artifacts/sha256/' + packet['sha256'] + '.zip'
+    queued=[]
+    class Sender:
+        @staticmethod
+        def operator_memory_post(body):
+            if body['operation']=='conversations':
+                return {'ok':True,'records':[{'provider':'openai-codex','conversation_id':'verified-1'}],
+                        'next_cursor':None}
+            if body['operation']=='read':
+                return {'ok':True,'conversation':source}
+            if body['operation']=='enqueue_decisionx_prompt':
+                queued.append(body)
+                return {'ok':True,'job':{'id':body['job_id'],'state':'queued'}}
+            if body['operation']=='get_job':
+                return {'ok':True,'job':{'state':'queued','effect_evidence':[]}}
+            raise AssertionError(body['operation'])
+    module._dx_bridge=lambda:Bridge()
+    module._dx_source_batch_builder=lambda:Builder()
+    module.sender=Sender()
+    module.decisionx_batch_pump()
+    assert len(queued)==1
+    assert queued[0]['provider']=='chatgpt.com'
+    assert queued[0]['reasoning_effort']=='xhigh'
+    assert queued[0]['model']=='gpt-5-6-thinking'
+    assert len(queued[0]['attachment_refs'])==2
+    assert all(row['mirrors'][0].startswith('s3://') for row in queued[0]['attachment_refs'])
+    with module._dx_connection() as db:
+        db.execute("UPDATE episodes SET state='retry',retry_after=0")
+    state=json.loads((tmp_path/'scan.json').read_text())
+    state['last_scan']=0
+    state['offset']=0
+    (tmp_path/'scan.json').write_text(json.dumps(state))
+    module.decisionx_batch_pump()
+    assert len(queued)==2
+    assert queued[1]['job_id'] != queued[0]['job_id']
+
+
+def test_decisionx_native_batch_verifies_source_and_binds_returned_compute(tmp_path):
+    module = worker()
+    module.DX_HOME = tmp_path
+    source = {'provider': 'openai-codex', 'conversation_id': 'conversation-1',
+              'prompt_sha256': '1' * 64, 'response_sha256': '2' * 64,
+              'events': [{'id': 'u1', 'role': 'user', 'content': 'Research the actual requirements in the source history.'},
+                         {'id': 'a1', 'role': 'assistant', 'content': 'I found the source commits and compared their behavior.'}]}
+    episode = module._dx_extract(source)[0]
+    input_zip = module._dx_input_zip([episode], 'a' * 32)
+    with zipfile.ZipFile(input_zip) as archive:
+        assert archive.read('RUN_ME.py')
+        assert json.loads(archive.read('manifest.json'))['schema'] == 'decisionx.iae.batch.v3'
+    script = SCRIPT.parent / 'decisionx_native_batch.py'
+    loader = importlib.machinery.SourceFileLoader('decisionx_native_batch_test', str(script))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    native = importlib.util.module_from_spec(spec)
+    loader.exec_module(native)
+    full = {**source, 'prompt_sha256': '1' * 64, 'response_sha256': '2' * 64}
+    full_raw = (json.dumps(full,sort_keys=True,ensure_ascii=False,separators=(',',':')) + '\n').encode()
+    full_sha = hashlib.sha256(full_raw).hexdigest()
+    source_zip = tmp_path / 'batch-000.zip'
+    with zipfile.ZipFile(source_zip,'w') as archive:
+        archive.writestr('MANIFEST.json',json.dumps({'schema':'cognilode.root_memory_sources.v1',
+            'parts':[{'provider':'openai-codex','conversation_id':'conversation-1',
+                      'prompt_sha256':'1'*64,'response_sha256':'2'*64,
+                      'part_index':0,'part_count':1,'source_json_sha256':full_sha,
+                      'part_sha256':full_sha,'path':'parts/part-000.part'}]}))
+        archive.writestr('parts/part-000.part',full_raw)
+    computed = native.run(input_zip, tmp_path / 'native', [source_zip])
+    assert computed['episode_count'] == 1
+    render = tmp_path / 'native' / computed['rendered_sources'][0]['path']
+    assert 'Research the actual requirements' in render.read_text()
+    output = tmp_path / 'labels.zip'
+    label = {'episode_id': episode['episode_id'], 'source_sha256': episode['source_sha256'],
+             'i': 'Research the actual requirements across the historical source commits.',
+             'a': 'The assistant compared the source commits and reported the differences.',
+             'e': None, 'outcome': 'Source comparison observed; downstream result unknown.',
+             'tags': ['research', 'source-history'],
+             'embedding_text': 'A user requests historical source research and the assistant compares commits.',
+             'human_authorship_assessment': 'unverified user role',
+             'changed_conditions': 'The codebase may have changed since this historical turn.',
+             'double_triplet': None, 'uncertainty': 'No later user evaluation is present.'}
+    with zipfile.ZipFile(output, 'w') as archive:
+        archive.write(tmp_path / 'native' / 'NATIVE_COMPUTE.json', 'NATIVE_COMPUTE.json')
+        archive.write(tmp_path / 'native' / 'neighbors.json', 'neighbors.json')
+        archive.writestr('decisionx_iae_labels.jsonl', json.dumps(label) + '\n')
+        archive.writestr('EXTERNAL_EFFECT_INSTRUCTIONS.md', 'Admit verified labels into shared search.\n')
+    input_sha = hashlib.sha256(input_zip.read_bytes()).hexdigest()
+    source_sha = hashlib.sha256(source_zip.read_bytes()).hexdigest()
+    output_sha = hashlib.sha256(output.read_bytes()).hexdigest()
+    job = {'id': 'decisionx-iae-' + 'a' * 32, 'phase': 'iae_label_batch',
+           'attachment_refs': [{'ref': str(input_zip), 'sha256': input_sha},
+                               {'ref': str(source_zip), 'sha256': source_sha}]}
+    value = {'central_conversation_store': {'provider_structured_uploads': [
+        {'sha256': input_sha},{'sha256': source_sha}]}}
+    files = [{'path': str(output), 'name': 'labels.zip', 'sha256': output_sha}]
+    native_proof = [{'kind': 'provider_observed_native_exec'}]
+    assert module._dx_native_preflight(job, files, value, native_proof) is None
+    assert module._dx_native_preflight(job, files, value, []) == 'missing_provider_observed_native_exec'
+    assert module._dx_native_preflight(job, files, {'central_conversation_store': {}}, native_proof) == 'provider_upload_proof_missing'
+    admitted = []
+    class Sender:
+        @staticmethod
+        def operator_memory_post(body):
+            if body['operation'] == 'read':
+                return {'ok': True, 'conversation': source}
+            if body['operation'] == 'append_segments':
+                admitted.extend(body['segments'])
+                return {'ok': True}
+            raise AssertionError(body['operation'])
+    module.sender = Sender()
+    module._dx_bridge = lambda: SimpleNamespace(_complete_source=lambda _index,_read: datetime.now(timezone.utc))
+    outcome = module.decisionx_admit_labels(job, files, 'chatgpt-returned-conversation')
+    assert outcome['admitted'] == 1
+    assert admitted[0]['kind'] == 'IAE'
+    assert admitted[0]['metadata']['source_sha256'] == episode['source_sha256']
+
+
 def test_decisionx_batch_resolves_exact_source_and_drops_changed_episode():
     module = worker()
     source = {'provider': 'chatgpt.com', 'conversation_id': 'conversation-1',
@@ -200,6 +363,10 @@ def test_decisionx_batch_resolves_exact_source_and_drops_changed_episode():
         {**module._dx_ref(episode), 'source_sha256': '0' * 64}])
     assert selected == [episode]
     assert len(stale) == 1
+    selected, stale = module._dx_resolve([module._dx_ref(episode)],
+        complete_source=lambda _index, _read: False)
+    assert selected == []
+    assert stale == [module._dx_ref(episode)]
 
 
 def test_decisionx_transport_input_retired_only_after_central_admission(tmp_path):
@@ -219,12 +386,58 @@ def test_decisionx_transport_input_retired_only_after_central_admission(tmp_path
             batch = request['job_id'].removeprefix('decisionx-iae-')
             if batch == complete:
                 return {'job': {'state': 'complete', 'effect_evidence': [
-                    {'kind': 'decisionx_label_admission', 'ref': 'verified'}]}}
+                    {'kind': 'decisionx_label_admission', 'ref': 'verified', 'admitted': 1}]}}
             return {'job': {'state': 'queued', 'effect_evidence': []}}
     module.sender = Sender()
     assert module._dx_retire_completed_inputs() == 1
     assert not (folder / f'{complete}.zip').exists()
     assert (folder / f'{queued}.zip').exists()
+
+
+def test_decisionx_cross_device_partial_admission_retries_only_missing_ids(tmp_path):
+    module=worker()
+    module.DX_HOME=tmp_path
+    batch='a'*32
+    with module._dx_connection() as db:
+        for episode_id in ('accepted','missing'):
+            db.execute('INSERT INTO episodes(id,source_sha,state,attempts,retry_after,batch,updated) '
+                       'VALUES(?,?,?,?,?,?,?)', (episode_id,'1'*64,'queued',1,0,batch,0))
+    class Sender:
+        @staticmethod
+        def operator_memory_post(body):
+            assert body['operation']=='get_job'
+            return {'job':{'state':'complete','effect_evidence':[{
+                'kind':'decisionx_label_admission','requested':2,'admitted':1,
+                'admitted_episode_ids':['accepted']}]}}
+    module.sender=Sender()
+    with module._dx_connection() as db:
+        assert module._dx_reconcile_queued(db)==1
+        states=dict(db.execute('SELECT id,state FROM episodes').fetchall())
+    assert states=={'accepted':'done','missing':'retry'}
+
+
+def test_decisionx_completion_evidence_has_d1_persistable_ref(tmp_path):
+    module=worker()
+    module.ROOT=tmp_path
+    module.validated_result=lambda _value: ('chat-conversation',[])
+    module.tool_evidence_from_result=lambda _value: [{'kind':'provider_observed_native_exec','ref':'tool-1'}]
+    module._dx_native_preflight=lambda *_args: None
+    module.decisionx_admit_labels=lambda *_args,**_kwargs: {
+        'requested':1,'admitted':1,'admitted_episode_ids':['episode-1']}
+    captured=[]
+    class Sender:
+        @staticmethod
+        def operator_memory_post(body):
+            captured.append(body)
+            return {'ok':True}
+    module.sender=Sender()
+    job={'id':'decisionx-iae-'+'a'*32,'phase':'iae_label_batch','claimed_by':'evanpc',
+         'lease_token':'lease-1','lease_generation':1}
+    assert module.complete_from_result(job,{}) is True
+    evidence=captured[0]['effect_evidence']
+    admission=next(row for row in evidence if row['kind']=='decisionx_label_admission')
+    assert admission['ref']==job['id']
+    assert admission['admitted_episode_ids']==['episode-1']
 
 
 def test_sender_receives_queue_selected_model_and_effort(tmp_path):

@@ -14,6 +14,7 @@ import re
 import select
 import subprocess
 import sys
+import tempfile
 import time
 from cognilode_central_http import request_json
 
@@ -109,25 +110,35 @@ def run() -> dict:
     environment = {**os.environ,
         'COGNILODE_CENTRAL_ROLLOUT_HELPER': str(CODEX.parent / 'central-rollouts'),
         'CODEX_HOME': str(home)}
-    process = subprocess.Popen([str(CODEX), 'app-server', '--stdio'],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        text=True, bufsize=1, env=environment)
-    try:
-        rpc(process, 1, 'initialize', {'clientInfo': {'name': 'cognilode-rollout-acceptance',
-            'version': '1'}, 'capabilities': {'experimentalApi': True}}, timeout=30)
-        process.stdin.write('{"jsonrpc":"2.0","method":"initialized"}\n')
-        process.stdin.flush()
-        read = rpc(process, 2, 'thread/read', {'threadId': conversation_id,
-            'includeTurns': True})
-        resumed = rpc(process, 3, 'thread/resume', {'threadId': conversation_id,
-            'excludeTurns': True})
-    finally:
-        process.terminate()
+    with tempfile.TemporaryFile(mode='w+t') as diagnostics:
+        process = subprocess.Popen([str(CODEX), 'app-server', '--stdio'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=diagnostics,
+            text=True, bufsize=1, env=environment)
         try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=10)
+            rpc(process, 1, 'initialize', {'clientInfo': {'name': 'cognilode-rollout-acceptance',
+                'version': '1'}, 'capabilities': {'experimentalApi': True}}, timeout=30)
+            process.stdin.write('{"jsonrpc":"2.0","method":"initialized"}\n')
+            process.stdin.flush()
+            read = rpc(process, 2, 'thread/read', {'threadId': conversation_id,
+                'includeTurns': True})
+            resumed = rpc(process, 3, 'thread/resume', {'threadId': conversation_id,
+                'excludeTurns': True})
+        except Exception as error:
+            diagnostics.seek(0)
+            # The helper emits a bounded machine error, without credentials.
+            # Surface its cause in the recurring acceptance receipt instead
+            # of rerunning a central/Drive read by hand.
+            lines = [line.strip() for line in diagnostics if 'central rollout unavailable:' in line.lower()]
+            if lines:
+                raise RuntimeError(f'{error}; helper={lines[-1][:140]}') from error
+            raise
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=10)
     if read.get('thread', {}).get('id') != conversation_id or \
         resumed.get('thread', {}).get('id') != conversation_id:
         raise RuntimeError('native read/resume thread identity mismatch')

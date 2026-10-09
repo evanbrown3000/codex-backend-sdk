@@ -118,6 +118,41 @@ class RootPlanHandoffTests(unittest.TestCase):
         self.assertEqual(census["verified_source_refs"][0]["provider"],
                          "chatgpt-export-format")
 
+    def test_stock_readback_checkpoint_recovers_after_one_worker_exception(self):
+        sources = {('openai-codex', f'c{i}'): full('openai-codex', f'c{i}', i * 400)
+                   for i in range(3)}
+        rows = [{'provider': provider, 'conversation_id': cid,
+                 'updated_at': f'2026-10-09T11:00:0{i}Z',
+                 'capture': source['capture']}
+                for i, ((provider, cid), source) in enumerate(sources.items())]
+
+        class FlakyD1(FakeD1):
+            fail = True
+
+            def __call__(self, body):
+                if (body['operation'] == 'read' and body['conversation_id'] == 'c1'
+                    and self.fail):
+                    self.read_calls.append((body['provider'], body['conversation_id']))
+                    raise RuntimeError('intermittent D1 Worker 1101')
+                return super().__call__(body)
+
+        d1 = FlakyD1(rows, sources)
+        with tempfile.TemporaryDirectory() as folder:
+            checkpoint = Path(folder) / 'readback-proofs.json'
+            first = bridge.shared_stock_census(d1, minimum=3, checkpoint_path=checkpoint)
+            self.assertEqual(first['distinct_complete'], 2)
+            self.assertEqual(first['partial_read_errors'], 1)
+            self.assertTrue(checkpoint.is_file())
+            d1.fail = False
+            second = bridge.shared_stock_census(d1, minimum=3, checkpoint_path=checkpoint)
+            self.assertEqual(second['distinct_complete'], 3)
+            self.assertTrue(second['multi_year_ready'])
+            self.assertEqual(d1.read_calls.count(('openai-codex', 'c0')), 1)
+            self.assertEqual(d1.read_calls.count(('openai-codex', 'c2')), 1)
+            rows[0]['updated_at'] = '2026-10-09T12:00:00Z'
+            bridge.shared_stock_census(d1, minimum=3, checkpoint_path=checkpoint)
+            self.assertEqual(d1.read_calls.count(('openai-codex', 'c0')), 2)
+
     def test_root_plan_is_preserved_as_taskflow_instruction(self):
         plan = {"schema": "cognilode.root_taskflow_plan.v1", "project_id": "memory-a",
                 "project_name": "Long Horizon Memory", "research_employee": "Nadia Brooks",

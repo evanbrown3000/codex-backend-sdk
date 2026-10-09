@@ -448,9 +448,16 @@ def _dx_refresh_stock():
     """Read the large shared census off the queue-polling thread."""
     global _DX_STOCK_VALUE, _DX_STOCK_AT
     try:
-        stock = _dx_bridge().shared_stock_census(sender.operator_memory_post, minimum=500)
+        stock = _dx_bridge().shared_stock_census(
+            sender.operator_memory_post, minimum=500,
+            checkpoint_path=DX_HOME / "shared-stock-readback-proofs.json")
         if not isinstance(stock, dict):
             raise ValueError("DecisionX shared stock census malformed")
+        event("decisionx_shared_stock_census_result",
+              distinct_complete=stock.get("distinct_complete"),
+              span_days=stock.get("span_days"),
+              multi_year_ready=stock.get("multi_year_ready"),
+              partial_read_errors=stock.get("partial_read_errors"))
     except Exception as exc:
         event("decisionx_shared_stock_census_retry", error=type(exc).__name__ + ":" + str(exc)[:240])
         stock = None
@@ -468,7 +475,8 @@ def _dx_stock_snapshot():
     global _DX_STOCK_THREAD
     now = time.time()
     with _DX_STOCK_LOCK:
-        ttl = 60 if _DX_STOCK_VALUE is None else DX_STOCK_CACHE_SECONDS
+        ttl = (60 if _DX_STOCK_VALUE is None or not _DX_STOCK_VALUE.get("multi_year_ready")
+               or _DX_STOCK_VALUE.get("partial_read_errors") else DX_STOCK_CACHE_SECONDS)
         if _DX_STOCK_AT and now - _DX_STOCK_AT < ttl:
             return _DX_STOCK_VALUE
         if _DX_STOCK_THREAD is None or not _DX_STOCK_THREAD.is_alive():

@@ -282,8 +282,9 @@ def test_decisionx_shared_stock_census_cannot_block_queue_polling(tmp_path):
 
     class Bridge:
         @staticmethod
-        def shared_stock_census(_post, minimum):
+        def shared_stock_census(_post, minimum, checkpoint_path=None):
             assert minimum == 500
+            assert checkpoint_path == tmp_path / 'shared-stock-readback-proofs.json'
             started.set()
             assert release.wait(3)
             return {'multi_year_ready': False, 'distinct_complete': 42, 'span_days': 36}

@@ -21,3 +21,17 @@ Secretary dispatch is constrained to one installed `modified_codex` candidate th
 For a local installed Codex run, keep `--state-root` inside the project repository so its workspace sandbox can write the research ZIP. A plan step must declare an absolute, read-only `effect_probe_command` and exact `effect_probe_expected` output. The controller executes this probe independently after the external employee returns and again during reconciliation. A claimed effect receipt without a passing probe remains pending.
 
 An `effect_pending` job is reconciled from its durable invocation and artifact/effect receipt. An uncertain external mutation is not sent again automatically. The external-effect receipt must describe a concrete applied effect and successful observed checks; a ZIP or source commit alone cannot complete the phase. Only completed `codex.external-effect` jobs with external-effect evidence release dependent `.plan` steps.
+
+## Bounded recurrence service
+
+`deploy/systemd/user/cognilode-taskflow-phase-controller.service` keeps a long-running, single-instance recurrence host active so CP-4-6 can progress without a human repeatedly invoking the controller. The service does **not** claim or time `chatgpt.com` jobs; it only reruns the phase reconciler/materializer. The hosted historical rhythm remains the sole ChatGPT clock.
+
+Install `scripts/cognilode-taskflow-phase-controller-service` beside the controller, copy `taskflow-phase-controller.env.example` to `%h/.config/cognilode/taskflow-phase-controller.env`, and reconcile the named employees with the installed organization before enabling the unit. Research and external-effect employee names must be distinct. The recurrence process has a nonblocking singleton lock, a 10–3600 second bounded interval, a 30–7200 second per-run timeout, durable JSONL receipts, and no automatic replay of an `effect_pending` external mutation.
+
+For this plan the acceptance probe is exactly:
+
+```sh
+/usr/bin/systemctl --user is-active cognilode-taskflow-phase-controller.service
+```
+
+An `active` service is necessary but not sufficient for CP-4-6 completion: a real `codex.external-effect` D1 job must also complete with deployment/service-change identity and central readback.

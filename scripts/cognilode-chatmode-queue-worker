@@ -24,11 +24,30 @@ import zipfile
 
 SENDER_PATH = Path(__file__).with_name("cognilode-b4pt0r-chatmode")
 COLLECTOR_PATH = Path(__file__).with_name("cognilode-b4pt0r-collect")
-loader = importlib.machinery.SourceFileLoader("cognilode_chatmode_sender", str(SENDER_PATH))
-spec = importlib.util.spec_from_loader(loader.name, loader)
-assert spec is not None
-sender = importlib.util.module_from_spec(spec)
-loader.exec_module(sender)
+class _LazySender:
+    """Load the provider transport only when a provider operation is actually used.
+
+    Keeping import side effects lazy makes validation helpers/tests runnable from a
+    focused source packet that intentionally does not carry authenticated provider
+    transport code. Production behavior is unchanged on first sender attribute use.
+    """
+    _module = None
+
+    def _load(self):
+        if self._module is None:
+            loader = importlib.machinery.SourceFileLoader("cognilode_chatmode_sender", str(SENDER_PATH))
+            spec = importlib.util.spec_from_loader(loader.name, loader)
+            if spec is None:
+                raise RuntimeError("unable to load ChatGPT transport module")
+            module = importlib.util.module_from_spec(spec)
+            loader.exec_module(module)
+            self._module = module
+        return self._module
+
+    def __getattr__(self, name):
+        return getattr(self._load(), name)
+
+sender = _LazySender()
 
 ROOT = Path.home() / ".local/share/cognilode/chatmode-queue-worker"
 DEVICE_ID = os.environ.get("COGNILODE_CHATMODE_DEVICE_ID", "evanpc")

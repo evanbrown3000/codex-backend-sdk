@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Bounded recurrence host for the TaskFlow phase controller.
+
+This is deliberately not a prompt scheduler. It periodically lets the controller
+reconcile/materialize non-ChatGPT phases in the single D1 queue; the hosted
+historical rhythm remains the sole clock/claim path for chatgpt.com jobs.
+"""
+from __future__ import annotations
+import fcntl
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+HERE = Path(__file__).resolve().parent
+CONTROLLER = HERE / "cognilode-taskflow-phase-controller"
+STATE_ROOT = Path(os.environ.get("COGNILODE_TASKFLOW_STATE_ROOT", str(Path.home()/".local/share/cognilode/taskflow-phase-controller"))).expanduser()
+LOG = STATE_ROOT / "recurrence.jsonl"
+LOCK = STATE_ROOT / "recurrence.lock"
+INTERVAL = max(10, min(3600, int(os.environ.get("COGNILODE_TASKFLOW_INTERVAL_SECONDS", "30"))))
+RUN_TIMEOUT = max(30, min(7200, int(os.environ.get("COGNILODE_TASKFLOW_RUN_TIMEOUT_SECONDS", "3900"))))
+STOP = False
+
+def _stop(_sig, _frame):
+    global STOP
+    STOP = True
+
+def _emit(value):
+    STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(value, sort_keys=True, ensure_ascii=False)
+    with LOG.open("a", encoding="utf-8") as out:
+        out.write(line + "\n")
+        out.flush()
+        os.fsync(out.fileno())
+    print(line, flush=True)
+
+def _required(name):
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise SystemExit(f"required environment variable missing: {name}")
+    return value
+
+def command():
+    plan = _required("COGNILODE_TASKFLOW_PLAN")
+    role = _required("COGNILODE_TASKFLOW_RESEARCH_EMPLOYEE")
+    external = _required("COGNILODE_TASKFLOW_EXTERNAL_EMPLOYEE")
+    if role == external:
+        raise SystemExit("research and external-effect employees must be distinct named employees")
+    argv = [str(CONTROLLER), "--plan", plan, "--role", role,
+            "--external-employee", external,
+            "--state-root", str(STATE_ROOT)]
+    for env, flag in [
+        ("COGNILODE_TASKFLOW_SECRETARY", "--secretary"),
+        ("COGNILODE_TASKFLOW_MANAGER", "--manager"),
+        ("COGNILODE_TASKFLOW_SEED_STEP", "--seed-step"),
+        ("COGNILODE_TASKFLOW_WORKER_ID", "--worker-id"),
+        ("COGNILODE_TASKFLOW_PRIORITY", "--priority"),
+    ]:
+        v=os.environ.get(env," ").strip()
+        if v: argv.extend([flag,v])
+    return argv
+
+def run_once():
+    started=time.time(); argv=command()
+    try:
+        cp=subprocess.run(argv,text=True,capture_output=True,timeout=RUN_TIMEOUT,check=False)
+        row={"schema":"cognilode.taskflow.recurrence.v1","at":time.time(),"duration_s":round(time.time()-started,3),
+             "returncode":cp.returncode,"stdout_tail":cp.stdout[-12000:],"stderr_tail":cp.stderr[-8000:]}
+    except subprocess.TimeoutExpired as exc:
+        row={"schema":"cognilode.taskflow.recurrence.v1","at":time.time(),"duration_s":round(time.time()-started,3),
+             "returncode":124,"timeout":True,"stdout_tail":(exc.stdout or "")[-12000:] if isinstance(exc.stdout,str) else "",
+             "stderr_tail":(exc.stderr or "")[-8000:] if isinstance(exc.stderr,str) else ""}
+    _emit(row)
+
+
+def main():
+    signal.signal(signal.SIGTERM,_stop); signal.signal(signal.SIGINT,_stop)
+    STATE_ROOT.mkdir(parents=True,exist_ok=True)
+    with LOCK.open("a+") as lock:
+        try: fcntl.flock(lock.fileno(), fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:
+            _emit({"schema":"cognilode.taskflow.recurrence.v1","at":time.time(),"state":"already_running"})
+            return 0
+        _emit({"schema":"cognilode.taskflow.recurrence.v1","at":time.time(),"state":"started","interval_seconds":INTERVAL})
+        while not STOP:
+            run_once()
+            deadline=time.monotonic()+INTERVAL
+            while not STOP and time.monotonic()<deadline:
+                time.sleep(min(1.0,deadline-time.monotonic()))
+        _emit({"schema":"cognilode.taskflow.recurrence.v1","at":time.time(),"state":"stopped"})
+    return 0
+
+if __name__=="__main__": raise SystemExit(main())

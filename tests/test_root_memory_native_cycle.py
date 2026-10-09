@@ -90,6 +90,41 @@ def refs(count=500):
 
 
 class RootMemoryCycleTests(unittest.TestCase):
+    def test_source_packet_resumes_exact_verified_reads_after_transient_failure(self):
+        selected = cycle.source_selection(FakeBridge(refs()).shared_stock_census(None))
+        d1 = FakeD1(selected)
+        calls = []
+        fail = True
+
+        def flaky(body):
+            nonlocal fail
+            if body["operation"] == "read":
+                calls.append(body["conversation_id"])
+                if body["conversation_id"] == "c0250" and fail:
+                    fail = False
+                    raise RuntimeError("Agent Memory HTTP 403: simulated nonretryable failure")
+            return d1(body)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(RuntimeError, "simulated"):
+                cycle.build_source_batches(flaky, selected, output_root=root, bridge=FakeBridge(selected))
+            self.assertEqual(calls[0], "c0000")
+            self.assertEqual(calls[-1], "c0250")
+            calls.clear()
+            batches = cycle.build_source_batches(flaky, selected, output_root=root, bridge=FakeBridge(selected))
+            self.assertTrue(batches)
+            self.assertEqual(calls[0], "c0250")
+            self.assertEqual(calls[-1], "c0499")
+            cache_path = next((root / ".verified-sources").glob("*.json"))
+            if cache_path.name.endswith(".receipt.json"):
+                cache_path = next(path for path in (root / ".verified-sources").glob("*.json")
+                                  if not path.name.endswith(".receipt.json"))
+            cache_path.write_bytes(b"corrupted")
+            calls.clear()
+            cycle.build_source_batches(flaky, selected, output_root=root, bridge=FakeBridge(selected))
+            self.assertEqual(len(calls), 1)
+
     def test_bad_native_deliverable_gets_delayed_successor_on_same_rhythm_queue(self):
         d1 = FakeD1([])
         attempts = []

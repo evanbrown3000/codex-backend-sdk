@@ -455,6 +455,7 @@ services:
         --runs /runtime/worker/rpe-runs --interval 60 --parallel 4
     environment:
       HOME: /home/worker
+      COGNILODE_SOURCE_WATCH_GENERATION: source-aware-1
       PYTHONPATH: /runtime/source/current/research-plan-execute/src:/runtime/source/current/modified-codex-runtime/src:/runtime/source/current/taskflow-orchestration-history/src
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
       COGNILODE_REPOSITORIES_ROOT: /runtime/source/current
@@ -491,6 +492,7 @@ services:
     command: [--runs, /runtime/worker/rpe-runs, --interval, "300"]
     environment:
       HOME: /home/worker
+      COGNILODE_SOURCE_WATCH_GENERATION: source-aware-1
       PYTHONPATH: /runtime/source/current/modified-codex-runtime/src:/runtime/source/current/taskflow-orchestration-history/src
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
       COGNILODE_REPOSITORIES_ROOT: /runtime/source/current

@@ -775,6 +775,60 @@ def archive_provider_sse(raw_path: Path, expected_sha256: str) -> dict:
             "bytes": raw_path.stat().st_size, "readback_verified": True}
 
 
+def archive_returned_artifact(item: dict) -> dict:
+    """Publish a downloaded provider artifact under its SHA-256, once.
+
+    S3 validates the supplied SHA-256 while accepting the upload. A HEAD then
+    checks the durable object's size and checksum before any central reference
+    is admitted. The provider sandbox URL is never the custody reference.
+    """
+    path = Path(str(item.get("path") or ""))
+    expected = str(item.get("sha256") or "").lower()
+    size = int(item.get("size") or 0)
+    if not re.fullmatch(r"[a-f0-9]{64}", expected) or not path.is_file() or size <= 0:
+        raise CapabilityError("returned_artifact_invalid", "downloaded artifact identity is incomplete")
+    if path.stat().st_size != size:
+        raise CapabilityError("returned_artifact_changed", "downloaded artifact size changed")
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != expected:
+        raise CapabilityError("returned_artifact_changed", "downloaded artifact SHA-256 changed")
+    bucket = _provider_sse_bucket()
+    key = f"chatmode-returned-artifacts/sha256/{expected[:2]}/{expected}"
+    checksum = base64.b64encode(bytes.fromhex(expected)).decode("ascii")
+    aws = shutil.which("aws")
+    if not aws:
+        raise CapabilityError("returned_artifact_store_unavailable", "AWS CLI unavailable for private artifact custody")
+    base = [str(aws), "s3api"]
+    head_args = [*base, "head-object", "--bucket", bucket, "--key", key,
+                 "--checksum-mode", "ENABLED", "--output", "json"]
+    head = subprocess.run(head_args, capture_output=True, text=True, timeout=45, check=False)
+    try:
+        prior = json.loads(head.stdout) if head.returncode == 0 else {}
+    except ValueError:
+        prior = {}
+    if prior.get("ContentLength") != size or prior.get("ChecksumSHA256") != checksum:
+        put = subprocess.run([*base, "put-object", "--bucket", bucket, "--key", key,
+                              "--body", str(path), "--server-side-encryption", "AES256",
+                              "--checksum-sha256", checksum,
+                              "--metadata", "sha256=" + expected, "--output", "json"],
+                             capture_output=True, text=True, timeout=1800, check=False)
+        if put.returncode:
+            raise CapabilityError("returned_artifact_store_write_failed", "private artifact upload failed")
+        head = subprocess.run(head_args, capture_output=True, text=True, timeout=45, check=False)
+        try:
+            prior = json.loads(head.stdout) if head.returncode == 0 else {}
+        except ValueError:
+            prior = {}
+    if prior.get("ContentLength") != size or prior.get("ChecksumSHA256") != checksum:
+        raise CapabilityError("returned_artifact_store_readback_mismatch", "private artifact checksum readback failed")
+    return {"name": str(item.get("name") or path.name), "size": size,
+            "sha256": expected, "storage_uri": f"s3://{bucket}/{key}",
+            "source": "chatgpt_interpreter_download", "readback_verified": True}
+
+
 def admit_central_conversation(*, result_id: str, prompt: str, result: dict, attachments: list[dict]) -> dict:
     assistant = str(result.get("terminal_assistant_text") or "")
     summary = result.get("provider_summary") if isinstance(result.get("provider_summary"), dict) else {}
@@ -801,6 +855,8 @@ def admit_central_conversation(*, result_id: str, prompt: str, result: dict, att
         # A broken SSE can still leave a complete provider terminal in the
         # exact-turn hydration. Preserve its observed model/effort provenance.
         tool_history["provider_model_receipt"] = result.get("provider_model_receipt")
+    archived_artifacts = [archive_returned_artifact(item) for item in
+                          (result.get("downloaded_files") or [])]
     export_bound = result.get("identity_source") == "privacy_export_exact_prompt_message"
     user_event = {"role": "user", "provider_message_id":
                   str(result.get("user_message_id")) if export_bound else "b4pt0r-user:" + result_id,
@@ -839,7 +895,7 @@ def admit_central_conversation(*, result_id: str, prompt: str, result: dict, att
         "response_sha256": hashlib.sha256(assistant.encode("utf-8")).hexdigest(),
         "events": [user_event, *tool_history["tool_events"], terminal_event],
         "provider_structured_uploads": attachments,
-        "downloadable_files": list(result.get("downloaded_files") or []),
+        "downloadable_files": archived_artifacts,
         "conversation_urls": [f"https://chatgpt.com/c/{conversation_id}"] if conversation_id else [],
         "source": "privacy-export-exact-live-readback" if export_bound else "b4pt0r-chatmode-hot-path",
         "raw_expansion_handle": f"b4pt0r-chatmode:{result_id}",
@@ -910,6 +966,13 @@ def admit_central_conversation(*, result_id: str, prompt: str, result: dict, att
     if receipt.get("provider_model_receipt") != tool_history["provider_model_receipt"]:
         raise CapabilityError("central_provider_model_readback_mismatch",
                               "provider stream model and effort receipt did not survive central readback")
+    observed_artifacts = {str(item.get("sha256") or ""): item for item in
+                          (conversation.get("downloadable_files") or []) if isinstance(item, dict)}
+    for artifact in archived_artifacts:
+        observed = observed_artifacts.get(artifact["sha256"])
+        if not observed or observed.get("storage_uri") != artifact["storage_uri"]:
+            raise CapabilityError("central_artifact_readback_mismatch",
+                                  "private artifact reference did not survive central readback")
     return {
         "ok": True,
         "stored": admitted.get("stored") is True,
@@ -921,6 +984,7 @@ def admit_central_conversation(*, result_id: str, prompt: str, result: dict, att
         "central_response_sha256": response_hash,
         "central_raw_stream_sha256": raw_sha or None,
         "central_raw_sse_source": raw_source,
+        "central_artifacts": archived_artifacts,
         "central_tool_event_count": len(observed_events),
         "central_observed_finished_container_exec_results": tool_history["finished_container_exec_results"],
         "provider_model_receipt": tool_history["provider_model_receipt"],

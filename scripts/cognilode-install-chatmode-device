@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Install a second Linux ChatGPT chat-mode actuator after local auth checks."""
+from __future__ import annotations
+
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "scripts"
+
+
+def _load(name: str, path: Path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:
+        raise RuntimeError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    loader.exec_module(module)
+    return module
+
+
+def _run(argv: list[str], *, timeout: int = 45) -> str:
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
+    if result.returncode:
+        raise RuntimeError(f"{Path(argv[0]).name} exited {result.returncode}: {result.stderr[-350:]}")
+    return result.stdout
+
+
+def install(args: argparse.Namespace) -> dict:
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", args.device_id):
+        raise ValueError("device ID must be 1-80 letters, digits, dots, underscores, or hyphens")
+    if not 0 <= args.priority <= 1000:
+        raise ValueError("device priority must be 0-1000")
+    if args.network_route not in {"home", "mobile"}:
+        raise ValueError("network route must be home or mobile")
+    if not args.aws_cli.is_file() or not os.access(args.aws_cli, os.X_OK):
+        raise RuntimeError("AWS CLI is not executable on this device")
+    if not (SCRIPTS / "cognilode-b4pt0r-chatmode").is_file():
+        raise RuntimeError("complete SDK checkout is required on this device")
+
+    # These checks use credentials already held on this device. The installer
+    # never copies a ChatGPT session or cloud credential through the queue.
+    health = json.loads(_run([str(SCRIPTS / "cognilode-b4pt0r-chatmode"), "health"], timeout=90))
+    if health.get("ok") is not True:
+        raise RuntimeError("local ChatGPT/Codex identity is not healthy")
+    sender = _load("cognilode_device_installer_sender", SCRIPTS / "cognilode-b4pt0r-chatmode")
+    rhythm = sender.operator_memory_post({"operation": "rhythm_read"})
+    if rhythm.get("ok") is not True or not rhythm.get("initialized"):
+        raise RuntimeError("central D1 rhythm readback failed")
+
+    if args.probe_sha256:
+        if not re.fullmatch(r"[0-9a-f]{64}", args.probe_sha256):
+            raise ValueError("probe SHA-256 is invalid")
+        os.environ["COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET"] = args.bucket
+        os.environ["COGNILODE_AWS_CLI"] = str(args.aws_cli)
+        worker = _load("cognilode_device_installer_worker", SCRIPTS / "cognilode-chatmode-queue-worker")
+        url = f"s3://{args.bucket}/taskflow-artifacts/sha256/{args.probe_sha256}.zip"
+        staged = worker._stage_remote_attachment(url, args.probe_sha256)
+        if not staged.is_file():
+            raise RuntimeError("private S3 attachment probe did not stage")
+
+    config = Path.home() / ".config/cognilode/chatmode-queue-worker.env"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    env_values = {
+        "COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET": args.bucket,
+        "COGNILODE_AWS_CLI": str(args.aws_cli),
+        "COGNILODE_CHATMODE_DEVICE_PRIORITY": str(args.priority),
+        "COGNILODE_CHATMODE_NETWORK_ROUTE": args.network_route,
+    }
+    if any("\n" in value or "\r" in value for value in env_values.values()):
+        raise ValueError("environment value contains a newline")
+    config.write_text("".join(f"{key}={value}\n" for key, value in env_values.items()), encoding="utf-8")
+    config.chmod(0o600)
+
+    template = (ROOT / "deploy/systemd/user/cognilode-chatmode-queue-worker@.service").read_text(encoding="utf-8")
+    template = template.replace("%h/Projects/codex-backend-sdk", str(ROOT))
+    unit_path = Path.home() / ".config/systemd/user/cognilode-chatmode-queue-worker@.service"
+    unit_path.parent.mkdir(parents=True, exist_ok=True)
+    unit_path.write_text(template, encoding="utf-8")
+    _run(["systemctl", "--user", "daemon-reload"])
+    unit = f"cognilode-chatmode-queue-worker@{args.device_id}.service"
+    _run(["systemctl", "--user", "enable", "--now", unit])
+    _run(["systemctl", "--user", "is-active", unit])
+
+    for _ in range(10):
+        readback = sender.operator_memory_post({"operation": "rhythm_read"})
+        devices = (readback.get("gate") or {}).get("devices") or []
+        if any(device.get("id") == args.device_id and device.get("available") is True for device in devices):
+            return {"ok": True, "device_id": args.device_id, "unit": unit,
+                    "network_route": args.network_route, "private_attachment_probe": bool(args.probe_sha256),
+                    "central_heartbeat_readback": True}
+        time.sleep(3)
+    raise RuntimeError("service started but central heartbeat readback is missing")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--device-id", required=True)
+    parser.add_argument("--priority", type=int, default=50)
+    parser.add_argument("--network-route", choices=("home", "mobile"), default="home")
+    parser.add_argument("--bucket", default="cognilode-conversation-visibility-362928919715-us-west-2")
+    parser.add_argument("--aws-cli", type=Path, default=Path("/usr/bin/aws"))
+    parser.add_argument("--probe-sha256", default="")
+    args = parser.parse_args()
+    result = install(args)
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

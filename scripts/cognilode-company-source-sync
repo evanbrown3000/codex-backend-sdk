@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""Keep the company container's selected source checkouts current from GitHub.
+
+The source root is a Docker-mounted volume. A revision is made visible only
+after its archive is fully extracted, so workers never run a partial update.
+"""
+from __future__ import annotations
+
+import io
+import json
+import os
+from pathlib import Path, PurePosixPath
+import tarfile
+import tempfile
+import time
+from urllib.request import Request, urlopen
+import subprocess
+
+
+ROOT = Path(os.environ.get("COGNILODE_COMPANY_SOURCE_ROOT", "/runtime/source"))
+REPOS = ("modified-codex-runtime", "taskflow-orchestration-history",
+         "research-plan-execute", "memory-stock-canonical", "cognilode-cloudflare-pages-site")
+SECRET = "/cognilode/agent-credentials/github/owner"
+
+
+def credential() -> str:
+    record = subprocess.run(["aws", "secretsmanager", "get-secret-value", "--region",
+                             "us-west-2", "--secret-id", SECRET, "--query", "SecretString",
+                             "--output", "text"], check=True, capture_output=True,
+                            text=True, timeout=30)
+    value = json.loads(record.stdout)
+    token = value.get("api_key", "") if isinstance(value, dict) else ""
+    if not isinstance(token, str) or not token or len(token) > 4096:
+        raise RuntimeError("GitHub company credential unavailable")
+    return token
+
+
+def request(path: str, token: str) -> bytes:
+    headers = {"Authorization": "Bearer " + token, "Accept": "application/vnd.github+json",
+               "User-Agent": "cognilode-company-source-sync"}
+    with urlopen(Request("https://api.github.com" + path, headers=headers), timeout=90) as response:
+        return response.read(150_000_001)
+
+
+def install(repo: str, sha: str, archive: bytes) -> None:
+    if len(archive) > 150_000_000:
+        raise RuntimeError(f"source archive too large: {repo}")
+    release = ROOT / "releases" / repo / sha
+    if not release.is_dir():
+        release.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=f"{repo}-", dir=release.parent) as temporary:
+            stage = Path(temporary)
+            with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as bundle:
+                for item in bundle:
+                    parts = PurePosixPath(item.name).parts
+                    if len(parts) < 2 or item.issym() or item.islnk() or not (item.isfile() or item.isdir()):
+                        continue
+                    relative = PurePosixPath(*parts[1:])
+                    if ".." in relative.parts or relative.is_absolute():
+                        raise RuntimeError("unsafe GitHub archive path")
+                    target = stage.joinpath(*relative.parts)
+                    if item.isdir():
+                        target.mkdir(parents=True, exist_ok=True)
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    source = bundle.extractfile(item)
+                    if source is None:
+                        continue
+                    with target.open("wb") as output:
+                        while chunk := source.read(1024 * 1024):
+                            output.write(chunk)
+            stage.rename(release)
+    current = ROOT / "current"
+    current.mkdir(parents=True, exist_ok=True)
+    link = current / repo
+    target = os.path.relpath(release, current)
+    temporary_link = current / (repo + ".next")
+    temporary_link.unlink(missing_ok=True)
+    temporary_link.symlink_to(target)
+    temporary_link.replace(link)
+
+
+def sync_once() -> None:
+    token = credential()
+    for repo in REPOS:
+        try:
+            metadata = json.loads(request(f"/repos/evanbrown3000/{repo}/commits/main", token))
+            sha = str(metadata.get("sha") or "")
+            if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
+                raise RuntimeError("GitHub returned invalid revision")
+            current = ROOT / "current" / repo
+            if current.is_symlink() and current.resolve().name == sha:
+                continue
+            install(repo, sha, request(f"/repos/evanbrown3000/{repo}/tarball/{sha}", token))
+            print(f"source ready {repo} {sha[:12]}", flush=True)
+        except Exception as error:
+            print(f"source pending {repo}: {type(error).__name__}: {error}", flush=True)
+
+
+if __name__ == "__main__":
+    while True:
+        try:
+            sync_once()
+        except Exception as error:
+            print(f"source sync pending: {type(error).__name__}: {error}", flush=True)
+        time.sleep(max(300, int(os.environ.get("COGNILODE_SOURCE_SYNC_INTERVAL", "10800"))))

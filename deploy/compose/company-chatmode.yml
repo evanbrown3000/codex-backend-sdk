@@ -112,6 +112,46 @@ services:
     depends_on:
       - provider-transport
 
+  source-sync:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /company/codex-backend-sdk
+    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-company-source-sync]
+    environment:
+      HOME: /home/worker
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+
+  taskflow-worker:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /company/codex-backend-sdk
+    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-company-taskflow-runtime]
+    environment:
+      HOME: /home/worker
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+      COGNILODE_TASKFLOW_PLAN_ROOT: /runtime/worker/rpe-runs
+      COGNILODE_TASKFLOW_SECRETARY_ROOT: /runtime/worker/taskflow-secretary
+      COGNILODE_LLM_GOVERNANCE_ROOT: /runtime/worker/llm-governance
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
+      COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
+      COGNILODE_CODEX_BIN: /runtime/worker/bin/codex
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - company_operator:/home/worker/.config/cognilode:ro
+      - ${COMPANY_RUNTIME_ROOT}/worker:/runtime/worker
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+    depends_on:
+      - source-sync
+
 volumes:
   company_auth:
   company_browser:

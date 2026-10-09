@@ -349,7 +349,6 @@ services:
       - company_codex_release:/codex:ro
       - company_operator:/home/worker/.config/cognilode:ro
       - memory_data:/memory-stock:ro
-      - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
     depends_on:
       - credential-sync
       - source-sync

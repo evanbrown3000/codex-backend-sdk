@@ -1,0 +1,21 @@
+{
+  "schema": "cognilode.employee_slack_roles.v1",
+  "captured_at": "2026-10-08",
+  "employees": {
+    "Elliot Mercer": {
+      "role": "Principal Platform Systems Engineer",
+      "org": "Platform Engineering; Research Engineering; Infrastructure & Reliability",
+      "slack_message": "https://everything-ces8532.slack.com/archives/C0C6QT9RF5Z/p1791233502037239"
+    },
+    "Nadia Brooks": {
+      "role": "Staff Knowledge Systems Engineer",
+      "org": "Research Engineering (liaison: Data Platform)",
+      "slack_message": "https://everything-ces8532.slack.com/archives/C0C6QT9RF5Z/p1791233488008789"
+    },
+    "Rina Hale": {
+      "role": "Principal Systems Integration Engineer",
+      "org": "Platform Engineering & Infrastructure/Reliability",
+      "slack_message": "https://everything-ces8532.slack.com/archives/C0C6RSC49NZ/p1791233048652669"
+    }
+  }
+}

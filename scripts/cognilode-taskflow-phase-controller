@@ -33,6 +33,7 @@ import zipfile
 
 HERE = Path(__file__).resolve().parent
 SENDER_PATH = HERE / "cognilode-b4pt0r-chatmode"
+SLACK_ROLES_PATH = HERE.parent / "config/employee-slack-roles.json"
 DEFAULT_SECRETARY = Path.home() / "bin/modified-codex-secretary"
 DEFAULT_STATE_ROOT = Path.home() / ".local/share/cognilode/taskflow-phase-controller"
 MAX_ZIP_BYTES = 20 * 1024 * 1024
@@ -73,6 +74,14 @@ def atomic_json(path: Path, value: Mapping[str, Any]) -> None:
 def stable_id(*parts: str) -> str:
     raw = "\x1f".join(parts)
     return "tf-" + hashlib.sha256(raw.encode()).hexdigest()[:40]
+
+
+def slack_role_context(employee: str) -> str:
+    directory=json.loads(SLACK_ROLES_PATH.read_text(encoding="utf-8"))
+    entry=(directory.get("employees") or {}).get(employee)
+    if not isinstance(entry,dict) or not entry.get("role") or not entry.get("slack_message"):
+        raise ValueError(f"Slack role missing for named employee: {employee}")
+    return f"{employee} — {entry['role']} — {entry.get('org','')}\nSlack role source: {entry['slack_message']}"
 
 
 @dataclass(frozen=True)
@@ -351,7 +360,7 @@ def job_base(plan: Plan, step: Step, phase: str, *, provider: str, priority: int
 
 
 def research_prompt(plan: Plan, step: Step, role: str, out_zip: Path) -> str:
-    return f"""You are the named Codex research employee for this TaskFlow step.\nRole: {role}\nProject: {plan.project_id}\nPlan SHA-256: {plan.sha256}\nStep: {step.step_id} {step.title}\n\nRead and use the FULL plan below, not an isolated leaf. Research only; do not claim TaskFlow completion. Build a focused physically readable ZIP at exactly:\n{out_zip}\nThe ZIP must contain top-level MANIFEST.json with plan_sha256={plan.sha256!r} and a files list that SHA-256 covers every other non-directory member. Include relevant code/docs/data and a research report. Do not include secrets or credentials.\n\n--- FULL PLAN ---\n{plan.text}\n"""
+    return f"""You are the named Codex research employee for this TaskFlow step.\n{slack_role_context(role)}\nProject: {plan.project_id}\nPlan SHA-256: {plan.sha256}\nStep: {step.step_id} {step.title}\n\nRead and use the FULL plan below, not an isolated leaf. Research only; do not claim TaskFlow completion. Build a focused physically readable ZIP at exactly:\n{out_zip}\nThe ZIP must contain top-level MANIFEST.json with plan_sha256={plan.sha256!r} and a files list that SHA-256 covers every other non-directory member. Include relevant code/docs/data and a research report. Do not include secrets or credentials.\n\n--- FULL PLAN ---\n{plan.text}\n"""
 
 
 def chatgpt_prompt(plan: Plan, step: Step, research_meta: Mapping[str, Any]) -> str:
@@ -359,7 +368,7 @@ def chatgpt_prompt(plan: Plan, step: Step, research_meta: Mapping[str, Any]) -> 
 
 
 def external_prompt(plan: Plan, step: Step, work_zip: Path, effect_receipt: Path, employee: str) -> str:
-    return f"""You are the Codex external-effect employee assigned to apply this TaskFlow sandbox output.\nEmployee: {employee}\nProject: {plan.project_id}\nPlan SHA-256: {plan.sha256}\nStep: {step.step_id} {step.title}\nWork ZIP: {work_zip}\nWork ZIP SHA-256: {sha256_file(work_zip)}\n\nRead EXTERNAL_EFFECT_INSTRUCTIONS.md inside the ZIP, reconcile with current source/deployment, apply or deploy the work, and verify the real effect. Do not mark success for code/artifact production alone. On success, atomically write JSON to exactly {effect_receipt} with schema='cognilode.taskflow.external_effect.v1', status='applied', project_id, plan_sha256, step_id, work_zip_sha256, effect_kind, non-empty effect_ref, environment, checks (non-empty list of objects with command, exit_code, and observed result), and defects (list). If the effect is failed or uncertain, write status='failed' or 'uncertain'; that MUST NOT release dependents.\n\n--- FULL PLAN ---\n{plan.text}\n"""
+    return f"""You are the Codex external-effect employee assigned to apply this TaskFlow sandbox output.\n{slack_role_context(employee)}\nProject: {plan.project_id}\nPlan SHA-256: {plan.sha256}\nStep: {step.step_id} {step.title}\nWork ZIP: {work_zip}\nWork ZIP SHA-256: {sha256_file(work_zip)}\n\nRead EXTERNAL_EFFECT_INSTRUCTIONS.md inside the ZIP, reconcile with current source/deployment, apply or deploy the work, and verify the real effect. Do not mark success for code/artifact production alone. On success, atomically write JSON to exactly {effect_receipt} with schema='cognilode.taskflow.external_effect.v1', status='applied', project_id, plan_sha256, step_id, work_zip_sha256, effect_kind, non-empty effect_ref, environment, checks (non-empty list of objects with command, exit_code, and observed result), and defects (list). If the effect is failed or uncertain, write status='failed' or 'uncertain'; that MUST NOT release dependents.\n\n--- FULL PLAN ---\n{plan.text}\n"""
 
 
 def run_secretary(secretary: Path, prompt_path: Path, *, employee: str, manager: str, repo_path: Path, phase: str) -> dict[str, Any]:
@@ -511,8 +520,10 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
     for step in plan.steps:
         if seed_step and step.step_id != seed_step: continue
         if step.checked or not completed_prerequisites(queue,plan,step): continue
-        rjob=materialize_research_job(queue,plan,step,priority,role=role,state_root=state_root)
-        action["actions"].append({"step":step.step_id,"phase":"research","state":rjob.get("state")})
+        owner=step.fields.get("owner") or role
+        slack_role_context(owner)
+        rjob=materialize_research_job(queue,plan,step,priority,role=owner,state_root=state_root)
+        action["actions"].append({"step":step.step_id,"phase":"research","state":rjob.get("state"),"employee":owner})
     # Reconcile research actions that crossed begin_effect before a crash/timeout. Never resend them.
     pending_research=queue.post({"operation":"list_jobs","provider":"codex.research","state":"effect_pending","limit":100}).get("jobs") or []
     for pending in pending_research:
@@ -522,7 +533,8 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
         if not step: continue
         run_dir=state_root/plan.project_id/step.step_id/"research"/str(pending["id"]); out_zip=run_dir/"research.zip"
         try:
-            if pending.get("claimed_by") != role or pending.get("assigned_employee") != role:
+            owner=step.fields.get("owner") or role
+            if pending.get("claimed_by") != owner or pending.get("assigned_employee") != owner:
                 raise ValueError("research employee fence mismatch")
             receipt_path=run_dir/"secretary_receipt.json"
             if not secretary_succeeded(json.loads(receipt_path.read_text(encoding="utf-8"))):
@@ -539,7 +551,13 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
         action["actions"].append({"step":step.step_id,"phase":"research_reconcile","ok":readback_ok,"zip":meta["sha256"]})
 
     # Research workers are generic D1 claims; this controller is their actuator.
-    rjob=queue.claim("codex.research",role)
+    rjob=None
+    research_roles=list(dict.fromkeys((step.fields.get("owner") or role) for step in plan.steps if not step.checked and (not seed_step or step.step_id==seed_step)))
+    for candidate_role in research_roles:
+        rjob=queue.claim("codex.research",candidate_role)
+        if rjob:
+            role=candidate_role
+            break
     if rjob:
         step=plan.by_id().get(str(rjob.get("taskflow_step") or (rjob.get("payload") or {}).get("taskflow_step")))
         if step and rjob.get("id") == phase_job_id(plan,step.step_id,"research") and rjob.get("plan_revision") == plan.sha256 and rjob.get("assigned_employee") == role:
@@ -639,9 +657,9 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
 
 
 def main(argv: Sequence[str] | None=None) -> int:
-    p=argparse.ArgumentParser(); p.add_argument("--plan",required=True); p.add_argument("--role",default="Principal Platform Systems Engineer")
+    p=argparse.ArgumentParser(); p.add_argument("--plan",required=True); p.add_argument("--role",required=True)
     p.add_argument("--secretary",default=str(DEFAULT_SECRETARY)); p.add_argument("--state-root",default=""); p.add_argument("--worker-id",default="taskflow-phase-controller")
-    p.add_argument("--manager",default="agent-memory-manager"); p.add_argument("--priority",type=int,default=50); p.add_argument("--external-employee",default="Codex external-effect employee"); p.add_argument("--seed-step",default="")
+    p.add_argument("--manager",default="agent-memory-manager"); p.add_argument("--priority",type=int,default=50); p.add_argument("--external-employee",required=True); p.add_argument("--seed-step",default="")
     args=p.parse_args(argv); plan=parse_plan(Path(args.plan)); queue=QueueClient(load_sender())
     repo_path=Path(plan.source_ref.removeprefix("file:")).parent.parent
     state_root=Path(args.state_root).resolve() if args.state_root else repo_path/".taskflow-state"

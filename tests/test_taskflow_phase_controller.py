@@ -18,6 +18,7 @@ id agent-memory
 [ ] AM-6 storage migration
 [ ] AM-7 citation expansion
 [ ] AM-8 foreground rollover
+    owner: Nadia Brooks
     depends_on: AM-5
 [ ] AM-9 project acceptance
     depends_on: AM-5 AM-6 AM-7 AM-8
@@ -71,6 +72,13 @@ class FakeQueue:
         raise AssertionError(body)
 
 class Tests(unittest.TestCase):
+    def test_named_employee_receives_slack_role_source(self):
+        role=c.slack_role_context('Elliot Mercer')
+        self.assertIn('Principal Platform Systems Engineer',role)
+        self.assertIn('slack.com/archives/',role)
+        with self.assertRaisesRegex(ValueError,'Slack role missing'):
+            c.slack_role_context('Unnamed Employee')
+
     def test_repo_plan_must_match_committed_instruction(self):
         with tempfile.TemporaryDirectory() as td:
             repo=Path(td); (repo/'plans').mkdir(); source=repo/'plans'/'p.plan'
@@ -203,7 +211,7 @@ print(json.dumps({'completed':True,'final_candidate':{'family':'chatgpt','name':
             td=Path(td); path=td/'work.zip'
             manifest_zip(path,plan.sha256,{'EXTERNAL_EFFECT_INSTRUCTIONS.md':b'apply','patch.txt':b'first'})
             meta=c.verify_manifest_zip(path,expected_plan_sha256=plan.sha256,require_external_instructions=True)
-            job=c.ensure_external_job(q,plan,step,50,meta,state_root=td,external_employee='effect-worker')
+            job=c.ensure_external_job(q,plan,step,50,meta,state_root=td,external_employee='Rina Hale')
             manifest_zip(path,plan.sha256,{'EXTERNAL_EFFECT_INSTRUCTIONS.md':b'apply','patch.txt':b'second'})
             with self.assertRaisesRegex(ValueError,'queued SHA-256'):
                 c.verified_work_attachment(job,plan)
@@ -233,12 +241,12 @@ print(json.dumps({'completed':True,'final_candidate':{'family':'chatgpt','name':
         with tempfile.TemporaryDirectory() as td:
             td=Path(td); work=td/'work.zip'; manifest_zip(work,plan.sha256,{'EXTERNAL_EFFECT_INSTRUCTIONS.md':b'apply','patch.txt':b'x'})
             meta=c.verify_manifest_zip(work,expected_plan_sha256=plan.sha256,require_external_instructions=True)
-            job=c.ensure_external_job(q,plan,step,50,meta,state_root=td/'state',external_employee='effect-worker')
-            claimed=q.claim('codex.external-effect','effect-worker'); self.assertEqual(claimed['id'],job['id']); self.assertTrue(q.begin(claimed)['ok'])
+            job=c.ensure_external_job(q,plan,step,50,meta,state_root=td/'state',external_employee='Rina Hale')
+            claimed=q.claim('codex.external-effect','Rina Hale'); self.assertEqual(claimed['id'],job['id']); self.assertTrue(q.begin(claimed)['ok'])
             receipt=td/'state'/plan.project_id/step.step_id/'external_effect'/job['id']/'EXTERNAL_EFFECT_RESULT.json'; receipt.parent.mkdir(parents=True,exist_ok=True)
             receipt.write_text(json.dumps({'schema':'cognilode.taskflow.external_effect.v1','status':'applied','project_id':plan.project_id,'plan_sha256':plan.sha256,'step_id':step.step_id,'work_zip_sha256':meta['sha256'],'effect_kind':'deployment','effect_ref':'deploy:recovered','environment':'fixture','checks':[{'command':'readback','exit_code':0,'result':'effect exists'}],'defects':[]}))
             receipt.with_name('secretary_receipt.json').write_text(json.dumps({'taskflow_route_verified':True}))
-            result=c.run_once(queue=q,plan=plan,role='research-worker',secretary=Path('/bin/false'),state_root=td/'state',worker_id='unused',manager='m',priority=50,external_employee='effect-worker',seed_step='AM-5')
+            result=c.run_once(queue=q,plan=plan,role='Elliot Mercer',secretary=Path('/bin/false'),state_root=td/'state',worker_id='unused',manager='m',priority=50,external_employee='Rina Hale',seed_step='AM-5')
             self.assertEqual(q.get(job['id'])['state'],'complete')
             self.assertTrue(any(x.get('phase')=='external_effect_reconcile' and x.get('ok') for x in result['actions']))
 
@@ -262,7 +270,7 @@ print(json.dumps({'completed':True,'final_candidate':{'family':'modified_codex',
 ''')
             secretary.chmod(secretary.stat().st_mode|stat.S_IXUSR)
             state=td/'state'
-            first=c.run_once(queue=q,plan=plan,role='Elliot Mercer — Principal Platform Systems Engineer',secretary=secretary,state_root=state,worker_id='test-worker',manager='m',priority=50,external_employee='effect-worker')
+            first=c.run_once(queue=q,plan=plan,role='Elliot Mercer',secretary=secretary,state_root=state,worker_id='test-worker',manager='m',priority=50,external_employee='Rina Hale')
             research=q.get(c.phase_job_id(plan,'AM-5','research')); self.assertEqual(research['state'],'complete')
             chat=q.get(c.phase_job_id(plan,'AM-5','chatgpt_sandbox')); self.assertEqual(chat['state'],'queued')
             self.assertIsNone(q.get(c.phase_job_id(plan,'AM-5','external_effect')))
@@ -270,11 +278,11 @@ print(json.dumps({'completed':True,'final_candidate':{'family':'modified_codex',
             # Simulate the proven B4PT0R chat-mode worker completing only its phase after central readback.
             work=td/'work.zip'; manifest_zip(work,plan.sha256,{'EXTERNAL_EFFECT_INSTRUCTIONS.md':b'apply it','patch.txt':b'change'})
             chat.update(state='complete',effect_evidence=[{'kind':'provider_conversation','ref':'conv-1'},{'kind':'central_conversation_readback','ref':'conv-1'},{'kind':'chatgpt_sandbox_artifact','ref':hashlib.sha256(work.read_bytes()).hexdigest(),'path':str(work)}])
-            second=c.run_once(queue=q,plan=plan,role='Elliot Mercer — Principal Platform Systems Engineer',secretary=secretary,state_root=state,worker_id='test-worker',manager='m',priority=50,external_employee='effect-worker')
+            second=c.run_once(queue=q,plan=plan,role='Elliot Mercer',secretary=secretary,state_root=state,worker_id='test-worker',manager='m',priority=50,external_employee='Rina Hale')
             effect=q.get(c.phase_job_id(plan,'AM-5','external_effect')); self.assertEqual(effect['state'],'complete')
             # One more controller recurrence observes committed effect completion and releases AM-8 research.
-            third=c.run_once(queue=q,plan=plan,role='Elliot Mercer — Principal Platform Systems Engineer',secretary=secretary,state_root=state,worker_id='test-worker',manager='m',priority=50,external_employee='effect-worker')
-            self.assertIsNotNone(q.get(c.phase_job_id(plan,'AM-8','research')))
+            third=c.run_once(queue=q,plan=plan,role='Elliot Mercer',secretary=secretary,state_root=state,worker_id='test-worker',manager='m',priority=50,external_employee='Rina Hale')
+            self.assertEqual(q.get(c.phase_job_id(plan,'AM-8','research'))['assigned_employee'],'Nadia Brooks')
             self.assertTrue(any(x.get('phase')=='external_effect_complete' and x.get('ok') for x in second['actions']))
 
 if __name__=='__main__': unittest.main()

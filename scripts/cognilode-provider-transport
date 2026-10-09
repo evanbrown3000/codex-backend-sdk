@@ -83,7 +83,9 @@ def collect_forever():
         except (OSError, subprocess.TimeoutExpired) as exc:
             print(json.dumps({"kind": "collector_retry", "error": type(exc).__name__,
                               "at": time.time()}), flush=True)
-        time.sleep(60)
+        # Central grant permits one hydration per conversation per 120 seconds.
+        # Agent readers use the shared normalized delta store, never this loop.
+        time.sleep(120)
 
 
 def main() -> int:

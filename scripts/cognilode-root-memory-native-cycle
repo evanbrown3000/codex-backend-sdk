@@ -476,7 +476,8 @@ def finalize(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, native_job_
              root_attempt: int = 0) -> dict[str, Any]:
     bridge = bridge or _load(BRIDGE, "root_memory_bridge_finalize")
     controller = controller or _load(CONTROLLER, "root_memory_taskflow_finalize")
-    stock = bridge.shared_stock_census(post, minimum=500)
+    stock = bridge.shared_stock_census(post, minimum=500,
+                                       checkpoint_path=DEFAULT_ROOT / "stock-readback-proofs.json")
     if not stock["multi_year_ready"]:
         return {"ok": False, "reason": "shared_multi_year_stock_incomplete", "provider_requests_created": 0}
     memory = verify_native_memory_output(post, job_id=native_job_id, stock=stock)
@@ -511,7 +512,9 @@ def prepare(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, output_root:
         except (OSError, ValueError, KeyError, TypeError):
             pass
     if stock is None:
-        stock = bridge.shared_stock_census(post, minimum=500)
+        stock = bridge.shared_stock_census(post, minimum=500,
+                                           checkpoint_path=output_root / "stock-readback-proofs.json",
+                                           stop_at_minimum=True)
         if stock.get("multi_year_ready"):
             _atomic_state(selection_path, {"verified_at_epoch": time.time(), "stock": stock,
                                            "stock_sha256": _sha(json.dumps(stock, sort_keys=True).encode())})
@@ -674,7 +677,8 @@ def tick(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, output_root: Pa
             return {"ok": True, "phase": "complete", "root_job_id": state["root_job_id"],
                     "provider_requests_created": 0}
         bridge = _load(BRIDGE, "root_memory_bridge_fingerprint")
-        stock = bridge.shared_stock_census(post, minimum=500)
+        stock = bridge.shared_stock_census(post, minimum=500,
+                                           checkpoint_path=output_root / "stock-readback-proofs.json")
         if not stock["multi_year_ready"]:
             return {"ok": False, "reason": "shared_multi_year_stock_incomplete",
                     "distinct_complete": stock["distinct_complete"], "provider_requests_created": 0}

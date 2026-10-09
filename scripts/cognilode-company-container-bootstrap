@@ -91,18 +91,31 @@ def main() -> int:
     project = "cognilode-company-runtime"
     image = env.get("COGNILODE_WORKSPACE_IMAGE", "cognilode-standard-workspace:2026-09-28")
     migrate_container_browser(project, image)
-    for name in ("company_auth", "company_operator", "company_deploy_custody"):
+    for name in ("company_auth", "company_operator", "company_deploy_custody",
+                 "memory_data", "memory_drive_auth"):
         subprocess.run(["docker", "volume", "create", f"{project}_{name}"],
                        stdout=subprocess.DEVNULL, check=True, timeout=30)
     subprocess.run(["docker", "run", "--rm", "--user", "0",
                     "--volume", f"{project}_company_auth:/auth",
                     "--volume", f"{project}_company_operator:/operator",
                     "--volume", f"{project}_company_deploy_custody:/deploy",
+                    "--volume", f"{project}_memory_drive_auth:/memory-auth",
                     image,
-                    "chown", "-R", f"{os.getuid()}:{os.getgid()}", "/auth", "/operator", "/deploy"],
+                    "chown", "-R", f"{os.getuid()}:{os.getgid()}",
+                    "/auth", "/operator", "/deploy", "/memory-auth"],
                    stdout=subprocess.DEVNULL, check=True, timeout=60)
     command = ["docker", "compose", "--project-name", project, "-f", str(COMPOSE), "up", "-d"]
     subprocess.run(command, env=env, check=True, timeout=180)
+    memory_source = runtime / "shared/source/current/memory-stock-canonical"
+    source_deadline = time.monotonic() + 360
+    while not (memory_source / "deploy/conversation-vacuum/company_memory_cutover.py").is_file():
+        if time.monotonic() >= source_deadline:
+            raise RuntimeError("memory source synchronization did not complete")
+        time.sleep(5)
+    memory_env = {**env, "COGNILODE_MEMORY_SOURCE_ROOT": str(memory_source),
+                  "COGNILODE_MEMORY_HOST_SOURCE": str(memory_source)}
+    subprocess.run(["python3", str(memory_source / "deploy/conversation-vacuum/company_memory_cutover.py")],
+                   env=memory_env, check=True)
     deadline = time.monotonic() + 150
     while time.monotonic() < deadline:
         custody_ready = subprocess.run(

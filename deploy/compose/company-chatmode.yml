@@ -44,8 +44,12 @@ services:
       - /cognilode/agent-credentials/cloudflare/full-admin=/deploy/worker-token.json
       - --credential
       - cognilode/http-gate-operator-token=/deploy/operator-bearer
+      - --credential
+      - cognilode/memory-drive/rclone-config#rclone_config=/memory-auth/rclone.conf
       - --writer-secret
       - cognilode/chatmode/codex-auth
+      - --writer-secret
+      - cognilode/memory-drive/rclone-config
     environment:
       HOME: /home/worker
       PATH: /usr/bin:/usr/local/bin:/bin
@@ -54,6 +58,7 @@ services:
       - company_auth:/home/worker/.codex
       - company_operator:/home/worker/.config/cognilode
       - company_deploy_custody:/deploy
+      - memory_drive_auth:/memory-auth
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
 
   provider-transport:
@@ -231,6 +236,76 @@ services:
       - codex-builder
       - credential-sync
 
+  memory:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /runtime/source/current/memory-stock-canonical
+    entrypoint: [python3, /runtime/source/current/memory-stock-canonical/deploy/conversation-vacuum/company_memory_runtime.py]
+    environment:
+      HOME: /home/worker
+      PYTHONPATH: /runtime/source/current/memory-stock-canonical/src
+      COGNILODE_VACUUM_HOME: /workspace/company/runtime/conversation-vacuum
+      COGNILODE_VACUUM_ROOTS: /workspace/company/data/conversation-imports
+      COGNILODE_PRIVACY_EXPORT_DIR: /workspace/company/data/privacy-imports
+      RCLONE_CONFIG: /memory-auth/rclone.conf
+      COGNILODE_ENABLE_D1_BRIDGE: "0"
+      COGNILODE_ENABLE_OPENAI_LIBRARY: "0"
+      COGNILODE_DRIVE_WEB_UPLOAD: "0"
+      COGNILODE_MEMORY_ARCHIVE_BUCKET: cognilode-conversation-visibility-362928919715-us-west-2
+      DECISIONX_DERIVED_DB: /workspace/company/runtime/conversation-vacuum/decisionx-derived.sqlite3
+    volumes:
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime:ro
+      - memory_data:/workspace/company
+      - memory_drive_auth:/memory-auth
+      - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+    depends_on:
+      - source-sync
+      - credential-sync
+
+  rpe-worker:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /runtime/source/current/research-plan-execute
+    entrypoint: [sh, -c]
+    command:
+      - >-
+        mkdir -p /runtime/worker/rpe-intake /runtime/worker/rpe-runs &&
+        cp -n /runtime/source/current/research-plan-execute/deploy/unified-operation.goal.md
+        /runtime/worker/rpe-intake/unified-operation.goal.md &&
+        exec python3 -m recursive_rpe.autonomy
+        --inbox /runtime/worker/rpe-intake
+        --runs /runtime/worker/rpe-runs --interval 60 --parallel 4
+    environment:
+      HOME: /home/worker
+      PYTHONPATH: /runtime/source/current/research-plan-execute/src:/runtime/source/current/modified-codex-runtime/src:/runtime/source/current/taskflow-orchestration-history/src
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+      COGNILODE_REPOSITORIES_ROOT: /runtime/source/current
+      COGNILODE_RPE_PROVIDER: chatgpt.com
+      COGNILODE_TASKFLOW_DISPATCH_CLI: /company/codex-backend-sdk/scripts/cognilode-taskflow-dispatch
+      COGNILODE_TASKFLOW_SECRETARY_COMMAND: python3 -m modified_codex.taskflow_secretary submit
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
+      COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
+      COGNILODE_AWS_CLI: /usr/bin/aws
+      COGNILODE_TASKFLOW_SECRETARY_ROOT: /runtime/worker/taskflow-secretary
+      COGNILODE_LLM_GOVERNANCE_ROOT: /runtime/worker/llm-governance
+      COGNILODE_CODEX_BIN: /codex/bin/codex
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - ${COMPANY_RUNTIME_ROOT}/worker:/runtime/worker
+      - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+      - company_auth:/home/worker/.codex
+      - company_operator:/home/worker/.config/cognilode:ro
+      - company_codex_release:/codex:ro
+    depends_on:
+      - source-sync
+      - credential-sync
+      - codex-builder
+
 volumes:
   company_auth:
   company_browser:
@@ -240,3 +315,5 @@ volumes:
   company_codex_target:
   company_cargo_registry:
   company_cargo_git:
+  memory_data:
+  memory_drive_auth:

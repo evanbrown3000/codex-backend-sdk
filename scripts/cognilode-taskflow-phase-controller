@@ -316,13 +316,14 @@ class QueueClient:
             or proof.get("phase") != job["phase"]):
             raise RuntimeError("D1 enqueue returned a job without matching TaskFlow plan authority")
         return saved
-    def claim(self, provider: str, worker_id: str) -> dict[str, Any] | None:
-        reply = self.post({"operation":"claim_jobs","provider":provider,"worker_id":worker_id,"limit":1})
+    def claim(self, provider: str, worker_id: str, job_id: str) -> dict[str, Any] | None:
+        reply = self.post({"operation":"claim_jobs","provider":provider,"worker_id":worker_id,"job_id":job_id,"limit":1})
         rows = reply.get("jobs") or []
         if not rows: return None
         job = rows[0]
-        if job.get("provider") != provider or job.get("claimed_by") != worker_id or not job.get("lease_token") or job.get("lease_generation") is None:
-            raise RuntimeError("D1 claim does not match requested provider, employee, or fence")
+        if (job.get("id") != job_id or job.get("provider") != provider or job.get("claimed_by") != worker_id
+            or not job.get("lease_token") or job.get("lease_generation") is None):
+            raise RuntimeError("D1 claim does not match requested job, provider, employee, or fence")
         return job
     def begin(self, job: Mapping[str, Any]) -> dict[str, Any]:
         return self.post({"operation":"begin_effect", "job_id":job["id"], "worker_id":job["claimed_by"], "lease_token":job["lease_token"], "lease_generation":job["lease_generation"]})
@@ -640,9 +641,10 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
 
     # Research workers are generic D1 claims; this controller is their actuator.
     rjob=None
-    research_roles=list(dict.fromkeys((step.fields.get("owner") or role) for step in plan.steps if not step.checked and (not seed_step or step.step_id==seed_step)))
-    for candidate_role in research_roles:
-        rjob=queue.claim("codex.research",candidate_role)
+    for candidate_step in plan.steps:
+        if candidate_step.checked or (seed_step and candidate_step.step_id != seed_step): continue
+        candidate_role=candidate_step.fields.get("owner") or role
+        rjob=queue.claim("codex.research",candidate_role,phase_job_id(plan,candidate_step.step_id,"research"))
         if rjob:
             role=candidate_role
             break
@@ -712,7 +714,11 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
         readback_ok=bool(committed and committed.get("state")=="complete")
         action["actions"].append({"step":step.step_id,"phase":"external_effect_reconcile","ok":bool(done.get("ok") and readback_ok),"central_readback_verified":readback_ok,"effect_ref":effect["effect_ref"]})
 
-    ejob=queue.claim("codex.external-effect",external_employee)
+    ejob=None
+    for candidate_step in plan.steps:
+        if candidate_step.checked or (seed_step and candidate_step.step_id != seed_step): continue
+        ejob=queue.claim("codex.external-effect",external_employee,phase_job_id(plan,candidate_step.step_id,"external_effect"))
+        if ejob: break
     if ejob:
         payload=ejob.get("payload") or {}; step=plan.by_id().get(str(ejob.get("taskflow_step") or payload.get("taskflow_step")))
         if step and ejob.get("id") == phase_job_id(plan,step.step_id,"external_effect") and ejob.get("plan_revision") == plan.sha256 and ejob.get("assigned_employee") == external_employee:

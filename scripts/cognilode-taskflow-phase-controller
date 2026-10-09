@@ -107,6 +107,7 @@ class Plan:
     source_ref: str = ""
     inflight_revisions: Mapping[str, str] = field(default_factory=dict)
     completed_effects: Mapping[str, str] = field(default_factory=dict)
+    completed_effect_revisions: Mapping[str, str] = field(default_factory=dict)
     inherited_checked: tuple[str, ...] = ()
 
     def by_id(self) -> dict[str, Step]:
@@ -124,6 +125,7 @@ def parse_plan_text(text: str) -> Plan:
     current: dict[str, Any] | None = None
     inflight_revisions: dict[str, str] = {}
     completed_effects: dict[str, str] = {}
+    completed_effect_revisions: dict[str, str] = {}
     inherited_checked: set[str] = set()
     for line in text.splitlines():
         if line.startswith("project ") and not project_name:
@@ -137,9 +139,11 @@ def parse_plan_text(text: str) -> Plan:
             inflight_revisions[parts[1]] = parts[2]
         elif line.startswith("completed_effect "):
             parts = line.split()
-            if len(parts) != 3 or not re.fullmatch(r"tf-[0-9a-f]{40}", parts[2]) or parts[1] in completed_effects:
+            if (len(parts) != 4 or not HEX64.fullmatch(parts[2])
+                or not re.fullmatch(r"tf-[0-9a-f]{40}", parts[3]) or parts[1] in completed_effects):
                 raise ValueError("invalid or duplicate completed_effect")
-            completed_effects[parts[1]] = parts[2]
+            completed_effect_revisions[parts[1]] = parts[2]
+            completed_effects[parts[1]] = parts[3]
         elif line.startswith("inherited_checked "):
             parts = line.split()
             if len(parts) != 2 or parts[1] in inherited_checked:
@@ -201,6 +205,9 @@ def parse_plan_text(text: str) -> Plan:
         raise ValueError("completed_effect requires a checked step")
     if inherited_checked & set(completed_effects):
         raise ValueError("inherited and verified checkoff overlap")
+    if any(jid != stable_id(project_id, completed_effect_revisions[step_id], step_id, "external_effect", "0")
+           for step_id, jid in completed_effects.items()):
+        raise ValueError("completed_effect job ID does not match its source revision")
     if any(not row["checked"] and row["step_id"] in inherited_checked for row in raw_steps):
         raise ValueError("inherited_checked requires a checked step")
     if (inflight_revisions or completed_effects or inherited_checked) and any(
@@ -210,6 +217,7 @@ def parse_plan_text(text: str) -> Plan:
         raise ValueError("checked step lacks verified effect or explicit inherited baseline")
     return Plan(project_id, project_name or project_id, sha256_bytes(text.encode()), text, tuple(steps),
                 inflight_revisions=inflight_revisions, completed_effects=completed_effects,
+                completed_effect_revisions=completed_effect_revisions,
                 inherited_checked=tuple(sorted(inherited_checked)))
 
 
@@ -269,6 +277,9 @@ def phase_job_id(plan: Plan, step_id: str, phase: str, attempt: int = 0) -> str:
 
 def final_dependency_ids(plan: Plan, step: Step) -> list[str]:
     by_id = plan.by_id()
+    inherited = [dep for dep in step.dependencies if by_id[dep].checked and dep not in plan.completed_effects]
+    if inherited:
+        raise ValueError(f"checked dependency lacks a D1-verified external effect: {', '.join(inherited)}")
     return [phase_job_id(plan, dep, "external_effect") for dep in step.dependencies if not by_id[dep].checked]
 
 
@@ -531,6 +542,34 @@ def verify_effect_receipt(path: Path, *, plan: Plan, step: Step, work_sha256: st
     return body
 
 
+def validate_probe_observation(step: Step, observed: str) -> str:
+    expected = str(step.fields.get("effect_probe_expected") or "").strip()
+    if expected:
+        if observed != expected:
+            raise ValueError(f"independent effect probe failed: output mismatch {observed[:200]!r}")
+        return expected
+    try:
+        structured = json.loads(observed)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("independent effect probe needs structured JSON evidence") from exc
+    if not isinstance(structured, dict) or structured.get("schema") != "cognilode.effect_probe.v1" or structured.get("verified") is not True:
+        raise ValueError("independent effect probe structured evidence is not verified")
+    evidence = structured.get("evidence")
+    if not isinstance(evidence, list) or not evidence or any(
+        not isinstance(row, dict) or not str(row.get("kind") or "").strip()
+        or not str(row.get("ref") or "").strip()
+        or not HEX64.fullmatch(str(row.get("sha256") or "")) for row in evidence
+    ):
+        raise ValueError("independent effect probe needs SHA-bound evidence")
+    declared_sources = structured.get("distinct_sources")
+    if declared_sources is not None and (
+        not isinstance(declared_sources, int) or declared_sources < 1
+        or len({str(row["ref"]) for row in evidence}) < declared_sources
+    ):
+        raise ValueError("independent effect probe distinct source count is unsupported by its evidence")
+    return "cognilode.effect_probe.v1 verified"
+
+
 def verify_effect_probe(step: Step) -> dict[str, Any]:
     """Independently read the effect with a command authored in the .plan file."""
     command = str(step.fields.get("effect_probe_command") or "").strip()
@@ -545,30 +584,7 @@ def verify_effect_probe(step: Step) -> dict[str, Any]:
     observed = result.stdout.strip()
     if result.returncode != 0:
         raise ValueError(f"independent effect probe failed: exit={result.returncode}, observed={observed[:200]!r}")
-    if expected:
-        if observed != expected:
-            raise ValueError(f"independent effect probe failed: exit={result.returncode}, observed={observed[:200]!r}")
-    else:
-        try:
-            structured = json.loads(observed)
-        except (json.JSONDecodeError, TypeError) as exc:
-            raise ValueError("independent effect probe needs structured JSON evidence") from exc
-        if not isinstance(structured, dict) or structured.get("schema") != "cognilode.effect_probe.v1" or structured.get("verified") is not True:
-            raise ValueError("independent effect probe structured evidence is not verified")
-        evidence = structured.get("evidence")
-        if not isinstance(evidence, list) or not evidence or any(
-            not isinstance(row, dict) or not str(row.get("kind") or "").strip()
-            or not str(row.get("ref") or "").strip()
-            or not HEX64.fullmatch(str(row.get("sha256") or "")) for row in evidence
-        ):
-            raise ValueError("independent effect probe needs SHA-bound evidence")
-        declared_sources = structured.get("distinct_sources")
-        if declared_sources is not None and (
-            not isinstance(declared_sources, int) or declared_sources < 1
-            or len({str(row["ref"]) for row in evidence}) < declared_sources
-        ):
-            raise ValueError("independent effect probe distinct source count is unsupported by its evidence")
-        expected = "cognilode.effect_probe.v1 verified"
+    expected = validate_probe_observation(step, observed)
     proof = {"command": command, "expected": expected, "observed": observed,
              "timeout_seconds": str(timeout_seconds), "verified_at": utc()}
     proof["sha256"] = sha256_bytes(json.dumps(proof, sort_keys=True).encode())
@@ -683,6 +699,10 @@ def ensure_external_job(queue: QueueClient, plan: Plan, step: Step, priority: in
 
 
 def completed_prerequisites(queue: QueueClient, plan: Plan, step: Step) -> bool:
+    if any(plan.by_id()[dep].checked and dep not in plan.completed_effects for dep in step.dependencies):
+        return False
+    if any(plan.by_id()[dep].checked for dep in step.dependencies):
+        verify_completed_effects(queue,plan,step_ids=set(step.dependencies))
     for jid in final_dependency_ids(plan,step):
         row=queue.get(jid)
         if not row or row.get("state") != "complete" or row.get("provider") != "codex.external-effect": return False
@@ -700,7 +720,8 @@ def completed_effect_job(queue: QueueClient, plan: Plan, step: Step) -> dict[str
     payload = job.get("payload") or {}
     if (job.get("id") != job_id or job.get("provider") != "codex.external-effect"
         or (job.get("plan_revision") or payload.get("plan_revision")) != expected_revision
-        or (job.get("taskflow_step") or payload.get("taskflow_step")) != step.step_id):
+        or (job.get("taskflow_step") or payload.get("taskflow_step")) != step.step_id
+        or (job.get("phase") or payload.get("taskflow_phase")) != "external_effect"):
         raise ValueError(f"D1 effect job identity mismatch for {step.step_id}")
     evidence = job.get("effect_evidence") or job.get("effect_evidence_json") or []
     if isinstance(evidence,str):
@@ -723,7 +744,41 @@ def completed_effect_job(queue: QueueClient, plan: Plan, step: Step) -> dict[str
         or probes[0].get("command") != step.fields.get("effect_probe_command")
         or not str(probes[0].get("observed") or "").strip()):
         raise ValueError(f"D1 effect evidence is not hash-bound to the plan probe for {step.step_id}")
+    validate_probe_observation(step,str(probes[0]["observed"]))
     return job
+
+
+def plan_root_source_path(plan: Plan) -> Path:
+    source=Path(plan.source_ref.removeprefix("file:"))
+    if source.parent.parent.name == ".taskflow-plan-revisions":
+        return source.parent.parent.parent / source.parent.name
+    return source
+
+
+def verify_completed_effects(queue: QueueClient, plan: Plan, *, step_ids: set[str] | None = None) -> None:
+    """Read D1 and the committed source revision before honoring checked steps."""
+    root_source=plan_root_source_path(plan)
+    for step_id,stored_id in plan.completed_effects.items():
+        if step_ids is not None and step_id not in step_ids:
+            continue
+        revision=plan.completed_effect_revisions.get(step_id)
+        if not revision:
+            raise ValueError(f"checked step has no source revision: {step_id}")
+        archived=parse_plan(plan_revision_path(root_source,revision))
+        verify_plan_revision(archived)
+        if archived.project_id != plan.project_id or archived.sha256 != revision:
+            raise ValueError(f"checked step source revision mismatch: {step_id}")
+        old_step=archived.by_id().get(step_id)
+        current_step=plan.by_id().get(step_id)
+        if (not old_step or old_step.checked or not current_step or not current_step.checked
+            or archived.inflight_revisions.get(step_id)
+            or old_step.title != current_step.title
+            or any(old_step.fields.get(key) != current_step.fields.get(key)
+                   for key in ("done_when","effect_probe_command","effect_probe_expected"))):
+            raise ValueError(f"checked step differs from its effect source: {step_id}")
+        job=completed_effect_job(queue,archived,old_step)
+        if not job or job["id"] != stored_id:
+            raise ValueError(f"checked step has no matching D1 external effect: {step_id}")
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -743,7 +798,8 @@ def execution_repo(path: Path) -> Path:
     return Path(root.stdout.strip()).resolve() if root.returncode == 0 else path.parent.parent
 
 
-def _revised_plan_text(plan: Plan, *, completed: Mapping[str, str], inflight: Mapping[str, str], inherited: Sequence[str]) -> str:
+def _revised_plan_text(plan: Plan, *, completed: Mapping[str, str], completed_revisions: Mapping[str, str],
+                       inflight: Mapping[str, str], inherited: Sequence[str]) -> str:
     lines = []
     inserted = False
     for line in plan.text.splitlines(keepends=True):
@@ -755,7 +811,8 @@ def _revised_plan_text(plan: Plan, *, completed: Mapping[str, str], inflight: Ma
         lines.append(line)
         if line.startswith("id ") and not inserted:
             ending = "\r\n" if line.endswith("\r\n") else "\n"
-            lines.extend(f"completed_effect {key} {value}{ending}" for key, value in sorted(completed.items()))
+            lines.extend(f"completed_effect {key} {completed_revisions[key]} {value}{ending}"
+                         for key, value in sorted(completed.items()))
             lines.extend(f"inflight_revision {key} {value}{ending}" for key, value in sorted(inflight.items()))
             lines.extend(f"inherited_checked {key}{ending}" for key in sorted(inherited))
             inserted = True
@@ -782,12 +839,14 @@ def checkoff_verified_effects(queue: QueueClient, plan: Plan, *, expected_revisi
         raise ValueError("external effect job fence mismatch")
     if not completed_effect_job(queue, plan, step):
         raise ValueError("D1 external effect is not complete with independent readback")
+    verify_completed_effects(queue, plan)
     source = Path(plan.source_ref.removeprefix("file:"))
     repo = plan_repo(source)
     relative = source.relative_to(repo).as_posix()
     if _git(repo, "status", "--porcelain", "--", relative).stdout.strip():
         raise ValueError("plan path has uncommitted changes")
     completed = dict(plan.completed_effects)
+    completed_revisions = dict(plan.completed_effect_revisions)
     inflight = dict(plan.inflight_revisions)
     newly_checked: list[str] = []
     for candidate in plan.steps:
@@ -796,6 +855,7 @@ def checkoff_verified_effects(queue: QueueClient, plan: Plan, *, expected_revisi
         job = completed_effect_job(queue, plan, candidate)
         if job:
             completed[candidate.step_id] = str(job["id"])
+            completed_revisions[candidate.step_id] = plan.inflight_revisions.get(candidate.step_id,plan.sha256)
             inflight.pop(candidate.step_id, None)
             newly_checked.append(candidate.step_id)
             continue
@@ -813,7 +873,8 @@ def checkoff_verified_effects(queue: QueueClient, plan: Plan, *, expected_revisi
         raise ValueError("target effect did not qualify for checkoff")
     inherited = set(plan.inherited_checked) | {candidate.step_id for candidate in plan.steps
                                                  if candidate.checked and candidate.step_id not in completed}
-    updated = _revised_plan_text(plan, completed=completed, inflight=inflight, inherited=inherited)
+    updated = _revised_plan_text(plan, completed=completed, completed_revisions=completed_revisions,
+                                 inflight=inflight, inherited=inherited)
     parsed = parse_plan_text(updated)
     if not parsed.by_id()[step_id].checked:
         raise ValueError("checkoff did not update target")
@@ -859,11 +920,13 @@ def checkoff_verified_effects(queue: QueueClient, plan: Plan, *, expected_revisi
 
 def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, state_root: Path, worker_id: str, manager: str, priority: int, external_employee: str, seed_step: str | None = None, active_step_ids: set[str] | None = None) -> dict[str,Any]:
     verify_plan_revision(plan)
+    verify_completed_effects(queue,plan)
     repo_path = execution_repo(Path(plan.source_ref.removeprefix("file:")))
     state_root.mkdir(parents=True,exist_ok=True)
     action={"at":utc(),"project":plan.project_id,"plan_sha256":plan.sha256,"actions":[]}
     def active(step: Step) -> bool:
-        return (active_step_ids is None or step.step_id in active_step_ids) and not step.checked
+        return ((active_step_ids is None or step.step_id in active_step_ids) and not step.checked
+                and completed_prerequisites(queue,plan,step))
     def phase_jobs(phase: str, provider: str, state: str) -> Iterable[dict[str, Any]]:
         # The D1 queue is global. A limited list page can omit this project
         # indefinitely when other projects have more than one page of work.
@@ -887,7 +950,7 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
         raise ValueError(f"unknown seed step: {seed_step}")
     for step in plan.steps:
         if seed_step and step.step_id != seed_step: continue
-        if not active(step) or not completed_prerequisites(queue,plan,step): continue
+        if not active(step): continue
         owner=step.fields.get("owner") or role
         slack_role_context(owner)
         rjob=materialize_research_job(queue,plan,step,priority,role=owner,state_root=state_root)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import hashlib, importlib.machinery, importlib.util, json, os, re, stat, subprocess, tempfile, unittest, urllib.error, zipfile
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -115,8 +116,23 @@ id parallel
             current=c.parse_plan(path); c.verify_plan_revision(current)
             self.assertTrue(current.by_id()['A'].checked)
             self.assertEqual(current.completed_effects['A'],a['id'])
+            self.assertEqual(current.completed_effect_revisions['A'],original.sha256)
+            c.verify_completed_effects(q,current)
             self.assertEqual(current.inflight_revisions['B'],original.sha256)
             self.assertEqual(c.final_dependency_ids(current,current.by_id()['C']),[])
+            self.assertTrue(c.completed_prerequisites(q,current,current.by_id()['C']))
+            original_evidence=a['effect_evidence']
+            a['effect_evidence']=[row for row in original_evidence if row['kind']!='independent_effect_probe']
+            with self.assertRaisesRegex(ValueError,'independent probe'):
+                c.completed_prerequisites(q,current,current.by_id()['C'])
+            a['effect_evidence']=original_evidence
+            fake_c=c.phase_job_id(original,'C','external_effect')
+            forged_text=current.text.replace('id parallel\n','id parallel\ncompleted_effect C '+original.sha256+' '+fake_c+'\n')
+            forged_text=forged_text.replace('[ ] C follows A','[x] C follows A')
+            forged=c.parse_plan_text(forged_text)
+            forged=replace(forged,source_ref=current.source_ref)
+            with self.assertRaisesRegex(ValueError,'no matching D1 external effect'):
+                c.verify_completed_effects(q,forged)
             with self.assertRaisesRegex(ValueError,'checked step lacks verified effect'):
                 c.parse_plan_text(current.text.replace('[ ] C follows A','[x] C follows A'))
             self.assertEqual(c.final_dependency_ids(current,current.by_id()['D']),[c.phase_job_id(original,'B','external_effect')])
@@ -139,8 +155,29 @@ id parallel
             revised=c.parse_plan(path)
             self.assertTrue(revised.by_id()['B'].checked)
             self.assertEqual(revised.completed_effects['B'],b['id'])
+            self.assertEqual(revised.completed_effect_revisions['B'],original.sha256)
+            c.verify_completed_effects(q,revised)
+            archived_middle=c.parse_plan(c.plan_revision_path(path,current.sha256))
+            c.verify_completed_effects(q,archived_middle)
             self.assertNotIn('B',revised.inflight_revisions)
             self.assertEqual(c.final_dependency_ids(revised,revised.by_id()['D']),[])
+            forged_c=c.phase_job_id(original,'C','external_effect')
+            forged_text=revised.text.replace('id parallel\n','id parallel\ncompleted_effect C '+original.sha256+' '+forged_c+'\n')
+            path.write_text(forged_text.replace('[ ] C follows A','[x] C follows A'))
+            subprocess.run(['git','-C',str(repo),'add','plans/parallel.plan'],check=True)
+            subprocess.run(['git','-C',str(repo),'commit','-qm','agent forged checkbox'],check=True)
+            committed_forgery=c.parse_plan(path)
+            with self.assertRaisesRegex(ValueError,'no matching D1 external effect'):
+                c.run_once(queue=q,plan=committed_forgery,role='Elliot Mercer',secretary=Path('/bin/false'),
+                           state_root=repo/'.state',worker_id='unused',manager='m',priority=50,
+                           external_employee='Rina Hale',seed_step='C')
+
+    def test_inherited_checked_step_does_not_release_a_dependent_without_effect(self):
+        plan=c.parse_plan_text('project Legacy\nid legacy\n[x] H inherited\n[ ] N next\n    depends_on: H\n')
+        with self.assertRaisesRegex(ValueError,'lacks a D1-verified external effect'):
+            c.final_dependency_ids(plan,plan.by_id()['N'])
+        plan=c.parse_plan_text('project Legacy\nid legacy\ninherited_checked H\n[x] H inherited\n[ ] N next\n    depends_on: H\n')
+        self.assertFalse(c.completed_prerequisites(FakeQueue(),plan,plan.by_id()['N']))
 
     def test_checkoff_rejects_unverified_effect_and_dirty_plan(self):
         with tempfile.TemporaryDirectory() as td:
@@ -170,7 +207,7 @@ id parallel
         with tempfile.TemporaryDirectory() as td:
             repo=Path(td); subprocess.run(['git','init','-q',str(repo)],check=True)
             path=repo/'plans'/'one.plan'; path.parent.mkdir()
-            path.write_text('project One\nid one\n[ ] S deployed\n    effect_probe_command: /usr/bin/printf ok\n')
+            path.write_text('project One\nid one\n[ ] S deployed\n    effect_probe_command: /usr/bin/printf ok\n    effect_probe_expected: ok\n')
             subprocess.run(['git','-C',str(repo),'add','plans/one.plan'],check=True)
             subprocess.run(['git','-C',str(repo),'-c','user.name=Test','-c','user.email=test@example.invalid','commit','-qm','initial'],check=True)
             plan=c.parse_plan(path); step=plan.by_id()['S']; q=FakeQueue()

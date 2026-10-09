@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import datetime as dt
 import email.utils
 import hashlib
@@ -476,12 +477,173 @@ def operator_memory_post(body: dict, *, timeout: int = 55) -> dict:
     raise CapabilityError("central_memory_rejected", last_error or "Agent Memory rejected every local operator credential")
 
 
+MAX_PROVIDER_SSE_BYTES = 16 * 1024 * 1024
+MAX_TOOL_EVENTS = 4000
+MAX_TOOL_CONTENT_CHARS = 200000
+MAX_TOTAL_TOOL_CONTENT_CHARS = 4000000
+
+
+def provider_sse_tool_history(raw: bytes, *, expected_sha256: str = "") -> dict:
+    """Extract provider-observed tool messages, retaining their first-seen order.
+
+    The stream is authoritative for message identity and content. JSON-pointer
+    patches are reconstructed before final messages are selected. An absent or
+    malformed stream never becomes a claim of native sandbox execution.
+    """
+    if len(raw) > MAX_PROVIDER_SSE_BYTES:
+        raise CapabilityError("provider_stream_too_large", "provider SSE exceeds bounded ingestion size")
+    raw_sha = hashlib.sha256(raw).hexdigest()
+    if expected_sha256 and raw_sha != expected_sha256:
+        raise CapabilityError("provider_stream_hash_mismatch", "provider SSE SHA-256 mismatch")
+    state = None
+    inherited_path = ""
+    inherited_operation = "add"
+    messages: dict[str, dict] = {}
+    order: list[str] = []
+
+    def patch(target, change):
+        path = str(change.get("p", change.get("path", "")))
+        operation = str(change.get("o", change.get("op", "replace")))
+        value = change.get("v", change.get("value"))
+        if not path:
+            return copy.deepcopy(value) if operation in {"add", "replace"} else target
+        parts = [part.replace("~1", "/").replace("~0", "~") for part in path.split("/")[1:]]
+        parent = target
+        try:
+            for part in parts[:-1]:
+                parent = parent[int(part)] if isinstance(parent, list) else parent[part]
+            leaf = parts[-1]
+            if isinstance(parent, list):
+                if operation == "remove": parent.pop(int(leaf))
+                elif operation == "add" and leaf == "-": parent.append(copy.deepcopy(value))
+                elif operation == "append": parent[int(leaf)] += value
+                else:
+                    index = int(leaf)
+                    if operation == "add" and index == len(parent): parent.append(copy.deepcopy(value))
+                    else: parent[index] = copy.deepcopy(value)
+            elif isinstance(parent, dict):
+                if operation == "remove": parent.pop(leaf, None)
+                elif operation == "append" and isinstance(parent.get(leaf), (str, list)):
+                    parent[leaf] += value
+                else: parent[leaf] = copy.deepcopy(value)
+        except (IndexError, KeyError, TypeError, ValueError):
+            return target
+        return target
+
+    def content_text(content):
+        if isinstance(content, str): return content
+        if not isinstance(content, dict): return ""
+        if isinstance(content.get("text"), str): return content["text"]
+        parts = content.get("parts")
+        if isinstance(parts, list):
+            return "\n".join(part if isinstance(part, str) else str(part.get("text") or "")
+                             for part in parts if isinstance(part, str) or isinstance(part, dict))
+        return ""
+
+    def observe(value):
+        if isinstance(value, dict):
+            message = value.get("message") if isinstance(value.get("message"), dict) else value
+            if isinstance(message, dict) and isinstance(message.get("author"), dict):
+                message_id = message.get("id")
+                if isinstance(message_id, str) and message_id:
+                    if message_id not in messages: order.append(message_id)
+                    prior = messages.get(message_id)
+                    candidate = copy.deepcopy(message)
+                    if prior and not content_text(candidate.get("content")) and content_text(prior.get("content")):
+                        candidate["content"] = prior["content"]
+                    messages[message_id] = candidate
+                    return
+            for key, child in value.items():
+                if key not in {"content", "metadata"}: observe(child)
+        elif isinstance(value, list):
+            for child in value: observe(child)
+
+    for line in raw.decode("utf-8", "replace").splitlines():
+        if line.startswith("data:"): line = line[5:].strip()
+        if not line.startswith("{"): continue
+        try: event = json.loads(line)
+        except json.JSONDecodeError: continue
+        if not isinstance(event, dict): continue
+        if "v" in event and any(key in event for key in ("c", "o", "p")):
+            inherited_path = str(event.get("p", inherited_path))
+            inherited_operation = str(event.get("o", inherited_operation))
+            if inherited_operation == "patch" and isinstance(event["v"], list):
+                for change in event["v"]:
+                    if isinstance(change, dict): state = patch(state, change)
+            else:
+                state = patch(state, {"p": inherited_path, "o": inherited_operation, "v": event["v"]})
+        observe(event)
+        if state is not None: observe(state)
+
+    events = []
+    content_chars = 0
+    finished_container_exec_results = 0
+    for message_id in order:
+        message = messages[message_id]
+        author = message.get("author") or {}
+        role = author.get("role")
+        recipient = message.get("recipient")
+        if role == "assistant" and isinstance(recipient, str) and recipient not in {"", "all"}:
+            normalized_role, tool_name = "tool_call", recipient
+        elif role == "tool" and isinstance(author.get("name"), str):
+            normalized_role, tool_name = "tool_result", author["name"]
+        else:
+            continue
+        if len(events) >= MAX_TOOL_EVENTS:
+            raise CapabilityError("provider_tool_history_too_large", "provider SSE has too many tool messages")
+        body = content_text(message.get("content"))
+        if len(body) > MAX_TOOL_CONTENT_CHARS or content_chars + len(body) > MAX_TOTAL_TOOL_CONTENT_CHARS:
+            raise CapabilityError("provider_tool_history_too_large", "provider SSE tool content exceeds bounded ingestion size")
+        content_chars += len(body)
+        metadata = message.get("metadata") or {}
+        parent_id = str(metadata.get("parent_id") or "") if isinstance(metadata, dict) else ""
+        status = str(message.get("status") or "")
+        content_type = str((message.get("content") or {}).get("content_type") or "") if isinstance(message.get("content"), dict) else ""
+        if normalized_role == "tool_result" and tool_name == "container.exec" and status == "finished_successfully":
+            parent = messages.get(parent_id) or {}
+            if parent.get("recipient") == "container.exec" and (parent.get("author") or {}).get("role") == "assistant":
+                finished_container_exec_results += 1
+        events.append({
+            "role": normalized_role,
+            "provider_message_id": message_id,
+            "provider_parent_id": parent_id or None,
+            "tool_name": tool_name,
+            "provider_status": status or None,
+            "provider_content_type": content_type or None,
+            "source_index": len(events),
+            "raw_stream_sha256": raw_sha,
+            "content": body if body else f"[Provider {normalized_role} message has no text; tool={tool_name}; id={message_id}]",
+            "provider_content_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            "authorship": "provider-observed",
+            "source_content_complete": True,
+        })
+    return {"raw_stream_sha256": raw_sha, "tool_events": events,
+            "finished_container_exec_results": finished_container_exec_results}
+
+
 def admit_central_conversation(*, result_id: str, prompt: str, result: dict, attachments: list[dict]) -> dict:
     assistant = str(result.get("terminal_assistant_text") or "")
     summary = result.get("provider_summary") if isinstance(result.get("provider_summary"), dict) else {}
     conversation_id = str(summary.get("conversation_id") or result.get("conversation_id") or result_id)[:160]
     if not assistant:
         return {"ok": False, "stored": False, "reason": "no_terminal_assistant_text"}
+    raw_sha = str(result.get("raw_sha256") or "")
+    raw_path_text = str(result.get("raw_path_host") or result.get("raw_path") or "")
+    if raw_sha:
+        if not raw_path_text or not Path(raw_path_text).is_file():
+            raise CapabilityError("provider_stream_unavailable", "SHA-bound provider SSE file is unavailable for central ingestion")
+        raw_path = Path(raw_path_text)
+        if raw_path.stat().st_size > MAX_PROVIDER_SSE_BYTES:
+            raise CapabilityError("provider_stream_too_large", "provider SSE exceeds bounded ingestion size")
+        tool_history = provider_sse_tool_history(raw_path.read_bytes(), expected_sha256=raw_sha)
+    else:
+        tool_history = {"raw_stream_sha256": "", "tool_events": [], "finished_container_exec_results": 0}
+    user_event = {"role": "user", "provider_message_id": "b4pt0r-user:" + result_id,
+                  "source_index": -1, "content": prompt, "authorship": "operator-authored",
+                  "source_content_complete": True}
+    terminal_event = {"role": "assistant", "provider_message_id": str(result.get("terminal_assistant_message_id") or "b4pt0r-terminal:" + result_id),
+                      "source_index": len(tool_history["tool_events"]), "content": assistant,
+                      "authorship": "provider-observed", "source_content_complete": True}
     body = {
         "operation": "record_conversation",
         "provider": "chatgpt.com",
@@ -496,11 +658,13 @@ def admit_central_conversation(*, result_id: str, prompt: str, result: dict, att
             "response": True,
             "uploaded_files": True,
             "downloadable_files": True,
+            "provider_sse_tool_history": bool(raw_sha),
         },
         "prompt": prompt,
         "response_excerpt": assistant,
         "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         "response_sha256": hashlib.sha256(assistant.encode("utf-8")).hexdigest(),
+        "events": [user_event, *tool_history["tool_events"], terminal_event],
         "provider_structured_uploads": attachments,
         "downloadable_files": list(result.get("downloaded_files") or []),
         "conversation_urls": [f"https://chatgpt.com/c/{conversation_id}"] if conversation_id else [],
@@ -513,10 +677,35 @@ def admit_central_conversation(*, result_id: str, prompt: str, result: dict, att
             "assistant_terminal": result.get("assistant_terminal"),
             "terminal_assistant_message_id": result.get("terminal_assistant_message_id"),
             "raw_sha256": result.get("raw_sha256"),
+            "provider_tool_event_count": len(tool_history["tool_events"]),
+            "provider_observed_finished_container_exec_results": tool_history["finished_container_exec_results"],
             "provider_requests_created_by_central_readback": 0,
         },
     }
-    admitted = operator_memory_post(body)
+    # D1's turn table is the single logical store. Ordered deltas avoid a
+    # giant request and preserve all provider tool messages across retries.
+    source_events = body.pop("events")
+    batches: list[list[dict]] = []
+    batch: list[dict] = []
+    batch_chars = 0
+    for source_event in source_events:
+        size = len(json.dumps(source_event, ensure_ascii=False))
+        if batch and (len(batch) >= 100 or batch_chars + size > 1000000):
+            batches.append(batch)
+            batch, batch_chars = [], 0
+        batch.append(source_event)
+        batch_chars += size
+    if batch: batches.append(batch)
+    admitted = {}
+    for index, delta in enumerate(batches):
+        final = index == len(batches)-1
+        capture = {**body["capture"], "source_response_complete": final, "response": final}
+        chunk = {**body, "capture": capture, "events": delta,
+                 "response_excerpt": assistant if final else None,
+                 "response_at": body["response_at"] if final else None}
+        admitted = operator_memory_post(chunk)
+        if admitted.get("stored") is not True:
+            raise CapabilityError("central_memory_partial_admission", "ordered provider event delta was not stored")
     stored_id = str(admitted.get("conversation_id") or conversation_id)
     readback = operator_memory_post({"operation": "read", "provider": "chatgpt.com", "conversation_id": stored_id})
     conversation = readback.get("conversation") if isinstance(readback.get("conversation"), dict) else {}
@@ -528,6 +717,19 @@ def admit_central_conversation(*, result_id: str, prompt: str, result: dict, att
     expected_response_hash = body["response_sha256"]
     if prompt_hash != expected_prompt_hash or response_hash != expected_response_hash:
         raise CapabilityError("central_memory_readback_mismatch", "central readback hash mismatch")
+    observed_events = [event for event in conversation.get("events") or []
+                       if event.get("role") in {"tool_call", "tool_result"}
+                       and event.get("raw_stream_sha256") == raw_sha]
+    expected_events = tool_history["tool_events"]
+    if len(observed_events) != len(expected_events):
+        raise CapabilityError("central_tool_history_readback_mismatch", "central tool-event count mismatch")
+    for expected, observed in zip(expected_events, observed_events):
+        for key in ("role", "provider_message_id", "provider_parent_id", "tool_name", "provider_status", "provider_content_type", "provider_content_sha256", "raw_stream_sha256", "content"):
+            if observed.get(key) != expected.get(key):
+                raise CapabilityError("central_tool_history_readback_mismatch", "central tool-event ordering or content mismatch")
+    receipt = conversation.get("read_receipt") or {}
+    if raw_sha and receipt.get("raw_sha256") != raw_sha:
+        raise CapabilityError("central_tool_history_readback_mismatch", "central raw stream hash mismatch")
     return {
         "ok": True,
         "stored": admitted.get("stored") is True,
@@ -537,6 +739,9 @@ def admit_central_conversation(*, result_id: str, prompt: str, result: dict, att
         "central_readback_verified": True,
         "central_prompt_sha256": prompt_hash,
         "central_response_sha256": response_hash,
+        "central_raw_stream_sha256": raw_sha or None,
+        "central_tool_event_count": len(observed_events),
+        "central_observed_finished_container_exec_results": tool_history["finished_container_exec_results"],
         "provider_requests_created_by_readback": 0,
         "url_records": admitted.get("url_records", 0),
     }

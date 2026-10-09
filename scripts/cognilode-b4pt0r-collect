@@ -123,6 +123,18 @@ def collect(receipt_path: Path, *, allow_provider_read: bool = True) -> dict:
     if collected_path.is_file():
         existing = json.loads(collected_path.read_text())
         if existing.get("complete") is True:
+            prior_result = existing.get("result") if isinstance(existing.get("result"), dict) else {}
+            prior_central = prior_result.get("central_conversation_store") if isinstance(prior_result.get("central_conversation_store"), dict) else {}
+            if prior_central.get("central_tool_event_count") is None and prior_result.get("raw_sha256") and existing.get("prompt") and prior_result.get("terminal_assistant_text"):
+                source_path = str(prior_result.get("raw_path_host") or receipt.get("raw_path_host") or receipt.get("raw_path") or receipt_path.with_name(stem + ".sse"))
+                if Path(source_path).is_file():
+                    upgraded_result = {**prior_result, "raw_path_host": source_path}
+                    central = sender.admit_central_conversation(result_id=stem, prompt=str(existing["prompt"]),
+                        result=upgraded_result, attachments=list(receipt.get("attached_context_files") or []))
+                    upgraded_result["central_conversation_store"] = central
+                    atomic_json(collected_path, {**existing, "result": upgraded_result})
+                    return {"state": "central_tool_history_upgraded", "receipt": str(receipt_path),
+                            "tool_events": central.get("central_tool_event_count", 0), "central_ok": central.get("ok") is True}
             return {"state": "already_collected", "receipt": str(receipt_path)}
     record_path = receipt_path.with_name(stem + ".json")
     if record_path.is_file():
@@ -190,6 +202,7 @@ def collect(receipt_path: Path, *, allow_provider_read: bool = True) -> dict:
         "completed_at": now,
         "raw_sha256": hashlib.sha256(raw).hexdigest(),
         "raw_bytes": len(raw),
+        "raw_path_host": str(raw_path),
         "provider_summary": {"conversation_id": conversation_id},
         "collection_method": "read_only_exact_branch_hydration",
     }

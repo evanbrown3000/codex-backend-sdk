@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import fcntl
 import json
 from pathlib import Path
 import platform
@@ -15,6 +16,7 @@ SOURCE = Path(os.environ.get("COGNILODE_COMPANY_SOURCE_ROOT", "/runtime/source")
 RELEASE = Path(os.environ.get("COGNILODE_CODEX_INSTALL_ROOT", "/codex"))
 TARGET = f"{platform.system().lower()}-{platform.machine().lower()}"
 LOOKUP = RELEASE / "metadata" / f"lookup-{PIN}-{TARGET}.json"
+LOCK = RELEASE / "metadata" / f"release-{PIN}-{TARGET}.lock"
 
 
 def build_capacity_bytes() -> int:
@@ -36,7 +38,7 @@ def build_capacity_bytes() -> int:
     return min(values) if values else 0
 
 
-def run_once() -> None:
+def run_once_unlocked() -> None:
     if not (SOURCE / ".git").is_dir():
         return
     real_source = SOURCE.resolve()
@@ -74,6 +76,13 @@ def run_once() -> None:
     subprocess.run([str(SOURCE / "cognilode/host-client/build-install-container-codex")],
                    env=env, check=True, timeout=7200)
     print(f"Codex release ready {PIN}", flush=True)
+
+
+def run_once() -> None:
+    LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with LOCK.open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        run_once_unlocked()
 
 
 if __name__ == "__main__":

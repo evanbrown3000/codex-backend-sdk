@@ -7,6 +7,7 @@ company containers install the content-verified release from the same pin.
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import json
 import os
@@ -29,6 +30,7 @@ TARGET = f"{platform.system().lower()}-{platform.machine().lower()}"
 PREFIX = f"codex-releases/{PIN}/{TARGET}"
 RELEASE = ROOT / "releases" / PIN
 LOOKUP = ROOT / "metadata" / f"lookup-{PIN}-{TARGET}.json"
+LOCK = ROOT / "metadata" / f"release-{PIN}-{TARGET}.lock"
 
 
 def aws(*args: str, timeout: int = 120) -> subprocess.CompletedProcess:
@@ -107,8 +109,11 @@ def install_remote(manifest: dict) -> None:
         (stage / "source-commit").write_text(PIN + "\n")
         (stage / "SHA256SUMS").write_text("".join(
             f"{manifest['files'][name]['sha256']}  {name}\n" for name in ("codex", "central-rollouts")))
-        if not RELEASE.exists():
-            stage.rename(RELEASE)
+        if RELEASE.exists():
+            if RELEASE.is_symlink() or not RELEASE.is_dir():
+                raise RuntimeError("local Codex release path is not a directory")
+            shutil.rmtree(RELEASE)
+        stage.rename(RELEASE)
     link_release()
     print(f"Codex release installed from private custody {PIN}", flush=True)
 
@@ -146,7 +151,7 @@ def publish_local() -> None:
     print(f"Codex release published to private custody {PIN}", flush=True)
 
 
-def run_once() -> None:
+def run_once_unlocked() -> None:
     if LOOKUP.is_file():
         try:
             previous = json.loads(LOOKUP.read_text())
@@ -169,6 +174,13 @@ def run_once() -> None:
         marker("downloaded")
     else:
         marker("missing")
+
+
+def run_once() -> None:
+    LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with LOCK.open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        run_once_unlocked()
 
 
 if __name__ == "__main__":

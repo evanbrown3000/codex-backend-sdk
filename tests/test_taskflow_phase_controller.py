@@ -104,6 +104,13 @@ class Tests(unittest.TestCase):
         missing=replace(step,fields={})
         with self.assertRaisesRegex(ValueError,'effect_probe_command'):
             c.verify_effect_probe(missing)
+        bounded=replace(step,fields={**step.fields,'effect_probe_timeout_seconds':'45'})
+        with mock.patch.object(c.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'active','')) as run:
+            self.assertEqual(c.verify_effect_probe(bounded)['timeout_seconds'],'45')
+        self.assertEqual(run.call_args.kwargs['timeout'],45)
+        unbounded=replace(step,fields={**step.fields,'effect_probe_timeout_seconds':'601'})
+        with self.assertRaisesRegex(ValueError,'effect_probe_timeout_seconds'):
+            c.verify_effect_probe(unbounded)
 
     def test_exact_get_job_and_taskflow_plan_proof(self):
         class Sender:

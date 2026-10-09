@@ -471,14 +471,18 @@ def verify_effect_probe(step: Step) -> dict[str, str]:
     """Independently read the effect with a command authored in the .plan file."""
     command = str(step.fields.get("effect_probe_command") or "").strip()
     expected = str(step.fields.get("effect_probe_expected") or "").strip()
+    timeout_seconds = int(step.fields.get("effect_probe_timeout_seconds") or 120)
     argv = shlex.split(command)
     if not argv or not Path(argv[0]).is_absolute() or not expected:
         raise ValueError("TaskFlow step needs an absolute read-only effect_probe_command and effect_probe_expected")
-    result = subprocess.run(argv, text=True, capture_output=True, timeout=20, check=False)
+    if not 5 <= timeout_seconds <= 600:
+        raise ValueError("effect_probe_timeout_seconds must be between 5 and 600")
+    result = subprocess.run(argv, text=True, capture_output=True, timeout=timeout_seconds, check=False)
     observed = result.stdout.strip()
     if result.returncode != 0 or observed != expected:
         raise ValueError(f"independent effect probe failed: exit={result.returncode}, observed={observed[:200]!r}")
-    proof = {"command": command, "expected": expected, "observed": observed, "verified_at": utc()}
+    proof = {"command": command, "expected": expected, "observed": observed,
+             "timeout_seconds": str(timeout_seconds), "verified_at": utc()}
     proof["sha256"] = sha256_bytes(json.dumps(proof, sort_keys=True).encode())
     return proof
 

@@ -136,7 +136,7 @@ th{position:sticky;top:0;background:#172631}code{font-size:13px}td.preview{max-w
         return head + "<h1>Prompt queue</h1><p class=alert>Waiting for the first D1 readback. " + esc(error) + "</p></body></html>"
     clock = snapshot["clock"]
     status = clock.get("gate_status") or {}
-    rows = [head, "<h1>ChatGPT.com Chat-mode prompt queue</h1>",
+    rows = [head, "<h1>Unified prompt queue</h1>",
             "<p class=meta>Single shared D1 queue · refreshes every 15 seconds · updated " + esc(snapshot["refreshed_at"]) + "</p>",
             "<p>Tape slot <strong>" + esc((clock.get("clock") or {}).get("next_slot_index")) +
             "</strong> · next due " + esc(clock.get("next_due_at")) + " · maximum gap " +
@@ -162,6 +162,7 @@ th{position:sticky;top:0;background:#172631}code{font-size:13px}td.preview{max-w
             target = esc(_target(job, snapshot["account"])).replace(" ", "<br>")
             rows.append("<tr><td>" + esc(when) + "<br><span class=small>slot " + esc(index) +
                         "</span></td><td class=state>" + esc("queued" if upcoming else job.get("state")) +
+                        "<br><span class=small>priority " + esc(job.get("priority")) + "</span>" +
                         "</td><td class=preview>" + link + " · " + esc(preview) +
                         "</td><td><code>" + target + "</code></td><td><code>" + esc(job_id) +
                         "</code><br><span class=small>" + esc(job.get("conversation_id")) + "</span></td></tr>")

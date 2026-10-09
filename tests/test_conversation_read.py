@@ -325,6 +325,62 @@ class ConversationDeltaTests(unittest.TestCase):
                 "operation": "list_conversation_updates", "provider": "",
                 "cursor": "prior", "since_at": "", "limit": 100})
 
+    def test_inbox_detail_reads_full_once_then_only_new_events_across_shared_cursor(self):
+        page = {"provider_filter": "chatgpt.com", "updates": [{
+            "provider": "chatgpt.com", "conversation_id": "conversation-1",
+            "updated_at": "2026-10-09T10:00:00Z"}], "has_more": False,
+            "next_cursor": "inbox-next"}
+        state = {}
+        source = dict(self.full)
+        def get_cursor(reader_id, provider, conversation_id):
+            return state.get((provider, conversation_id), ("", 0))
+        def advance(reader_id, provider, conversation_id, generation, cursor):
+            key = (provider, conversation_id)
+            self.assertEqual(state.get(key, ("", 0))[1], generation)
+            state[key] = (cursor, generation + 1)
+            return {"advanced": True}
+        argv = ["conversation-read", "--inbox", "--inbox-detail", "--provider",
+                "chatgpt.com", "--remember", "--reader-id", "Nadia Brooks"]
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(reader, "inbox_updates", return_value=page), \
+             mock.patch.object(reader, "read_conversation", side_effect=lambda *_args, **_kw: source), \
+             mock.patch.object(reader, "shared_remembered_cursor", side_effect=get_cursor), \
+             mock.patch.object(reader, "advance_shared_remembered_cursor", side_effect=advance):
+            first = io.StringIO()
+            with redirect_stdout(first):
+                self.assertEqual(reader.main(), 0)
+            self.assertEqual(json.loads(first.getvalue())["new_events"], 2)
+            source = {**self.full, "events": self.full["events"] + [
+                {"id": "u2", "role": "user", "text": "next", "occurred_at_utc": ""}]}
+            second = io.StringIO()
+            with redirect_stdout(second):
+                self.assertEqual(reader.main(), 0)
+            self.assertEqual([row["text"] for row in json.loads(second.getvalue())["events"]], ["next"])
+
+    def test_inbox_detail_does_not_ack_page_after_partial_read_failure(self):
+        page = {"provider_filter": "chatgpt.com", "updates": [{
+            "provider": "chatgpt.com", "conversation_id": cid,
+            "updated_at": "2026-10-09T10:00:00Z"} for cid in ("conversation-1", "conversation-2")],
+            "has_more": False, "next_cursor": "inbox-next"}
+        advances = []
+        def read(provider, conversation_id, **_kwargs):
+            if conversation_id == "conversation-2":
+                raise RuntimeError("Drive temporarily unavailable")
+            return self.full
+        argv = ["conversation-read", "--inbox", "--inbox-detail", "--remember",
+                "--reader-id", "Nadia Brooks"]
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(reader, "inbox_updates", return_value=page), \
+             mock.patch.object(reader, "read_conversation", side_effect=read), \
+             mock.patch.object(reader, "shared_remembered_cursor", return_value=("", 0)), \
+             mock.patch.object(reader, "advance_shared_remembered_cursor",
+                               side_effect=lambda *args: advances.append(args) or {"advanced": True}), \
+             redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, "temporarily unavailable"):
+                reader.main()
+        self.assertEqual(len(advances), 1)
+        self.assertEqual(advances[0][1:3], ("chatgpt.com", "conversation-1"))
+
     def test_imported_chatgpt_export_read_keeps_unverified_origin_and_drive_fence(self):
         cid = "8452f74b-bf54-400b-9626-ba99c4578fd6"
         capture = {"source_kind": "historical_s3_rendered",

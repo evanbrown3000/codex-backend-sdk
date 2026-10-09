@@ -64,6 +64,16 @@ scripts/cognilode-conversation-read --job-id SHARED_QUEUE_JOB_ID --reader-id "El
 scripts/cognilode-conversation-read --provider openai-codex --conversation-id CONVERSATION_ID --since NEXT_CURSOR --format json
 ```
 
+To discover recent conversations and read their actual new messages in one
+pass, use `--inbox --inbox-detail --remember --reader-id "Elliot Mercer"`.
+The first pass prints each full thread; later passes print only events added
+since that employee last read the thread, even from another device. JSON output
+is one object per changed thread (newline-delimited JSON). The reader commits
+each thread cursor after printing it and advances the inbox cursor only after
+the whole page succeeds, so a failed source read can be retried without losing
+the remaining conversations. `--inbox-limit` bounds work per pass; rerun while
+more pages remain.
+
 `--remember` stores a shared, generation-fenced D1 cursor per employee, provider, and conversation, so a second device sees only events added since the employee's last read. Use `--remember-store local` for a private device-only cursor. A changed message prefix automatically shows the full conversation again and labels the reset; it never silently hides revised history. Explicit `--since` remains available for callers that store their own `next_cursor`. The response labels its source and coverage; admitted events do not imply every provider branch has been acquired. The Drive reader path can be set with `COGNILODE_DRIVE_READBACK_SCRIPT` when Memory Stock is installed elsewhere.
 
 `--job-id` resolves a prompt in the shared D1 queue. While it is queued or in flight, the command returns its state and `conversation_ready: false`. Hosted provider jobs require matching provider and central-readback evidence after completion. TaskFlow `codex.research` and `codex.external-effect` jobs expose the Codex CLI session ID from their verified Secretary evidence, but remain unreadable until an exact `openai-codex` D1 conversation is complete and its active source SHA is bound to a verified Google Drive object. The result then uses `codex-d1` as its reader provider. Pending admission or Drive confirmation does not advance a `--remember` cursor.

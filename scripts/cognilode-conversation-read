@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 import fcntl
 import hashlib
@@ -425,6 +425,54 @@ def render_inbox(result: dict, output_format: str) -> None:
         print("\nMore updates remain; run this command again with --remember or pass --inbox-cursor.")
 
 
+def render_inbox_details(result: dict, args: argparse.Namespace) -> None:
+    """Read changed threads and acknowledge each only after its delta is printed.
+
+    The inbox cursor is advanced by the caller only after every thread succeeds.
+    If a later read fails, already printed threads have their own cursors and a
+    retry can safely revisit the same inbox page without rereading them in full.
+    """
+    for row in result["updates"]:
+        provider = row["provider"]
+        conversation_id = row["conversation_id"]
+        local = args.remember and args.remember_store == "local"
+        path = (remembered_cursor_path(args.cursor_root, args.reader_id,
+                                       provider, conversation_id) if local else None)
+        with remembered_cursor_lock(path) if path else nullcontext():
+            if args.remember and args.remember_store == "shared":
+                previous, generation = shared_remembered_cursor(
+                    args.reader_id, provider, conversation_id)
+            else:
+                generation = None
+                previous = (load_remembered_cursor(path, args.reader_id, provider,
+                                                   conversation_id) if local else "")
+            source = read_conversation(provider, conversation_id,
+                                       drive_reader=args.drive_reader,
+                                       historical_reader=args.historical_reader)
+            try:
+                detail = delta_view(source, previous)
+            except ValueError as exc:
+                if "prefix changed" not in str(exc):
+                    raise
+                detail = delta_view(source)
+                detail["cursor_reset_reason"] = "source_prefix_changed"
+            detail["inbox_updated_at"] = row["updated_at"]
+            render_view(detail, args.format)
+            sys.stdout.flush()
+            if args.remember:
+                if args.remember_store == "shared":
+                    committed = advance_shared_remembered_cursor(
+                        args.reader_id, provider, conversation_id, generation,
+                        detail["next_cursor"])
+                    if committed.get("conflict"):
+                        raise RuntimeError("shared conversation cursor moved concurrently; inbox not acknowledged")
+                else:
+                    save_remembered_cursor(path, args.reader_id, provider,
+                                           conversation_id, detail["next_cursor"])
+    if not result["updates"] and args.format == "markdown":
+        print("No changed conversations in this page.")
+
+
 def render_view(result: dict, output_format: str) -> None:
     if output_format == "json":
         print(json.dumps(result, ensure_ascii=False))
@@ -522,6 +570,8 @@ def main() -> int:
     parser.add_argument("--conversation-id", default="")
     parser.add_argument("--job-id", default="", help="resolve a shared queue job to its admitted conversation")
     parser.add_argument("--inbox", action="store_true", help="list changed conversations across providers")
+    parser.add_argument("--inbox-detail", action="store_true",
+                        help="read each changed conversation, full once then deltas with --remember")
     parser.add_argument("--inbox-cursor", default="", help="opaque cursor from a previous inbox page")
     parser.add_argument("--inbox-since", default="", help="ISO timestamp for first inbox page; default is the last 48 hours")
     parser.add_argument("--inbox-limit", type=int, default=100)
@@ -540,6 +590,8 @@ def main() -> int:
         parser.error("--remember and --since cannot be combined")
     if args.remember and args.remember_store == "shared" and args.reader_id == "default":
         parser.error("shared --remember requires --reader-id or COGNILODE_READER_ID for the named employee")
+    if args.inbox_detail and not args.inbox:
+        parser.error("--inbox-detail requires --inbox")
     if args.inbox:
         if args.job_id or args.conversation_id or args.since or (args.remember and args.inbox_cursor):
             parser.error("--inbox cannot combine with a conversation, job, --since, or remembered explicit cursor")
@@ -558,13 +610,13 @@ def main() -> int:
                     cursor = load_remembered_cursor(path,args.reader_id,"cognilode-inbox",identity)
                     since_at = args.inbox_since or (datetime.now(UTC)-timedelta(hours=48)).isoformat()
                     result = inbox_updates(args.provider,cursor=cursor,since_at=since_at,limit=args.inbox_limit)
-                    render_inbox(result,args.format)
+                    (render_inbox_details if args.inbox_detail else render_inbox)(result,args if args.inbox_detail else args.format)
                     sys.stdout.flush()
                     save_remembered_cursor(path,args.reader_id,"cognilode-inbox",identity,result["next_cursor"])
                 return 0
         since_at = args.inbox_since or (datetime.now(UTC)-timedelta(hours=48)).isoformat()
         result = inbox_updates(args.provider,cursor=cursor,since_at=since_at,limit=args.inbox_limit)
-        render_inbox(result,args.format)
+        (render_inbox_details if args.inbox_detail else render_inbox)(result,args if args.inbox_detail else args.format)
         sys.stdout.flush()
         if args.remember:
             if args.remember_store == "shared":

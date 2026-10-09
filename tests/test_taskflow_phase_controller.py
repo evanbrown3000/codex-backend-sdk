@@ -109,9 +109,28 @@ class Tests(unittest.TestCase):
         with mock.patch.object(c.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'active','')) as run:
             self.assertEqual(c.verify_effect_probe(bounded)['timeout_seconds'],'45')
         self.assertEqual(run.call_args.kwargs['timeout'],45)
-        unbounded=replace(step,fields={**step.fields,'effect_probe_timeout_seconds':'601'})
+        unbounded=replace(step,fields={**step.fields,'effect_probe_timeout_seconds':'1801'})
         with self.assertRaisesRegex(ValueError,'effect_probe_timeout_seconds'):
             c.verify_effect_probe(unbounded)
+
+    def test_structured_effect_probe_requires_sha_bound_real_evidence(self):
+        from dataclasses import replace
+        step=replace(c.parse_plan(PLAN).by_id()['AM-5'],fields={'effect_probe_command':'/usr/bin/printf ignored'})
+        valid={'schema':'cognilode.effect_probe.v1','verified':True,
+               'distinct_sources':1,'window_minutes':30,
+               'evidence':[{'kind':'drive_readback','ref':'drive:source-1','sha256':'a'*64}]}
+        with mock.patch.object(c.subprocess,'run',return_value=subprocess.CompletedProcess([],0,json.dumps(valid),'')) as run:
+            proof=c.verify_effect_probe(step)
+        self.assertEqual(proof['expected'],'cognilode.effect_probe.v1 verified')
+        self.assertEqual(proof['timeout_seconds'],'900')
+        self.assertEqual(run.call_args.kwargs['timeout'],900)
+        for invalid in ({'schema':valid['schema'],'verified':True,'evidence':[]},
+                        {**valid,'evidence':[{'kind':'drive_readback','ref':'drive:source-1','sha256':'bad'}]},
+                        {**valid,'distinct_sources':25},
+                        {**valid,'verified':False}):
+            with mock.patch.object(c.subprocess,'run',return_value=subprocess.CompletedProcess([],0,json.dumps(invalid),'')):
+                with self.assertRaisesRegex(ValueError,'evidence|verified'):
+                    c.verify_effect_probe(step)
 
     def test_exact_get_job_and_taskflow_plan_proof(self):
         class Sender:

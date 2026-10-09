@@ -467,20 +467,44 @@ def verify_effect_receipt(path: Path, *, plan: Plan, step: Step, work_sha256: st
     return body
 
 
-def verify_effect_probe(step: Step) -> dict[str, str]:
+def verify_effect_probe(step: Step) -> dict[str, Any]:
     """Independently read the effect with a command authored in the .plan file."""
     command = str(step.fields.get("effect_probe_command") or "").strip()
     expected = str(step.fields.get("effect_probe_expected") or "").strip()
-    timeout_seconds = int(step.fields.get("effect_probe_timeout_seconds") or 300)
+    timeout_seconds = int(step.fields.get("effect_probe_timeout_seconds") or (300 if expected else 900))
     argv = shlex.split(command)
-    if not argv or not Path(argv[0]).is_absolute() or not expected:
-        raise ValueError("TaskFlow step needs an absolute read-only effect_probe_command and effect_probe_expected")
-    if not 5 <= timeout_seconds <= 600:
-        raise ValueError("effect_probe_timeout_seconds must be between 5 and 600")
+    if not argv or not Path(argv[0]).is_absolute():
+        raise ValueError("TaskFlow step needs an absolute read-only effect_probe_command")
+    if not 5 <= timeout_seconds <= 1800:
+        raise ValueError("effect_probe_timeout_seconds must be between 5 and 1800")
     result = subprocess.run(argv, text=True, capture_output=True, timeout=timeout_seconds, check=False)
     observed = result.stdout.strip()
-    if result.returncode != 0 or observed != expected:
+    if result.returncode != 0:
         raise ValueError(f"independent effect probe failed: exit={result.returncode}, observed={observed[:200]!r}")
+    if expected:
+        if observed != expected:
+            raise ValueError(f"independent effect probe failed: exit={result.returncode}, observed={observed[:200]!r}")
+    else:
+        try:
+            structured = json.loads(observed)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise ValueError("independent effect probe needs structured JSON evidence") from exc
+        if not isinstance(structured, dict) or structured.get("schema") != "cognilode.effect_probe.v1" or structured.get("verified") is not True:
+            raise ValueError("independent effect probe structured evidence is not verified")
+        evidence = structured.get("evidence")
+        if not isinstance(evidence, list) or not evidence or any(
+            not isinstance(row, dict) or not str(row.get("kind") or "").strip()
+            or not str(row.get("ref") or "").strip()
+            or not HEX64.fullmatch(str(row.get("sha256") or "")) for row in evidence
+        ):
+            raise ValueError("independent effect probe needs SHA-bound evidence")
+        declared_sources = structured.get("distinct_sources")
+        if declared_sources is not None and (
+            not isinstance(declared_sources, int) or declared_sources < 1
+            or len({str(row["ref"]) for row in evidence}) < declared_sources
+        ):
+            raise ValueError("independent effect probe distinct source count is unsupported by its evidence")
+        expected = "cognilode.effect_probe.v1 verified"
     proof = {"command": command, "expected": expected, "observed": observed,
              "timeout_seconds": str(timeout_seconds), "verified_at": utc()}
     proof["sha256"] = sha256_bytes(json.dumps(proof, sort_keys=True).encode())

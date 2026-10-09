@@ -30,7 +30,6 @@ BASE = "https://chatgpt.com/backend-api/"
 SESSION = "https://chatgpt.com/api/auth/session"
 DEFAULT_PROFILE = Path.home() / ".config/google-chrome/Default"
 DEFAULT_OUTPUT_ROOT = Path.home() / ".local/share/cognilode/b4pt0r-chatmode"
-DEFAULT_RUNTIME = DEFAULT_OUTPUT_ROOT / "venv"
 DEFAULT_IMPERSONATE = "chrome136"
 SENTINEL_VM = Path(__file__).resolve().with_name("chatgpt_sentinel_vm.mjs")
 TASKFLOW_DIR = Path.home() / ".local/share/cognilode/taskflow-leaf-executor/b4pt0r-chatmode"
@@ -208,18 +207,47 @@ def ensure_runtime() -> None:
     except Exception:
         pass
 
-    python = DEFAULT_RUNTIME / "bin/python"
-    if not python.exists():
-        DEFAULT_RUNTIME.parent.mkdir(parents=True, exist_ok=True)
-        proc = _run([sys.executable, "-m", "venv", str(DEFAULT_RUNTIME)], timeout=300)
-        if proc.returncode:
-            raise CapabilityError("runtime_install_failure", (proc.stderr or proc.stdout).strip()[-800:])
-        proc = _run(
-            [str(python), "-m", "pip", "install", "curl_cffi", "secretstorage", "cryptography"],
-            timeout=600,
-        )
-        if proc.returncode:
-            raise CapabilityError("runtime_install_failure", (proc.stderr or proc.stdout).strip()[-800:])
+    # The company image can contain both /usr/bin/python3 and a separately
+    # installed /usr/local/bin/python3. A venv from an older image may still
+    # have an executable while its stdlib has disappeared. Select the image's
+    # packaged Python, version the runtime, and probe imports before reuse.
+    base = Path(os.environ.get("B4PT0R_CHATMODE_BASE_PYTHON") or
+                ("/usr/local/bin/python3" if Path("/usr/local/bin/python3").is_file()
+                 else sys.executable)).resolve(strict=True)
+    version = _run([str(base), "-c", "import sys;print('%d.%d' % sys.version_info[:2])"], timeout=20)
+    if version.returncode or not re.fullmatch(r"\d+\.\d+", version.stdout.strip()):
+        raise CapabilityError("runtime_install_failure", "image Python version unavailable")
+    runtime = DEFAULT_OUTPUT_ROOT / ("venv-python" + version.stdout.strip())
+    python = runtime / "bin/python"
+
+    def healthy(path: Path) -> bool:
+        if not path.is_file():
+            return False
+        probe = _run([str(path), "-c",
+                      "import encodings,curl_cffi,secretstorage,cryptography"], timeout=30)
+        return probe.returncode == 0
+
+    DEFAULT_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    with (DEFAULT_OUTPUT_ROOT / ".runtime-install.lock").open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if not healthy(python):
+            candidate = DEFAULT_OUTPUT_ROOT / (runtime.name + ".build-" + uuid.uuid4().hex[:12])
+            try:
+                proc = _run([str(base), "-m", "venv", str(candidate)], timeout=300)
+                if proc.returncode:
+                    raise CapabilityError("runtime_install_failure", (proc.stderr or proc.stdout).strip()[-800:])
+                proc = _run([str(candidate / "bin/python"), "-m", "pip", "install",
+                             "curl_cffi", "secretstorage", "cryptography"], timeout=600)
+                if proc.returncode:
+                    raise CapabilityError("runtime_install_failure", (proc.stderr or proc.stdout).strip()[-800:])
+                if not healthy(candidate / "bin/python"):
+                    raise CapabilityError("runtime_install_failure", "built runtime failed import probe")
+                if runtime.exists():
+                    runtime.rename(DEFAULT_OUTPUT_ROOT / (runtime.name + ".retired-" + uuid.uuid4().hex[:12]))
+                candidate.rename(runtime)
+            finally:
+                if candidate.exists():
+                    shutil.rmtree(candidate)
     env = dict(os.environ)
     env["B4PT0R_CHATMODE_RUNTIME"] = "1"
     os.execve(str(python), [str(python), *sys.argv], env)

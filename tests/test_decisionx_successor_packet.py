@@ -1,4 +1,5 @@
 import hashlib
+from datetime import datetime, timedelta, timezone
 import importlib.machinery
 import importlib.util
 import json
@@ -21,6 +22,14 @@ def load(name, filename):
 
 upstream = load("decisionx_successor_packet_test", "cognilode-decisionx-successor")
 native = load("decisionx_successor_native_test", "decisionx_successor_native.py")
+handoff = load("decisionx_successor_handoff_retry_test", "cognilode-decisionx-advice-handoff")
+
+
+class MissingSegmentHTTP(RuntimeError):
+    code = "central_memory_http_failed"
+
+    def __init__(self):
+        super().__init__('Agent Memory HTTP 404: {"ok":false,"error":"segment_not_found"}')
 
 
 def digest(raw):
@@ -145,3 +154,149 @@ def test_enqueue_requires_exact_shared_queue_readback(monkeypatch):
     with pytest.raises(ValueError, match="D1 readback mismatch"):
         upstream.enqueue(post, built)
     assert [row["operation"] for row in calls] == ["enqueue_decisionx_prompt", "get_job"]
+
+
+def test_failed_successor_is_deferred_then_reenqueued_with_new_fence(tmp_path, monkeypatch):
+    root_state = tmp_path / "root.json"
+    root_state.write_text(json.dumps({"phase": "complete", "root_job_id": "root-job"}))
+    output = tmp_path / "successor"
+    output.mkdir()
+    state_path = output / "state.json"
+    state_path.write_text(json.dumps({"schema": "cognilode.decisionx.successor_state.v1",
+                                      "target_job_id": "root-job",
+                                      "job_id": "decisionx-successor-old", "attempt": 0}))
+    def post(body):
+        if body["operation"] == "get_job":
+            return {"ok": True, "job": {"id": "decisionx-successor-old", "state": "failed",
+                                         "last_error": "provider artifact unusable"}}
+        if body["operation"] == "decisionx_candidates":
+            return {"ok": True, "ready": True, "distinct_sources": 500}
+        raise AssertionError(body)
+    deferred = upstream.tick(post, output_root=output, root_state_path=root_state)
+    assert deferred["phase"] == "retry_deferred"
+    saved = json.loads(state_path.read_text())
+    assert saved["failure_observed_job_id"] == "decisionx-successor-old"
+    saved["retry_after"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    state_path.write_text(json.dumps(saved))
+    class Bridge:
+        @staticmethod
+        def shared_stock_census(_post, minimum):
+            return {"multi_year_ready": True, "distinct_complete": 500,
+                    "span_days": 800}
+    monkeypatch.setattr(upstream, "load", lambda *_args: Bridge())
+    monkeypatch.setattr(upstream, "packet", lambda *_args, **_kwargs: {
+        "manifest": {"source_refs_sha256": "a" * 64}, "identity": "new"})
+    seen = []
+    def enqueue(_post, _built, **kwargs):
+        seen.append(kwargs)
+        return {"ok": True, "job_id": "decisionx-successor-new-retry-1", "state": "queued"}
+    monkeypatch.setattr(upstream, "enqueue", enqueue)
+    queued = upstream.tick(post, output_root=output, root_state_path=root_state)
+    assert queued["phase"] == "queued"
+    assert seen[0]["attempt"] == 1
+    assert seen[0]["predecessor_job_id"] == "decisionx-successor-old"
+    assert json.loads(state_path.read_text())["job_id"] == "decisionx-successor-new-retry-1"
+
+
+def test_normal_absent_rejection_http_404_does_not_block_completed_job(tmp_path):
+    root_state = tmp_path / "root.json"
+    root_state.write_text(json.dumps({"phase": "complete", "root_job_id": "root-job"}))
+    output = tmp_path / "successor"
+    output.mkdir()
+    (output / "state.json").write_text(json.dumps({"target_job_id": "root-job",
+                                                    "job_id": "decisionx-successor-good"}))
+    def post(body):
+        if body["operation"] == "get_job":
+            return {"ok": True, "job": {"id": "decisionx-successor-good", "state": "complete"}}
+        if body["operation"] == "read_segment":
+            raise MissingSegmentHTTP()
+        raise AssertionError(body)
+    result = upstream.tick(post, output_root=output, root_state_path=root_state)
+    assert result["phase"] == "already_queued"
+    assert result["job_state"] == "complete"
+
+
+def test_optional_segment_reader_does_not_mask_auth_http_404():
+    class AuthHTTP(RuntimeError):
+        code = "central_memory_http_failed"
+    def post(_body):
+        raise AuthHTTP('Agent Memory HTTP 404: {"error":"wrong_route"}')
+    with pytest.raises(AuthHTTP):
+        handoff.read_optional_segment(post, "decisionx.handoff_rejected.abc")
+
+
+def test_complete_but_invalid_provider_zip_records_shared_rejection_then_retries(tmp_path, monkeypatch):
+    root_state = tmp_path / "root.json"
+    root_state.write_text(json.dumps({"phase": "complete", "root_job_id": "root-job"}))
+    output = tmp_path / "successor"
+    output.mkdir()
+    (output / "state.json").write_text(json.dumps({"target_job_id": "root-job",
+                                                    "job_id": "decisionx-successor-bad", "attempt": 0}))
+    stored = {}
+    job = {"id": "decisionx-successor-bad", "state": "complete",
+           "conversation_id": "chat-bad", "effect_evidence": []}
+    def post(body):
+        if body["operation"] == "get_job":
+            return {"ok": True, "job": job}
+        if body["operation"] == "append_segments":
+            for row in body["segments"]:
+                stored[row["segment_id"]] = row
+            return {"ok": True}
+        if body["operation"] == "read_segment":
+            row = stored.get(body["segment_id"])
+            if row is None:
+                raise MissingSegmentHTTP()
+            return {"ok": bool(row), "segment": row}
+        raise AssertionError(body)
+    def invalid(*_args, **_kwargs):
+        raise handoff.InvalidProviderDeliverable("successor plan contains a tautological probe")
+    monkeypatch.setattr(handoff, "handoff", invalid)
+    rejected = handoff.tick(post, job_id=job["id"], output_root=tmp_path,
+                            state_root=tmp_path / "handoff-state")
+    assert rejected["phase"] == "provider_result_rejected"
+    assert rejected["rejection_segment_id"] in stored
+    repeated = handoff.tick(post, job_id=job["id"], output_root=tmp_path,
+                            state_root=tmp_path / "handoff-state")
+    assert repeated["phase"] == "provider_result_rejected"
+    assert repeated["rejection_segment_id"] == rejected["rejection_segment_id"]
+    deferred = upstream.tick(post, output_root=output, root_state_path=root_state)
+    assert deferred["phase"] == "retry_deferred"
+    assert deferred["job_state"] == "provider_result_rejected"
+
+
+def test_three_spaced_completed_job_validation_failures_write_d1_retry_receipt(tmp_path, monkeypatch):
+    job = {"id": "decisionx-successor-uncertain", "state": "complete",
+           "conversation_id": "chat-uncertain", "effect_evidence": []}
+    stored = {}
+    def post(body):
+        if body["operation"] == "get_job":
+            return {"ok": True, "job": job}
+        if body["operation"] == "read_segment":
+            row = stored.get(body["segment_id"])
+            if row is None:
+                raise MissingSegmentHTTP()
+            return {"ok": bool(row), "segment": row, "error": None if row else "segment_not_found"}
+        if body["operation"] == "append_segments":
+            for row in body["segments"]:
+                stored[row["segment_id"]] = row
+            return {"ok": True}
+        raise AssertionError(body)
+    def inconclusive(*_args, **_kwargs):
+        raise ValueError("uploaded historical source no longer matches complete Drive readback")
+    monkeypatch.setattr(handoff, "handoff", inconclusive)
+    state_root = tmp_path / "handoff-state"
+    for count in (1, 2):
+        result = handoff.tick(post, job_id=job["id"], output_root=tmp_path,
+                              state_root=state_root)
+        assert result["phase"] == "validation_retry"
+        assert result["observations"] == count
+        retry_path = next(state_root.glob("*.validation.json"))
+        value = json.loads(retry_path.read_text())
+        value["last_counted_at"] = "2024-01-01T00:00:00+00:00"
+        retry_path.write_text(json.dumps(value))
+    rejected = handoff.tick(post, job_id=job["id"], output_root=tmp_path,
+                            state_root=state_root)
+    assert rejected["phase"] == "provider_result_rejected"
+    assert rejected["observations"] == 3
+    assert stored[rejected["rejection_segment_id"]]["metadata"]["reason"].startswith(
+        "handoff_validation_unrecoverable:")

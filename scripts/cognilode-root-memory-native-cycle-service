@@ -14,6 +14,7 @@ import time
 HERE = Path(__file__).resolve().parent
 CYCLE = HERE / "cognilode-root-memory-native-cycle"
 SUCCESSOR = HERE / "cognilode-decisionx-successor"
+ADVICE_HANDOFF = HERE / "cognilode-decisionx-advice-handoff"
 STATE_ROOT = Path(os.environ.get("COGNILODE_ROOT_MEMORY_STATE_ROOT",
     str(Path.home() / ".local/share/cognilode/root-memory-native-cycle"))).expanduser()
 INTERVAL = max(300, min(86400, int(os.environ.get("COGNILODE_ROOT_MEMORY_INTERVAL_SECONDS", "3600"))))
@@ -66,8 +67,31 @@ def main():
                 _event({"state": "decisionx_successor_tick", "returncode": successor.returncode,
                         "stdout_tail": successor.stdout[-4000:],
                         "stderr_tail": successor.stderr[-2000:]})
+                # Reuse this recurrence for the return path. A completed
+                # successor is verified and installed through the incumbent
+                # Secretary/TaskFlow controller; no second prompt queue exists.
+                if successor.returncode == 0:
+                    lines = [line for line in successor.stdout.splitlines() if line.strip()]
+                    value = json.loads(lines[-1]) if lines else {}
+                    job_id = str(value.get("job_id") or "")
+                    if job_id:
+                        try:
+                            handoff = subprocess.run(
+                                [sys.executable, str(ADVICE_HANDOFF), "--tick",
+                                 "--decisionx-job-id", job_id,
+                                 "--output-root", str(HERE.parent / "plans")],
+                                text=True, capture_output=True, timeout=1800, check=False)
+                            _event({"state": "decisionx_advice_handoff", "job_id": job_id,
+                                    "returncode": handoff.returncode,
+                                    "stdout_tail": handoff.stdout[-4000:],
+                                    "stderr_tail": handoff.stderr[-2000:]})
+                        except subprocess.TimeoutExpired:
+                            _event({"state": "decisionx_advice_handoff_timeout", "job_id": job_id})
             except subprocess.TimeoutExpired:
                 _event({"state": "decisionx_successor_tick_timeout"})
+            except (ValueError, KeyError, TypeError) as exc:
+                _event({"state": "decisionx_advice_handoff_invalid_result",
+                        "error": str(exc)[:240]})
             while not STOP and time.monotonic() - started < INTERVAL:
                 time.sleep(min(1.0, INTERVAL - (time.monotonic() - started)))
         _event({"state": "stopped"})

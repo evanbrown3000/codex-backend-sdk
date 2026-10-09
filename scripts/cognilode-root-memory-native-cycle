@@ -325,7 +325,7 @@ def verify_native_memory_output(post: Callable[[dict[str, Any]], Mapping[str, An
     if (job.get("id") != job_id or job.get("provider") != "chatgpt.com"
         or job.get("state") != "complete" or job.get("phase") != "chatgpt_sandbox"
         or job.get("taskflow_step") != "MEMORY-BUILD" or not cid
-        or len(_effect_rows(job, "provider_observed_functions_exec")) < 1
+        or len(_effect_rows(job, "provider_observed_native_exec")) < 1
         or len(_effect_rows(job, "provider_conversation")) != 1
         or len(_effect_rows(job, "central_conversation_readback")) != 1
         or _effect_rows(job, "provider_conversation")[0].get("ref") != cid

@@ -31,6 +31,12 @@ def publish_once() -> None:
     env["COGNILODE_DEPLOY_SOURCE_SHA"] = sha
     env["COGNILODE_WORKER_DEPLOY_STATE"] = str(SOURCE.parent / "rhythm-worker-deploy.json")
     env["PATH"] = "/usr/bin:/usr/local/bin:/bin"
+    pages_file = Path(env.get("COGNILODE_CLOUDFLARE_TOKEN_FILE", "/deploy/pages-token.json"))
+    pages = json.loads(pages_file.read_text())
+    if pages.get("scope") != "Pages Write" or not pages.get("token"):
+        raise RuntimeError("Pages deployment custody is incomplete")
+    env["CLOUDFLARE_API_TOKEN"] = pages["token"]
+    env["CLOUDFLARE_ACCOUNT_ID"] = pages["account_id"]
     if not state.get("pages_sha"):
         try:
             with urlopen(Request("https://cognilode.com/.well-known/cognilode-release.json",
@@ -42,7 +48,7 @@ def publish_once() -> None:
         except (OSError, ValueError):
             pass
     if state.get("pages_sha") != sha:
-        subprocess.run(["python3", str(release / "scripts/deploy-current-main-from-custody.py")],
+        subprocess.run(["bash", str(release / "scripts/deploy-current-main-direct.sh")],
                        cwd=release, env=env, check=True, timeout=600)
         state["pages_sha"] = sha
         STATE.write_text(json.dumps(state))

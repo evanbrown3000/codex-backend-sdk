@@ -38,6 +38,12 @@ services:
       - cognilode/chatmode/codex-auth=/home/worker/.codex/auth.json
       - --credential
       - cognilode/http-gate-operator-token=/home/worker/.config/cognilode/operator-bearer
+      - --credential
+      - cognilode/population/authority/cloudflare-pages-deploy-token=/deploy/pages-token.json
+      - --credential
+      - /cognilode/agent-credentials/cloudflare/full-admin=/deploy/worker-token.json
+      - --credential
+      - cognilode/http-gate-operator-token=/deploy/operator-bearer
       - --writer-secret
       - cognilode/chatmode/codex-auth
     environment:
@@ -47,6 +53,7 @@ services:
       - ${COMPANY_REPOS_ROOT}:/company:ro
       - company_auth:/home/worker/.codex
       - company_operator:/home/worker/.config/cognilode
+      - company_deploy_custody:/deploy
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
 
   provider-transport:
@@ -129,22 +136,26 @@ services:
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
 
   site-publisher:
-    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    image: node:22-bookworm
     restart: unless-stopped
     network_mode: bridge
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
     working_dir: /company/codex-backend-sdk
     entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-company-site-publisher]
     environment:
-      HOME: /home/worker
+      HOME: /tmp
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+      COGNILODE_CLOUDFLARE_TOKEN_FILE: /deploy/pages-token.json
+      COGNILODE_CLOUDFLARE_WORKER_TOKEN_FILE: /deploy/worker-token.json
+      COGNILODE_OPERATOR_TOKEN_FILE: /deploy/operator-bearer
       PATH: /usr/bin:/usr/local/bin:/bin
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
-      - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+      - company_deploy_custody:/deploy:ro
     depends_on:
       - source-sync
+      - credential-sync
 
   taskflow-worker:
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
@@ -175,3 +186,4 @@ volumes:
   company_auth:
   company_browser:
   company_operator:
+  company_deploy_custody:

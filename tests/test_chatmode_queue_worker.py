@@ -307,8 +307,13 @@ def test_decisionx_native_batch_verifies_source_and_binds_returned_compute(tmp_p
     source = {'provider': 'openai-codex', 'conversation_id': 'conversation-1',
               'prompt_sha256': '1' * 64, 'response_sha256': '2' * 64,
               'events': [{'id': 'u1', 'role': 'user', 'content': 'Research the actual requirements in the source history.'},
-                         {'id': 'a1', 'role': 'assistant', 'content': 'I found the source commits and compared their behavior.'}]}
+                         {'id': 'a1', 'role': 'assistant', 'content': 'I found the source commits and compared their behavior.'},
+                         {'id': 'u2', 'role': 'user', 'content': 'That misses the recursive behavior; implement the core loop.'},
+                         {'id': 'a2', 'role': 'assistant', 'content': 'I implemented the recursive loop from historical source.'},
+                         {'id': 'u3', 'role': 'user', 'content': 'The deployed loop now produces real effects.'}]}
     episode = module._dx_extract(source)[0]
+    assert [row['id'] for row in episode['following_action_turns']] == ['a2']
+    assert episode['following_user_turn']['id'] == 'u3'
     input_zip = module._dx_input_zip([episode], 'a' * 32)
     with zipfile.ZipFile(input_zip) as archive:
         assert archive.read('RUN_ME.py')
@@ -333,6 +338,7 @@ def test_decisionx_native_batch_verifies_source_and_binds_returned_compute(tmp_p
     assert computed['episode_count'] == 1
     render = tmp_path / 'native' / computed['rendered_sources'][0]['path']
     assert 'Research the actual requirements' in render.read_text()
+    assert 'I implemented the recursive loop' in render.read_text()
     output = tmp_path / 'labels.zip'
     label = {'episode_id': episode['episode_id'], 'source_sha256': episode['source_sha256'],
              'i': 'Research the actual requirements across the historical source commits.',
@@ -400,6 +406,34 @@ def test_decisionx_batch_resolves_exact_source_and_drops_changed_episode():
         complete_source=lambda _index, _read: False)
     assert selected == []
     assert stale == [module._dx_ref(episode)]
+
+
+def test_decisionx_double_triplet_is_source_anchored():
+    module = worker()
+    source = {'provider': 'openai-codex', 'conversation_id': 'episode-2',
+              'events': [
+                  {'id': 'u1', 'role': 'user', 'content': 'Research the original implementation.'},
+                  {'id': 'a1', 'role': 'assistant', 'content': 'I inspected the historical source.'},
+                  {'id': 'u2', 'role': 'user', 'content': 'That misses the core loop; implement it.'},
+                  {'id': 'a2', 'role': 'assistant', 'content': 'I implemented the recursive loop.'},
+                  {'id': 'u3', 'role': 'user', 'content': 'The deployed loop now produces real effects.'},
+              ]}
+    first = module._dx_extract(source)[0]
+    assert [row['id'] for row in first['following_action_turns']] == ['a2']
+    assert first['following_user_turn']['id'] == 'u3'
+    adjacent = {'instruction_turn_id': 'u2', 'action_turn_ids': ['a2'],
+                'evaluation_turn_id': 'u3',
+                'i': 'Implement the core recursive loop.',
+                'a': 'Assistant implemented the requested recursive loop.',
+                'e': 'The user observed the deployed loop producing real effects.',
+                'relationship': 'The evaluation of the first action was also the next instruction.'}
+    assert module._dx_adjacent_triplet_valid({'double_triplet': adjacent}, first)
+    assert not module._dx_adjacent_triplet_valid(
+        {'double_triplet': {**adjacent, 'action_turn_ids': ['forged']}}, first)
+    assert not module._dx_adjacent_triplet_valid(
+        {'double_triplet': {**adjacent, 'evaluation_turn_id': 'forged'}}, first)
+    assert not module._dx_adjacent_triplet_valid({'double_triplet': {}}, first)
+    assert module._dx_adjacent_triplet_valid({'double_triplet': None}, first)
 
 
 def test_decisionx_transport_input_retired_only_after_central_admission(tmp_path):

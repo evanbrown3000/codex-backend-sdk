@@ -375,7 +375,13 @@ unknown. Human identity cannot be inferred from a user role alone. Separate
 directly authored human guidance from agent-authored commentary or quotations.
 Do not treat repetition, forceful language, or a 'canonical' label as authority.
 Include possible adjacent/double triplets where the evaluation becomes the
-instruction for another action. Preserve original episode_id and source_sha256.
+instruction for another action. A non-null double_triplet must have exactly:
+instruction_turn_id, action_turn_ids, evaluation_turn_id, i, a, e, and
+relationship. The turn IDs must match next_user_turn,
+following_action_turns, and following_user_turn in the input episode. Set e
+and evaluation_turn_id to null when a defensible later evaluation is absent. Use null
+for the whole double_triplet when the next user turn does not actually instruct
+the following assistant action. Preserve original episode_id and source_sha256.
 Produce grounded, concise lexical descriptors AND natural-language embedding_text,
 changed_conditions, outcome_signals, and uncertainties. Do not invent observed
 success or source text; the evidence field may be null.
@@ -534,9 +540,18 @@ def _dx_extract(row):
         replies = [v for v in later[:next_user] if v["role"]=="assistant"]
         if not replies: continue
         evaluation = later[next_user] if next_user < len(later) else None
+        after_evaluation = later[next_user+1:] if evaluation else []
+        following_user_index = next((j for j,v in enumerate(after_evaluation)
+                                     if v["role"]=="user"),len(after_evaluation))
+        following_actions = [v for v in after_evaluation[:following_user_index]
+                             if v["role"]=="assistant"]
+        following_evaluation = (after_evaluation[following_user_index]
+                                if following_user_index < len(after_evaluation) else None)
         context = ordinary[max(0, idx-2):idx]
         source = {"provider":row.get("provider"),"conversation_id":row.get("conversation_id"),
                   "intent_turn":u,"action_turns":replies,"next_user_turn":evaluation,
+                  "following_action_turns":following_actions,
+                  "following_user_turn":following_evaluation if following_actions else None,
                   "preceding_context":context}
         raw = json.dumps(source,sort_keys=True,ensure_ascii=False,separators=(",",":"))
         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -817,6 +832,29 @@ def _dx_full_source_refs(packets):
     return refs
 
 
+def _dx_adjacent_triplet_valid(label, source):
+    if "double_triplet" not in label:
+        return False
+    adjacent = label["double_triplet"]
+    if adjacent is None:
+        return True
+    next_user = source.get("next_user_turn") or {}
+    following = source.get("following_action_turns") or []
+    final_user = source.get("following_user_turn") or {}
+    if not isinstance(adjacent, dict) or not next_user or not following:
+        return False
+    has_evaluation = adjacent.get("e") is not None
+    return (adjacent.get("instruction_turn_id") == next_user.get("id")
+            and adjacent.get("action_turn_ids") == [turn.get("id") for turn in following]
+            and adjacent.get("evaluation_turn_id") ==
+                (final_user.get("id") if has_evaluation else None)
+            and all(isinstance(adjacent.get(key), str) and len(adjacent[key].strip()) >= 20
+                    for key in ("i", "a", "relationship"))
+            and (adjacent.get("e") is None
+                 or isinstance(adjacent.get("e"), str) and len(adjacent["e"].strip()) >= 20)
+            and (not has_evaluation or bool(final_user)))
+
+
 def decisionx_admit_labels(job, files, conversation_id, *, preflight_error=None):
     """Admit actual returned semantic records into existing Agent Memory segments."""
     if job.get("phase") != "iae_label_batch": return None
@@ -875,14 +913,19 @@ def decisionx_admit_labels(job, files, conversation_id, *, preflight_error=None)
                 or not isinstance(row.get("human_authorship_assessment"),str)
                 or not isinstance(row.get("uncertainty"),str)):
             continue
+        src = sources[eid]
+        following = src.get("following_action_turns") or []
+        if not _dx_adjacent_triplet_valid(row, src):
+            continue
         segment_id = "decisionx.iae." + hashlib.sha256((eid+expected[eid]).encode()).hexdigest()
         content = json.dumps(row,sort_keys=True,ensure_ascii=False)
         if len(content)>180000: continue
-        src = sources[eid]
         row["source_locator"] = {"provider":src.get("provider"),"conversation_id":src.get("conversation_id"),
                                   "intent_turn_id":src["intent_turn"].get("id"),
                                   "action_turn_ids":[r.get("id") for r in src.get("action_turns") or []],
-                                  "evaluation_turn_id":(src.get("next_user_turn") or {}).get("id")}
+                                  "evaluation_turn_id":(src.get("next_user_turn") or {}).get("id"),
+                                  "following_action_turn_ids":[r.get("id") for r in following],
+                                  "following_evaluation_turn_id":(src.get("following_user_turn") or {}).get("id")}
         content = json.dumps(row,sort_keys=True,ensure_ascii=False)
         seen.add(eid)
         selected.append({"segment_id":segment_id,"kind":"IAE",
@@ -899,6 +942,8 @@ def decisionx_admit_labels(job, files, conversation_id, *, preflight_error=None)
                                      "intent_turn_id":src["intent_turn"].get("id"),
                                      "action_turn_ids":[r.get("id") for r in src.get("action_turns") or []],
                                      "evaluation_turn_id":(src.get("next_user_turn") or {}).get("id"),
+                                     "following_action_turn_ids":[r.get("id") for r in following],
+                                     "following_evaluation_turn_id":(src.get("following_user_turn") or {}).get("id"),
                                      "source_authorship":src["intent_turn"].get("authorship","unverified")}})
     # Existing append-only D1 segment store with idempotent segment IDs and FTS.
     for offset in range(0,len(selected),24):

@@ -64,6 +64,46 @@ class FakeD1:
 
 
 class RootPlanHandoffTests(unittest.TestCase):
+    def test_stock_distinguishes_rendered_history_from_authenticated_original(self):
+        historical = full('chatgpt-export-format','old-2024',0)
+        historical['capture'].update({
+            'source_kind':'historical_s3_rendered',
+            'source_provenance':'chatgpt_export_render_format_unverified_origin'})
+        privacy = full('chatgpt-export-format','zip-2026',900)
+        privacy['capture'].update({
+            'source_kind':'chatgpt_privacy_export_zip_http_range',
+            'source_provenance':'authenticated_openai_export_email',
+            'source_complete':False,'drive_verified':False})
+        rows = [{k:v for k,v in source.items() if k!='events'}
+                for source in (historical,privacy)]
+        sources = {(source['provider'],source['conversation_id']):source
+                   for source in (historical,privacy)}
+        census = bridge.shared_stock_census(FakeD1(rows,sources),minimum=1)
+        self.assertEqual(census['distinct_complete'],1)
+        self.assertEqual(census['distinct_full_original'],0)
+        self.assertFalse(census['full_original_ready'])
+        self.assertEqual(census['completeness_scope'],'drive_verified_rendered_text')
+        self.assertEqual(census['verified_source_refs'][0]['source_fidelity'],
+                         'unverified_origin_rendered_text')
+
+    def test_full_original_tier_requires_explicit_asset_and_byte_proofs(self):
+        sources = {}
+        rows = []
+        for i,day in enumerate((0,800)):
+            source = full('chatgpt-export-format',f'original-{i}',day)
+            source['capture'].update({
+                'source_kind':'chatgpt_privacy_export_zip_http_range',
+                'source_provenance':'authenticated_openai_export_email',
+                'original_source_complete':True,
+                'original_assets_complete':True,
+                'original_source_sha256':'e'*64})
+            rows.append({k:v for k,v in source.items() if k!='events'})
+            sources[(source['provider'],source['conversation_id'])] = source
+        census = bridge.shared_stock_census(FakeD1(rows,sources),minimum=2)
+        self.assertEqual(census['distinct_full_original'],2)
+        self.assertTrue(census['full_original_ready'])
+        self.assertEqual({r['source_fidelity'] for r in census['verified_source_refs']},
+                         {'full_original'})
     def test_drive_complete_source_accepts_interim_flags_and_flagless_snapshot(self):
         source = full("openai-codex", "interim", 0)
         source["events"][0]["source_content_complete"] = False

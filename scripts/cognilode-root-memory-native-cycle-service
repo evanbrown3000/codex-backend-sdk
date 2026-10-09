@@ -13,6 +13,7 @@ import time
 
 HERE = Path(__file__).resolve().parent
 CYCLE = HERE / "cognilode-root-memory-native-cycle"
+SUCCESSOR = HERE / "cognilode-decisionx-successor"
 STATE_ROOT = Path(os.environ.get("COGNILODE_ROOT_MEMORY_STATE_ROOT",
     str(Path.home() / ".local/share/cognilode/root-memory-native-cycle"))).expanduser()
 INTERVAL = max(300, min(86400, int(os.environ.get("COGNILODE_ROOT_MEMORY_INTERVAL_SECONDS", "3600"))))
@@ -55,6 +56,18 @@ def main():
                         "stdout_tail": done.stdout[-4000:], "stderr_tail": done.stderr[-2000:]})
             except subprocess.TimeoutExpired:
                 _event({"state": "tick_timeout"})
+            # Use the same unattended service and the same D1 historical-rhythm
+            # queue. This tick only stages/enqueues after a completed root turn
+            # and two independent >=500 verified-source gates; it never sends.
+            try:
+                successor = subprocess.run([sys.executable, str(SUCCESSOR), "--tick"],
+                                           text=True, capture_output=True, timeout=1800,
+                                           check=False)
+                _event({"state": "decisionx_successor_tick", "returncode": successor.returncode,
+                        "stdout_tail": successor.stdout[-4000:],
+                        "stderr_tail": successor.stderr[-2000:]})
+            except subprocess.TimeoutExpired:
+                _event({"state": "decisionx_successor_tick_timeout"})
             while not STOP and time.monotonic() - started < INTERVAL:
                 time.sleep(min(1.0, INTERVAL - (time.monotonic() - started)))
         _event({"state": "stopped"})

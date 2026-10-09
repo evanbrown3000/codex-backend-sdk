@@ -1,0 +1,12 @@
+[Unit]
+Description=Collect ChatGPT chat-mode turns repeatedly
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=2min
+AccuracySec=15s
+Persistent=true
+Unit=cognilode-b4pt0r-collect.service
+
+[Install]
+WantedBy=timers.target

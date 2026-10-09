@@ -1,0 +1,11 @@
+[Unit]
+Description=Collect terminal ChatGPT chat-mode turns and downloadable work products
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/evan/.local/share/cognilode/b4pt0r-chatmode/venv/bin/python /home/evan/Projects/codex-backend-sdk/scripts/cognilode-b4pt0r-collect --limit 40
+TimeoutStartSec=10min
+NoNewPrivileges=true
+UMask=0077

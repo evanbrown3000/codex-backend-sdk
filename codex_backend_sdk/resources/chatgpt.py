@@ -5,7 +5,7 @@ from __future__ import annotations
 from io import BytesIO
 import json
 from pathlib import Path
-from typing import Any, Iterator, Literal, TYPE_CHECKING
+from typing import Any, Iterator, Literal, Mapping, TYPE_CHECKING
 from urllib.parse import quote
 
 import requests
@@ -41,6 +41,30 @@ def _params(values: dict[str, Any]) -> dict[str, Any] | None:
 
 def _path(value: str, name: str) -> str:
     return quote(_required(value, name), safe="")
+
+
+def _prepare_headers(payload: Mapping[str, Any]) -> dict[str, str]:
+    headers: dict[str, str] = {}
+
+    def collect(value: Any) -> None:
+        if isinstance(value, Mapping):
+            for key, nested in value.items():
+                if isinstance(nested, Mapping) and "header" in key.lower():
+                    for name, header_value in nested.items():
+                        if isinstance(name, str) and isinstance(header_value, (str, int, float)):
+                            headers[name] = str(header_value)
+                else:
+                    collect(nested)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    collect(payload)
+    for token_key in ("conduit_token", "conduitToken"):
+        token = payload.get(token_key)
+        if isinstance(token, str) and token:
+            headers.setdefault("OpenAI-Conduit-Token", token)
+    return headers
 
 
 class ChatGPTResources:
@@ -309,6 +333,63 @@ class ChatGPTConversations:
             f"/conversation/{_required(conversation_id, 'conversation_id')}"
         )
 
+    def reconcile_turn(
+        self,
+        conversation_id: str,
+        user_message_id: str,
+    ) -> dict[str, Any]:
+        """Read back the exact submitted turn without replaying its mutation."""
+        conversation = self.retrieve(conversation_id)
+        mapping = conversation.get("mapping") if isinstance(conversation, dict) else None
+        if not isinstance(mapping, dict):
+            raise RuntimeError("Conversation response is missing its mapping.")
+        current = conversation.get("current_node")
+        chain: list[dict[str, Any]] = []
+        visited: set[str] = set()
+        while isinstance(current, str) and current and current not in visited:
+            visited.add(current)
+            node = mapping.get(current)
+            if not isinstance(node, dict):
+                break
+            message = node.get("message")
+            if isinstance(message, dict):
+                chain.append(message)
+            current = node.get("parent")
+        chain.reverse()
+        submitted_index = next(
+            (index for index, message in enumerate(chain)
+             if str(message.get("id") or "") == _required(user_message_id, "user_message_id")),
+            None,
+        )
+        if submitted_index is None:
+            return {
+                "accepted": False,
+                "terminal": False,
+                "conversation_id": conversation_id,
+            }
+        for message in reversed(chain[submitted_index + 1:]):
+            author = message.get("author") if isinstance(message.get("author"), dict) else {}
+            if author.get("role") != "assistant":
+                continue
+            terminal = message.get("end_turn") is True or message.get("status") == "finished_successfully"
+            if terminal:
+                content = message.get("content") if isinstance(message.get("content"), dict) else {}
+                parts = content.get("parts") if isinstance(content.get("parts"), list) else []
+                text = "\n".join(str(part) for part in parts if isinstance(part, str))
+                return {
+                    "accepted": True,
+                    "terminal": True,
+                    "conversation_id": conversation_id,
+                    "assistant_message_id": message.get("id"),
+                    "assistant_text": text,
+                    "assistant_message": message,
+                }
+        return {
+            "accepted": True,
+            "terminal": False,
+            "conversation_id": conversation_id,
+        }
+
     def update(self, conversation_id: str, body: Any) -> dict[str, Any]:
         return self._client._patch_chatgpt(
             f"/conversation/{_required(conversation_id, 'conversation_id')}",
@@ -333,21 +414,29 @@ class ChatGPTConversations:
     def prepare(self, body: Any) -> dict[str, Any]:
         return self._client._post_chatgpt("/f/conversation/prepare", body=_object(body))
 
-    def create_stream(self, body: Any) -> requests.Response:
+    def create_stream(self, body: Any, *, prepare: bool = True) -> requests.Response:
+        request_body = _object(body)
+        headers = {"Accept": "text/event-stream"}
+        if prepare:
+            headers.update(_prepare_headers(self.prepare(request_body)))
         return self._client._request_chatgpt(
             "POST",
             "/f/conversation",
-            body=_object(body),
-            headers={"Accept": "text/event-stream"},
+            body=request_body,
+            headers=headers,
             stream=True,
         )
 
-    def resume_stream(self, body: Any) -> requests.Response:
+    def resume_stream(self, body: Any, *, prepare: bool = True) -> requests.Response:
+        request_body = _object(body)
+        headers = {"Accept": "text/event-stream"}
+        if prepare:
+            headers.update(_prepare_headers(self.prepare(request_body)))
         return self._client._request_chatgpt(
             "POST",
             "/f/conversation/resume",
-            body=_object(body),
-            headers={"Accept": "text/event-stream"},
+            body=request_body,
+            headers=headers,
             stream=True,
         )
 
@@ -683,6 +772,36 @@ class ChatGPTFiles:
     ) -> bytes | BytesIO | Path | Any:
         link = self.attachment_download_link(
             conversation_id, file_id, gizmo_id=gizmo_id
+        )
+        return self._download_payload(
+            link, response_format=response_format, output_path=output_path
+        )
+
+    def interpreter_download_link(
+        self,
+        conversation_id: str,
+        assistant_message_id: str,
+        sandbox_path: str,
+    ) -> dict[str, Any]:
+        return self._client._get_chatgpt(
+            f"/conversation/{_required(conversation_id, 'conversation_id')}/interpreter/download",
+            params={
+                "message_id": _required(assistant_message_id, "assistant_message_id"),
+                "sandbox_path": _required(sandbox_path, "sandbox_path"),
+            },
+        )
+
+    def download_interpreter_artifact(
+        self,
+        conversation_id: str,
+        assistant_message_id: str,
+        sandbox_path: str,
+        *,
+        response_format: Literal["bytes", "bytes_io", "file", "response"] = "bytes",
+        output_path: str | Path | None = None,
+    ) -> bytes | BytesIO | Path | Any:
+        link = self.interpreter_download_link(
+            conversation_id, assistant_message_id, sandbox_path
         )
         return self._download_payload(
             link, response_format=response_format, output_path=output_path

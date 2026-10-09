@@ -14,6 +14,8 @@ class FakeChatGPTClient(OpenAI):
 
     def _post_chatgpt(self, path, *, body, timeout=None):
         self.calls.append(("POST", path, body))
+        if path == "/f/conversation/prepare":
+            return {"generation_headers": {"OpenAI-Test-Generation": "prepared"}}
         return {"path": path}
 
     def _patch_chatgpt(self, path, *, body=None, params=None):
@@ -71,10 +73,18 @@ def test_chatgpt_conversation_streams_preserve_raw_response():
     assert client.calls == [
         (
             "POST",
+            "/f/conversation/prepare",
+            {"action": "next"},
+        ),
+        (
+            "POST",
             "/f/conversation",
             {
                 "body": {"action": "next"},
-                "headers": {"Accept": "text/event-stream"},
+                "headers": {
+                    "Accept": "text/event-stream",
+                    "OpenAI-Test-Generation": "prepared",
+                },
                 "stream": True,
             },
         )

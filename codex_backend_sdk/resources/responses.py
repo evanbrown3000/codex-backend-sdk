@@ -36,6 +36,7 @@ class Responses:
     def create(
         self,
         *,
+        access_programs: Any = _UNSET,
         background: Any = _UNSET,
         context_management: Any = _UNSET,
         conversation: Any = _UNSET,
@@ -73,6 +74,7 @@ class Responses:
         timeout: Any = _UNSET,
     ) -> Response | Iterator[ResponseStreamEvent]:
         _reject_backend_unsupported(
+            access_programs=access_programs,
             background=background,
             context_management=context_management,
             conversation=conversation,
@@ -132,6 +134,7 @@ class Responses:
         self,
         *,
         text_format: Any = _UNSET,
+        access_programs: Any = _UNSET,
         background: Any = _UNSET,
         context_management: Any = _UNSET,
         conversation: Any = _UNSET,
@@ -178,6 +181,7 @@ class Responses:
                 text = {"verbosity": verbosity}
         fmt = pydantic_to_format(text_format) if _is_given(text_format) else None
         response = self.create(
+            access_programs=access_programs,
             background=background,
             context_management=context_management,
             conversation=conversation,

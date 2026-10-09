@@ -512,6 +512,17 @@ def _dx_ref(episode):
             ("episode_id", "source_sha256", "provider", "conversation_id")}
 
 
+def _dx_unique_source_refs(refs):
+    result = []
+    seen = set()
+    for ref in refs:
+        key = (ref["provider"], ref["conversation_id"])
+        if key not in seen:
+            result.append(ref)
+            seen.add(key)
+    return result
+
+
 def _dx_resolve(refs, *, complete_source=None):
     """Rehydrate exact episodes from the shared store only for a due batch."""
     by_conversation = {}
@@ -760,8 +771,12 @@ def decisionx_batch_pump():
         if released: event("decisionx_cancelled_batch_refs_released", episodes=released)
         unproved = _dx_reconcile_unproved_done(db)
         if unproved: event("decisionx_unproved_done_released", episodes=unproved)
-        pending = list(state.get("spool") or [])
+        # Retained handles may have been written by older episode-only scans.
+        # A native batch reads one complete conversation per candidate; do not
+        # spend one ChatGPT slot labeling the same source twice.
+        pending = _dx_unique_source_refs(state.get("spool") or [])
         known = {e["episode_id"] for e in pending}
+        known_sources = {(e["provider"], e["conversation_id"]) for e in pending}
         source_refs = _dx_diversified_source_refs(stock.get("verified_source_refs") or [])
         if not source_refs:
             raise RuntimeError("DecisionX verified stock lacks source references")
@@ -778,6 +793,8 @@ def decisionx_batch_pump():
                 end_of_corpus = True
             provider, cid = ref["provider"], ref["conversation_id"]
             if (provider, cid) not in verified:
+                continue
+            if (provider, cid) in known_sources:
                 continue
             try:
                 result = sender.operator_memory_post({"operation":"read","provider":provider,
@@ -799,6 +816,7 @@ def decisionx_batch_pump():
                 if old and old[0]==sha and (old[1] in ("done","queued") or old[2]>time.time()): continue
                 if eid in known: continue
                 pending.append(_dx_ref(episode));known.add(eid)
+                known_sources.add((provider, cid))
                 source_added += 1
                 if source_added >= DX_EPISODES_PER_SOURCE_PER_SCAN or len(pending)>=DX_TARGET:
                     break

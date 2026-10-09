@@ -152,3 +152,36 @@ def test_expired_source_promotes_candidate_but_old_drive_lag_still_pauses(monkey
     archived = list((state_root / "superseded-snapshots").glob("*/gap-manifest.json"))
     assert len(archived) == 1
     assert json.loads(archived[0].read_text())["replacement_covers_old_gaps"] is None
+
+
+def test_renewed_url_same_archive_keeps_exact_cursor(monkeypatch, tmp_path):
+    url_file = tmp_path / "privacy-export-url.txt"
+    candidate_file = tmp_path / "privacy-export-next-url.txt"
+    old_url = "https://chatgpt.com/backend-api/estuary/content?old"
+    new_url = "https://chatgpt.com/backend-api/estuary/content?new"
+    url_file.write_text(old_url + "\n")
+    candidate_file.write_text(new_url + "\n")
+    os.chmod(url_file, 0o600)
+    os.chmod(candidate_file, 0o600)
+    root = tmp_path / "state"
+    root.mkdir()
+    state = {"archive_etag": '"same"', "archive_bytes": 456,
+             "admitted": 500, "exact_deduped": 0,
+             "next_shard": 2, "position": 9, "deferred": []}
+    (root / "cursor.json").write_text(json.dumps(state))
+    monkeypatch.setattr(backfill.sender, "new_session", lambda *a: object())
+
+    class Expired(Exception):
+        response = SimpleNamespace(status_code=403)
+
+    def source(session, url):
+        if url == old_url:
+            raise Expired()
+        return SimpleNamespace(etag='"same"', size=456)
+
+    monkeypatch.setattr(backfill, "AuthenticatedRangeFile", source)
+    result = backfill.run(url_file, maximum=100, state_root=root)
+    assert result["state"] == "drive_lag_backpressure"
+    assert url_file.read_text().strip() == new_url
+    assert json.loads((root / "cursor.json").read_text())["position"] == 9
+    assert not (root / "superseded-snapshots").exists()

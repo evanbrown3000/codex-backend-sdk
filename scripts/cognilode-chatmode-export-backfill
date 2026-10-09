@@ -19,6 +19,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import sys
 import zipfile
 
@@ -34,6 +35,9 @@ MAX_CONVERSATION_TEXT_BYTES = 8 * 1024 * 1024
 MAX_EVENT_CHARS = 100_000
 MAX_EVENTS = 1000
 STATE_ROOT = Path.home() / ".local/share/cognilode/b4pt0r-chatmode/privacy-export-backfill"
+DRIVE_DB = Path.home() / ".local/share/cognilode/unified-conversation-vacuum/intake.sqlite3"
+PENDING_HIGH_WATER = 500
+PENDING_LOW_WATER = 350
 
 
 def sha_json(value) -> str:
@@ -261,14 +265,47 @@ def repair_one_deferred(archive: zipfile.ZipFile, source: AuthenticatedRangeFile
     write_state(state_path, state)
 
 
+def drive_lag(state_root: Path, archive_etag: str, state: dict,
+              drive_db: Path = DRIVE_DB) -> dict:
+    """Advisory current-export lag against the sole writer's readback ledger.
+
+    Exact event/revision proof is separately required by the retirement gate.
+    A preexisting proof for the same CID is not enough to release backpressure:
+    this snapshot's D1 receipt must precede the Drive verification.
+    """
+    path = state_root / "d1_exact_receipts.jsonl"
+    rows = {}
+    if path.exists():
+        with path.open(encoding="utf-8") as source:
+            for line in source:
+                receipt = json.loads(line)
+                if receipt.get("archive_etag") != archive_etag:
+                    raise RuntimeError("backpressure ledger contains another export snapshot")
+                rows[receipt["stored_conversation_id"]] = receipt["d1_exact_verified_at"]
+    verified = 0
+    if drive_db.exists():
+        db = sqlite3.connect(f"file:{drive_db}?mode=ro", uri=True)
+        try:
+            for cid, admitted_at in rows.items():
+                found = db.execute("""SELECT verified_at FROM d1_drive_admissions
+                    WHERE provider='chatgpt-export-format' AND conversation_id=?
+                    ORDER BY verified_at DESC LIMIT 1""", (cid,)).fetchone()
+                if (found and datetime.fromisoformat(found[0].replace("Z", "+00:00")) >=
+                    datetime.fromisoformat(admitted_at.replace("Z", "+00:00"))):
+                    verified += 1
+        finally:
+            db.close()
+    unreceipted = max(0, int(state.get("admitted", 0)) + int(state.get("exact_deduped", 0)) - len(rows))
+    return {"d1_receipts": len(rows), "drive_verified_after_d1": verified,
+            "pending_drive": len(rows) - verified + unreceipted}
+
+
 def run(url_file: Path, *, maximum: int, state_root: Path = STATE_ROOT) -> dict:
     if url_file.stat().st_mode & 0o077:
         raise RuntimeError("signed export URL file must be private (0600)")
     url = url_file.read_text(encoding="utf-8").strip()
     if not url.startswith("https://chatgpt.com/backend-api/estuary/content?"):
         raise RuntimeError("unexpected export URL origin or path")
-    session = sender.new_session(sender.DEFAULT_PROFILE, sender.DEFAULT_IMPERSONATE)
-    source = AuthenticatedRangeFile(session, url)
     state_root.mkdir(parents=True, exist_ok=True)
     lock_path = state_root / "cursor.lock"
     with lock_path.open("a+") as lock:
@@ -276,6 +313,25 @@ def run(url_file: Path, *, maximum: int, state_root: Path = STATE_ROOT) -> dict:
         state_path = state_root / "cursor.json"
         if state_path.is_file():
             state = json.loads(state_path.read_text(encoding="utf-8"))
+            lag = drive_lag(state_root, state["archive_etag"], state)
+            paused = bool(state.get("backpressure_paused"))
+            if lag["pending_drive"] >= PENDING_HIGH_WATER or (
+                    paused and lag["pending_drive"] > PENDING_LOW_WATER):
+                if not paused:
+                    state["backpressure_paused"] = True
+                    write_state(state_path, state)
+                return {"state": "drive_lag_backpressure", **lag,
+                        "resume_pending_at_or_below": PENDING_LOW_WATER,
+                        "next_shard": state.get("next_shard"), "position": state.get("position")}
+            if paused:
+                state["backpressure_paused"] = False
+                write_state(state_path, state)
+            maximum = min(maximum, PENDING_HIGH_WATER - lag["pending_drive"])
+        else:
+            state = None
+        session = sender.new_session(sender.DEFAULT_PROFILE, sender.DEFAULT_IMPERSONATE)
+        source = AuthenticatedRangeFile(session, url)
+        if state is not None:
             if state.get("archive_etag") != source.etag or state.get("archive_bytes") != source.size:
                 raise RuntimeError("new archive identity requires prior cursor reconciliation")
         else:

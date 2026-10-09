@@ -1,6 +1,9 @@
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
+import json
+import os
+import sqlite3
 from types import SimpleNamespace
 
 
@@ -44,3 +47,37 @@ def test_same_source_id_is_idempotent(monkeypatch):
     monkeypatch.setattr(backfill, "prior_conversation", lambda cid: expected)
     assert backfill.store_identity("original", "current", SimpleNamespace(etag='"new"')) == (
         "original", expected)
+
+
+def test_drive_lag_counts_only_this_export_and_later_drive_proof(tmp_path):
+    row = {"archive_etag": '"etag"', "stored_conversation_id": "cid",
+           "d1_exact_verified_at": "2026-10-09T14:00:00+00:00"}
+    (tmp_path / "d1_exact_receipts.jsonl").write_text(json.dumps(row) + "\n")
+    db_path = tmp_path / "writer.sqlite3"
+    with sqlite3.connect(db_path) as db:
+        db.execute("""CREATE TABLE d1_drive_admissions(provider TEXT,conversation_id TEXT,
+            verified_at TEXT)""")
+        db.execute("INSERT INTO d1_drive_admissions VALUES(?,?,?)",
+                   ("chatgpt-export-format", "cid", "2026-10-09T13:00:00+00:00"))
+    assert backfill.drive_lag(tmp_path, '"etag"', {"admitted": 1}, db_path)["pending_drive"] == 1
+    with sqlite3.connect(db_path) as db:
+        db.execute("INSERT INTO d1_drive_admissions VALUES(?,?,?)",
+                   ("chatgpt-export-format", "cid", "2026-10-09T15:00:00+00:00"))
+    assert backfill.drive_lag(tmp_path, '"etag"', {"admitted": 1}, db_path)["pending_drive"] == 0
+
+
+def test_high_water_pauses_before_remote_zip_request(monkeypatch, tmp_path):
+    url_file = tmp_path / "url"
+    url_file.write_text("https://chatgpt.com/backend-api/estuary/content?private\n")
+    os.chmod(url_file, 0o600)
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    (state_root / "cursor.json").write_text(json.dumps({"archive_etag": '"etag"',
+        "archive_bytes": 10, "admitted": 500, "exact_deduped": 0, "next_shard": 1,
+        "position": 2, "deferred": []}))
+    monkeypatch.setattr(backfill, "AuthenticatedRangeFile", lambda *_: (_ for _ in ()).throw(
+        AssertionError("remote ZIP must not be requested above high water")))
+    result = backfill.run(url_file, maximum=100, state_root=state_root)
+    assert result["state"] == "drive_lag_backpressure"
+    assert result["pending_drive"] == 500
+    assert json.loads((state_root / "cursor.json").read_text())["backpressure_paused"] is True

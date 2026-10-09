@@ -121,6 +121,8 @@ def test_enqueue_requires_exact_shared_queue_readback(monkeypatch):
         if body["operation"] == "enqueue_decisionx_prompt":
             assert body["decisionx"]["target_job_id"] == "root-job"
             assert body["decisionx"]["reasoning_effort"] == "xhigh"
+            assert body["decisionx"]["research_employee"] == "Nadia Brooks"
+            assert body["decisionx"]["external_employee"] == "Rina Hale"
             return {"ok": True}
         return {"job": {"id": "decisionx-successor-abc123", "prompt_sha256": "0" * 64,
                         "state": "queued", "attachment_refs": body.get("attachment_refs", [])}}

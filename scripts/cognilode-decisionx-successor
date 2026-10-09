@@ -255,7 +255,7 @@ job/provider/conversation and prompt/response hashes, candidate_refs with six ex
 identity fields, proposed_next_instruction, changed_conditions, uncertainties),
 `successor.plan` (human-readable machine-readable pending steps embodying the exact
 proposed_next_instruction; each step must remain pending and name an owner, role,
-effect probe command, and expected observable result),
+`effect_probe_command`, and `effect_probe_expected` observable result),
 `EXTERNAL_EFFECT_INSTRUCTIONS.md` (how the Codex employee
 should deploy the plan), `NATIVE_COMPUTE.json` copied from work/, and `MANIFEST.json`
 (schema cognilode.decisionx.successor_output.v1; members maps the other four paths
@@ -266,7 +266,9 @@ manifest and ZIP reproducibly. Provide that ZIP as a downloadable Chat attachmen
 Use TaskFlow syntax exactly: begin `project DecisionX Successor` and
 `id decisionx-successor`, then a line such as
 `[ ] DX-1 Verify and implement the proposed next instruction`, followed by
-indented `owner:`, `role:`, `effect_probe:`, `expected:`, and `do:` fields.
+indented `owner:`, `role:`, `effect_probe_command:`,
+`effect_probe_expected:`, and `do:` fields. Use Nadia Brooks as the named
+research employee and Rina Hale as the named Codex external-effect employee.
 Put `proposed_next_instruction` verbatim somewhere in successor.plan.
 Also report in chat what you learned, what remains unresolved, and exactly which
 historical conversations changed your proposed next action.
@@ -288,14 +290,14 @@ def enqueue(post: Callable[[dict], Mapping], built: dict, *, priority: int = 45)
                 "prompt_sha256": digest, "source_kind": "verified_iae_successor",
                 "target_job_id": built["manifest"]["target_job_id"],
                 "reasoning_effort": "xhigh",
-                "research_employee": "DecisionX research employee",
-                "external_employee": "DecisionX Codex external-effect employee"}
+                "research_employee": "Nadia Brooks",
+                "external_employee": "Rina Hale"}
     reply = post({"operation": "enqueue_decisionx_prompt", "job_id": job_id,
                   "provider": "chatgpt.com", "prompt": prompt, "decisionx": decision,
                   "priority": priority, "project": "DecisionX",
                   "role": "historical-successor-analyst", "phase": "decisionx_successor",
                   "reasoning_effort": "xhigh", "model": "gpt-5-6-thinking",
-                  "assigned_employee": "DecisionX Chat-mode successor analyst",
+                  "assigned_employee": "Nadia Brooks",
                   "research_employee": decision["research_employee"],
                   "external_employee": decision["external_employee"],
                   "taskflow_multi_phase": True,

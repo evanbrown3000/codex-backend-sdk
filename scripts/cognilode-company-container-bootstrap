@@ -140,9 +140,12 @@ def compose_service_hashes(project: str, compose: Path, env: dict[str, str]) -> 
          "config", "--format", "json"], env=env, capture_output=True, text=True,
         check=True, timeout=60)
     services = json.loads(rendered.stdout)["services"]
+    active_profiles = {value.strip() for value in env.get("COMPOSE_PROFILES", "").split(",")
+                       if value.strip()}
     return {name: hashlib.sha256(json.dumps(value, sort_keys=True,
             separators=(",", ":")).encode()).hexdigest()
-            for name, value in services.items()}
+            for name, value in services.items()
+            if not value.get("profiles") or active_profiles.intersection(value["profiles"])}
 
 
 def save_service_hashes(path: Path, hashes: dict[str, str]) -> None:

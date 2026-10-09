@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 
@@ -244,6 +245,88 @@ class RootPlanHandoffTests(unittest.TestCase):
         circular["steps"][0]["depends_on"] = ["E1"]
         with self.assertRaisesRegex(ValueError, "dependency cycle"):
             bridge.render_taskflow(circular, conversation_id="root-chat", assistant_sha256="e" * 64)
+
+    def test_root_successor_waits_for_effects_then_queues_once_with_outcome_zip(self):
+        controller = bridge._load(bridge.CONTROLLER, "test_root_outcome_controller")
+        cycle = bridge._load(bridge.HERE / "cognilode-root-memory-native-cycle",
+                             "test_root_outcome_cycle")
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.invalid"], check=True)
+            plan_path = root / "root.plan"
+            plan_path.write_text("project Root Outcomes\nid root-outcomes\n[ ] A Deploy work\n"
+                                 "    effect_probe_command: /usr/bin/python3 -I /tmp/probe.py outcome\n"
+                                 "    effect_probe_expected: live\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "root.plan"], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "initial"], check=True)
+            memory_sha = "a" * 64
+            revision = "c" * 64
+            effect_id = controller.stable_id("root-outcomes", revision, "A", "external_effect", "0")
+            state = {"plan_path": str(plan_path), "root_job_id": "root-job",
+                     "root_memory_packet_sha256": memory_sha}
+            called = []
+            def post(body):
+                called.append(dict(body))
+                if body["operation"] == "get_job":
+                    if body["job_id"] == "root-job":
+                        return {"ok": True, "job": {
+                            "id": "root-job", "state": "complete", "provider": "chatgpt.com",
+                            "conversation_id": "root-chat", "attachment_refs": [{
+                                "ref": "file:/missing/root-memory.zip", "sha256": memory_sha,
+                                "mirrors": ["s3://private/root-memory.zip"], "name": "root-memory.zip"}]}}
+                    if body["job_id"] == effect_id:
+                        return {"ok": True, "job": {"id": body["job_id"],
+                                "state": "complete", "provider": "codex.external-effect",
+                                "effect_evidence": [{"kind": "external_effect", "ref": "deployed"}]}}
+                    if body["job_id"] in saved:
+                        return {"ok": True, "job": saved[body["job_id"]]}
+                    return {"error": "job_not_found"}
+                if body["operation"] == "read":
+                    return {"ok": True, "conversation": {"conversation_id": "root-chat",
+                            "events": [{"role": "assistant", "content": "Root prior plan and report",
+                                        "source_content_complete": True}]}}
+                if body["operation"] == "enqueue_job":
+                    saved[body["job_id"]] = dict(body)
+                    return {"ok": True, "job": saved[body["job_id"]]}
+                raise AssertionError(body)
+            saved = {}
+            waiting = bridge.enqueue_outcome_gated_successor(
+                post, state=state, output_root=root, controller=controller, cycle=cycle,
+                publish=lambda row: "s3://private/" + row["sha256"] + ".zip")
+            self.assertEqual(waiting["reason"], "awaiting_verified_outcomes")
+            self.assertFalse(any(row["operation"] == "enqueue_job" for row in called))
+
+            plan_path.write_text("project Root Outcomes\nid root-outcomes\n"
+                                 f"completed_effect A {revision} {effect_id}\n"
+                                 "[x] A Deploy work\n"
+                                 "    effect_probe_command: /usr/bin/python3 -I /tmp/probe.py outcome\n"
+                                 "    effect_probe_expected: live\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "root.plan"], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "completed"], check=True)
+            verified = []
+            with mock.patch.object(controller, "verify_completed_effects",
+                                   side_effect=lambda queue, plan, step_ids: verified.append(step_ids)):
+                result = bridge.enqueue_outcome_gated_successor(
+                    post, state=state, output_root=root, controller=controller, cycle=cycle,
+                    publish=lambda row: "s3://private/" + row["sha256"] + ".zip")
+                again = bridge.enqueue_outcome_gated_successor(
+                    post, state=state, output_root=root, controller=controller, cycle=cycle,
+                    publish=lambda row: "s3://private/" + row["sha256"] + ".zip")
+            self.assertEqual(verified, [{"A"}, {"A"}])
+            self.assertEqual(result["phase"], "await_root")
+            self.assertEqual(result["root_job_id"], again["root_job_id"])
+            self.assertEqual(sum(row["operation"] == "enqueue_job" for row in called), 1)
+            successor = saved[result["root_job_id"]]
+            self.assertEqual(successor["provider"], "chatgpt.com")
+            self.assertEqual(successor["reasoning_effort"], "xhigh")
+            self.assertEqual(len(successor["attachment_refs"]), 2)
+            outcome_zip = Path(successor["attachment_refs"][1]["ref"].removeprefix("file:"))
+            with zipfile.ZipFile(outcome_zip) as archive:
+                payload = json.loads(archive.read("OUTCOMES.json"))
+                self.assertEqual(payload["completed_outcomes"][0]["effect_job_id"], effect_id)
+                self.assertEqual(payload["prior_root_conversation"]["conversation_id"], "root-chat")
 
     def test_handoff_does_not_write_or_send_from_tiny_stock(self):
         row = full("openai-codex", "only-one", 0)

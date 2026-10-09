@@ -15,7 +15,8 @@ from pathlib import Path
 import shutil
 
 SOURCE_FILES = ("cursor.json", "d1_exact_receipts.jsonl",
-                "nonconversation_source_items.jsonl", "retirement-checkpoint.json")
+                "nonconversation_source_items.jsonl", "skipped_source_conversations.jsonl",
+                "retirement-checkpoint.json")
 
 
 def _atomic_bytes(path: Path, data: bytes):

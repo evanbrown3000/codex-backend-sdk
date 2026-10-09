@@ -34,6 +34,50 @@ def test_text_projection_preserves_branch_edges_and_nontext_omission():
     assert ("media", "a") in summary["branch_parent_edges"]
 
 
+def test_thought_nodes_are_omitted_and_hashed_not_rendered_as_replies():
+    source = {"mapping": {
+        "u": {"parent": None, "message": {"id": "u", "author": {"role": "user"},
+            "content": {"parts": ["Visible question"]}}},
+        "t": {"parent": "u", "message": {"id": "t", "author": {"role": "assistant"},
+            "content": {"content_type": "thoughts", "thoughts": [
+                {"summary": "Private summary", "content": "Private internal thought"}]}}},
+    }}
+    events, summary = backfill.normalize(source)
+    assert [e["content"] for e in events] == ["Visible question"]
+    assert summary["source_omitted_thought_count"] == 1
+    assert len(summary["source_omitted_thought_sha256"]) == 64
+    assert "Private" not in json.dumps(summary)
+
+
+def test_thought_only_source_gets_auditable_skip_receipt_without_d1(monkeypatch, tmp_path):
+    source = {"id": "6ab2d801-82d4-83ea-a48e-d7cb5afd1846", "mapping": {
+        "t": {"parent": None, "message": {"id": "t", "author": {"role": "assistant"},
+            "content": {"content_type": "thoughts", "thoughts": [
+                {"summary": "Not a final answer", "content": "Private internal thought"}]}}}}}
+    info = SimpleNamespace(filename="conversations-145.json", CRC=123)
+    archive_path = tmp_path / "one.zip"
+    import zipfile
+    with zipfile.ZipFile(archive_path, "w") as out:
+        out.writestr(info.filename, json.dumps([source]))
+    source_handle = SimpleNamespace(etag='"etag"', size=archive_path.stat().st_size)
+    state = {"deferred": [{"shard": info.filename, "offset": 0,
+                           "reason": "conversation has no bounded textual events"}],
+             "source_skipped_conversations": 0}
+    state_path = tmp_path / "cursor.json"
+    state_path.write_text(json.dumps(state))
+    monkeypatch.setattr(backfill, "prior_conversation", lambda cid: (_ for _ in ()).throw(
+        AssertionError("thought-only item must not call D1")))
+    with zipfile.ZipFile(archive_path) as archive:
+        backfill.repair_one_deferred(archive, source_handle, tmp_path, state_path, state)
+    rows = [json.loads(x) for x in (tmp_path / "skipped_source_conversations.jsonl").read_text().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["source_conversation_id"] == source["id"]
+    assert rows[0]["omitted_thought_count"] == 1
+    assert rows[0]["source_complete"] is False
+    assert "Private" not in json.dumps(rows)
+    assert state["deferred"] == [] and state["source_skipped_conversations"] == 1
+
+
 def test_old_source_collision_gets_versioned_id(monkeypatch):
     old = {"capture": {"source_conversation_sha256": "different", "export_etag": '"old"'}}
     monkeypatch.setattr(backfill, "prior_conversation", lambda cid: old if cid == "original" else None)

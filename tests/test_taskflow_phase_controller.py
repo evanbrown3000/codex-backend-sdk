@@ -195,6 +195,49 @@ id parallel
             self.assertIn('--expected-effect-job-id '+job['id'],calls[0][0])
             self.assertTrue(c.parse_plan(path).by_id()['S'].checked)
 
+    def test_exact_phase_reads_reconcile_despite_more_than_one_hundred_unrelated_jobs(self):
+        plan=c.parse_plan(PLAN); step=plan.by_id()['AM-5']; q=FakeQueue()
+        # Each global D1 list page would consist solely of unrelated jobs.
+        for provider,state in [('codex.research','effect_pending'),('chatgpt.com','complete'),
+                               ('codex.external-effect','effect_pending')]:
+            for n in range(150):
+                jid=f'unrelated-{provider}-{n}'
+                q.jobs[jid]={'id':jid,'provider':provider,'state':state}
+        with tempfile.TemporaryDirectory() as td:
+            state=Path(td)/'state'
+            research=c.materialize_research_job(q,plan,step,50,role='Elliot Mercer',state_root=state)
+            research_dir=state/plan.project_id/step.step_id/'research'/research['id']
+            research_zip=research_dir/'research.zip'
+            manifest_zip(research_zip,plan.sha256,{'RESEARCH_REPORT.md':b'source analysis'})
+            research_meta=c.verify_manifest_zip(research_zip,expected_plan_sha256=plan.sha256)
+            research.update(state='effect_pending',claimed_by='Elliot Mercer')
+            (research_dir/'secretary_receipt.json').write_text(json.dumps({'taskflow_route_verified':True}))
+            chat=c.ensure_chat_job(q,plan,step,research_meta,50)
+            work=Path(td)/'work.zip'
+            manifest_zip(work,plan.sha256,{'EXTERNAL_EFFECT_INSTRUCTIONS.md':b'apply effect','src/a.py':b'print(1)'})
+            work_meta=c.verify_manifest_zip(work,expected_plan_sha256=plan.sha256,require_external_instructions=True)
+            chat.update(state='complete',effect_evidence=[{'kind':'chatgpt_sandbox_artifact',
+                                                          'ref':work_meta['sha256'],'path':str(work)}])
+            external=c.ensure_external_job(q,plan,step,50,work_meta,state_root=state,external_employee='Rina Hale')
+            external.update(state='effect_pending',claimed_by='Rina Hale')
+            effect_dir=state/plan.project_id/step.step_id/'external_effect'/external['id']
+            effect_dir.mkdir(parents=True,exist_ok=True)
+            (effect_dir/'secretary_receipt.json').write_text(json.dumps({'taskflow_route_verified':True}))
+            (effect_dir/'EXTERNAL_EFFECT_RESULT.json').write_text(json.dumps({
+                'schema':'cognilode.taskflow.external_effect.v1','status':'applied',
+                'project_id':plan.project_id,'plan_sha256':plan.sha256,'step_id':step.step_id,
+                'work_zip_sha256':work_meta['sha256'],'effect_kind':'deployment',
+                'effect_ref':'deploy:real','environment':'fixture',
+                'checks':[{'command':'readback','exit_code':0,'result':'effect exists'}],'defects':[]}))
+            with mock.patch.object(q,'post',side_effect=AssertionError('global list scan is forbidden')), \
+                 mock.patch.object(q,'claim',return_value=None):
+                result=c.run_once(queue=q,plan=plan,role='Elliot Mercer',secretary=Path('/bin/false'),
+                                  state_root=state,worker_id='unused',manager='m',priority=50,
+                                  external_employee='Rina Hale',seed_step='AM-5')
+            self.assertEqual(q.get(research['id'])['state'],'complete')
+            self.assertEqual(q.get(external['id'])['state'],'complete')
+            self.assertTrue(any(row.get('phase')=='external_effect_reconcile' and row.get('ok') for row in result['actions']))
+
     def test_named_employee_receives_slack_role_source(self):
         role=c.slack_role_context('Elliot Mercer')
         self.assertIn('Principal Platform Systems Engineer',role)

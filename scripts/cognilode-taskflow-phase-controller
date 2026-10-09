@@ -864,6 +864,24 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
     action={"at":utc(),"project":plan.project_id,"plan_sha256":plan.sha256,"actions":[]}
     def active(step: Step) -> bool:
         return (active_step_ids is None or step.step_id in active_step_ids) and not step.checked
+    def phase_jobs(phase: str, provider: str, state: str) -> Iterable[dict[str, Any]]:
+        # The D1 queue is global. A limited list page can omit this project
+        # indefinitely when other projects have more than one page of work.
+        for candidate in plan.steps:
+            if not active(candidate):
+                continue
+            jid=phase_job_id(plan,candidate.step_id,phase)
+            row=queue.get(jid)
+            if not row:
+                continue
+            payload=row.get("payload") or {}
+            if (row.get("id") != jid or row.get("provider") != provider
+                or (row.get("plan_revision") or payload.get("plan_revision")) != plan.sha256
+                or (row.get("taskflow_step") or payload.get("taskflow_step")) != candidate.step_id
+                or (row.get("phase") or payload.get("taskflow_phase")) != phase):
+                raise ValueError(f"D1 exact phase job identity mismatch: {candidate.step_id}/{phase}")
+            if row.get("state") == state:
+                yield row
     # Materialize only newly dependency-eligible unchecked steps. Checked plan steps are inherited.
     if seed_step and seed_step not in plan.by_id():
         raise ValueError(f"unknown seed step: {seed_step}")
@@ -875,8 +893,7 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
         rjob=materialize_research_job(queue,plan,step,priority,role=owner,state_root=state_root)
         action["actions"].append({"step":step.step_id,"phase":"research","state":rjob.get("state"),"employee":owner})
     # Reconcile research actions that crossed begin_effect before a crash/timeout. Never resend them.
-    pending_research=queue.post({"operation":"list_jobs","provider":"codex.research","state":"effect_pending","limit":100}).get("jobs") or []
-    for pending in pending_research:
+    for pending in phase_jobs("research","codex.research","effect_pending"):
         payload=pending.get("payload") or {}
         if (pending.get("plan_revision") or payload.get("plan_revision")) != plan.sha256: continue
         step=plan.by_id().get(str(pending.get("taskflow_step") or payload.get("taskflow_step")))
@@ -935,8 +952,7 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
         else:
             action["actions"].append({"phase":"research_claim","ok":False,"error":"claimed job does not match plan and employee"})
     # Advance completed ChatGPT phase jobs to an external-effect job. Never use ChatGPT completion as TaskFlow completion.
-    rows=queue.post({"operation":"list_jobs","provider":"chatgpt.com","state":"complete","limit":100}).get("jobs") or []
-    for cjob in rows:
+    for cjob in phase_jobs("chatgpt_sandbox","chatgpt.com","complete"):
         payload=cjob.get("payload") or {}
         if (cjob.get("phase") or payload.get("taskflow_phase")) != "chatgpt_sandbox" or (cjob.get("plan_revision") or payload.get("plan_revision")) != plan.sha256: continue
         step=plan.by_id().get(str(cjob.get("taskflow_step") or payload.get("taskflow_step")))
@@ -952,8 +968,7 @@ def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, stat
         ejob=ensure_external_job(queue,plan,step,priority,meta,state_root=state_root,external_employee=external_employee)
         action["actions"].append({"step":step.step_id,"phase":"external_effect","state":ejob.get("state"),"work_zip":meta["sha256"]})
     # Reconcile external effects from their durable receipt before considering a new mutation.
-    pending_effects=queue.post({"operation":"list_jobs","provider":"codex.external-effect","state":"effect_pending","limit":100}).get("jobs") or []
-    for pending in pending_effects:
+    for pending in phase_jobs("external_effect","codex.external-effect","effect_pending"):
         payload=pending.get("payload") or {}
         if (pending.get("plan_revision") or payload.get("plan_revision")) != plan.sha256: continue
         step=plan.by_id().get(str(pending.get("taskflow_step") or payload.get("taskflow_step")))

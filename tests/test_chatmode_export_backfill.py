@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 import os
 import sqlite3
+import zipfile
 from types import SimpleNamespace
 
 
@@ -274,3 +275,65 @@ def test_replacement_source_requires_same_authenticated_email(monkeypatch):
         assert False, "another account's export must not be promoted"
     except RuntimeError as exc:
         assert "different account" in str(exc)
+
+
+def test_legacy_scope_repair_keeps_exact_events_and_drive_capture(monkeypatch):
+    cid = "6ab2d995-14cc-83e9-b8e3-43d389f9a510"
+    conversation = {"id": cid, "mapping": {
+        "u": {"parent": None, "message": {"author": {"role": "user"},
+            "content": {"parts": ["Ask"]}}},
+        "a": {"parent": "u", "message": {"author": {"role": "assistant"},
+            "content": {"parts": ["Answer"]}}},
+        "t": {"parent": "a", "message": {"author": {"role": "assistant"},
+            "content": {"content_type": "thoughts", "thoughts": [{"summary": "omitted"}]}}},
+    }}
+    _, summary = backfill.normalize(conversation)
+    capture = {"source_conversation_sha256": backfill.sha_json(conversation),
+               "export_etag": '"etag"', "source_complete": False,
+               "branch_graph_sha256": summary["branch_graph_sha256"],
+               "drive_verified": True, "drive_object_sha256": "a" * 64}
+    calls = []
+    monkeypatch.setattr(backfill, "prior_conversation", lambda _: {"capture": capture.copy()})
+    monkeypatch.setattr(backfill, "exact_readback", lambda *args: True)
+    def post(body):
+        calls.append(body)
+        capture.update(body["capture"])
+        return {"stored": True}
+    monkeypatch.setattr(backfill.sender, "operator_memory_post", post)
+    info = SimpleNamespace(filename="conversations-150.json", CRC=0)
+    source = SimpleNamespace(etag='"etag"', size=42)
+    assert backfill.admit(conversation, info, source, 0) == "exact_dedupe"
+    assert len(calls) == 1 and calls[0]["events"] == []
+    assert capture["source_text_projection_scope"] == "standard_message_text_excluding_thoughts"
+    assert capture["source_omitted_thought_count"] == 1
+    assert capture["drive_verified"] is True and capture["drive_object_sha256"] == "a" * 64
+    assert backfill.admit(conversation, info, source, 0) == "exact_dedupe"
+    assert len(calls) == 1
+
+
+def test_legacy_scope_receipt_cursor_replays_one_member_without_new_admission(monkeypatch, tmp_path):
+    rows = [{"id": f"6ab2d995-14cc-83e9-b8e3-43d389f9a51{i}", "mapping": {}} for i in range(2)]
+    archive_path = tmp_path / "source.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("conversations-150.json", json.dumps(rows))
+    with zipfile.ZipFile(archive_path) as archive:
+        info = archive.getinfo("conversations-150.json")
+    source = SimpleNamespace(etag='"etag"', size=42)
+    receipts = [{"archive_etag": source.etag, "archive_bytes": source.size,
+                 "member": info.filename, "member_crc32": f"{info.CRC:08x}",
+                 "offset": i, "conversation_id": row["id"],
+                 **({"stored_conversation_id": row["id"]} if i else {}),
+                 "source_conversation_sha256": backfill.sha_json(row)}
+                for i, row in enumerate(rows)]
+    (tmp_path / "d1_exact_receipts.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in receipts))
+    state = {}
+    state_path = tmp_path / "cursor.json"
+    calls = []
+    monkeypatch.setattr(backfill, "source_identity", lambda row, *_: (row["id"], row["id"], {"capture": {}}))
+    monkeypatch.setattr(backfill, "admit", lambda row, *_: calls.append(row["id"]) or "exact_dedupe")
+    with zipfile.ZipFile(archive_path) as archive:
+        assert backfill.repair_legacy_scope(archive, source, tmp_path, state_path, state, maximum=1) == 1
+        assert backfill.repair_legacy_scope(archive, source, tmp_path, state_path, state, maximum=1) == 1
+    assert calls == [row["id"] for row in rows]
+    assert not backfill.legacy_scope_repair_pending(tmp_path, state)

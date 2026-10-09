@@ -6,6 +6,7 @@ import importlib.machinery
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import sys
 import threading
 import time
@@ -23,6 +24,19 @@ def emit(kind: str, **fields):
     print(json.dumps({"kind": kind, "at": time.time(), **fields}, sort_keys=True), flush=True)
 
 
+def live_sender_count() -> int | None:
+    """Count provider send processes, rather than stale D1 effect-pending rows."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-fc", "cognilode-b4pt0r-chatmode --auth-source codex send"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        count = int(result.stdout.strip())
+        return count if 0 <= count <= 1000 else None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
 def main() -> int:
     here = Path(__file__).resolve().parent
     sender = load(here / "cognilode-b4pt0r-chatmode", "cognilode_floor_sender")
@@ -38,11 +52,16 @@ def main() -> int:
 
     while True:
         try:
-            result = sender.operator_memory_post({"operation": "rhythm_tick"}, timeout=90)
+            observed = live_sender_count()
+            request = {"operation": "rhythm_tick"}
+            if observed is not None:
+                request["provider_active_turns"] = observed
+            result = sender.operator_memory_post(request, timeout=90)
             claims = result.get("claims") or []
             if claims or result.get("stop_status") not in (None, "not_due"):
                 emit("hosted_queue_fill", status=result.get("status"), claims=len(claims),
                      active_before=result.get("active_before"), active_after=result.get("active_after"),
+                     provider_active_observed=result.get("provider_active_observed"),
                      stop_status=result.get("stop_status"), stop_reason=result.get("stop_reason"))
         except Exception as exc:
             emit("hosted_queue_fill_retry", error=f"{type(exc).__name__}:{str(exc)[:200]}")

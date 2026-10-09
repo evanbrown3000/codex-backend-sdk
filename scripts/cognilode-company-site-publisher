@@ -52,11 +52,12 @@ def publish_once() -> None:
                        cwd=release, env=env, check=True, timeout=600)
         state["pages_sha"] = sha
         STATE.write_text(json.dumps(state))
-    if state.get("worker_sha") != sha:
-        subprocess.run(["python3", str(release / "scripts/deploy-rhythm-trigger-from-custody.py")],
-                       cwd=release, env=env, check=True, timeout=600)
-        state["worker_sha"] = sha
-        STATE.write_text(json.dumps(state))
+    # The worker deployer compares both source and the operator credential
+    # version, so an ordinary custody rotation propagates without a new commit.
+    subprocess.run(["python3", str(release / "scripts/deploy-rhythm-trigger-from-custody.py")],
+                   cwd=release, env=env, check=True, timeout=600)
+    state["worker_sha"] = sha
+    STATE.write_text(json.dumps(state))
 
 
 if __name__ == "__main__":

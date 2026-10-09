@@ -1,0 +1,13 @@
+project Root Memory Native Synthesis
+id root-memory
+
+[ ] MEMORY-BUILD Synthesize multi-year global, project, and role memory
+    owner: Nadia Brooks
+    role: Staff Knowledge Systems Engineer
+    do:
+      - Read every physically attached source batch in the ChatGPT Chat-mode native sandbox and reconstruct all full conversations with the included script.
+      - Carry out the heavy semantic comparison and synthesis inside that native sandbox, with at least 500 distinct complete conversations spanning multiple years.
+      - Produce a single downloadable ZIP containing MANIFEST.json, global.md, project.md, role.md, and EXTERNAL_EFFECT_INSTRUCTIONS.md; retain exact source references and SHA-256 hashes.
+      - Write an in-chat report explaining historical changes, contradictions, failures, successes, uncertainty, and what remains incomplete.
+    effect_probe_command: /usr/bin/python3 -I /home/evan/Projects/codex-backend-sdk/scripts/cognilode-root-memory-effect-probe
+    effect_probe_expected: root-memory-native-live

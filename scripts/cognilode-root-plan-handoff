@@ -115,7 +115,8 @@ def shared_stock_census(post: Callable[[dict[str, Any]], Mapping[str, Any]], *, 
                 source = source_read["conversation"]
                 source_refs.append({"provider": key[0], "conversation_id": key[1],
                                     "prompt_sha256": str(source["prompt_sha256"]),
-                                    "response_sha256": str(source["response_sha256"])})
+                                    "response_sha256": str(source["response_sha256"]),
+                                    "source_at_utc": stamp.isoformat()})
         next_cursor = str(page.get("next_cursor") or "")
         if not next_cursor:
             break

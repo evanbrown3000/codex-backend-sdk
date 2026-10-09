@@ -893,6 +893,7 @@ def checkoff_verified_effects(queue: QueueClient, plan: Plan, *, expected_revisi
     if created_snapshot:
         snapshot.write_bytes(source.read_bytes())
     new_bytes = updated.encode("utf-8")
+    commit_created = False
     try:
         tmp = source.with_name(source.name + ".checkoff.tmp")
         tmp.write_bytes(new_bytes)
@@ -902,13 +903,22 @@ def checkoff_verified_effects(queue: QueueClient, plan: Plan, *, expected_revisi
         _git(repo, "add", "--", relative, snapshot_rel)
         _git(repo, "-c", "user.name=TaskFlow Codex Employee", "-c", "user.email=taskflow@cognilode.local",
              "commit", "--only", "-m", f"Check off verified TaskFlow effect {step_id}", "--", relative, snapshot_rel)
+        commit_created = True
         committed = parse_plan(source)
         verify_plan_revision(committed)
         if sha256_file(snapshot) != plan.sha256:
             raise ValueError("committed prior plan snapshot changed")
-    except Exception:
-        if source.exists() and sha256_bytes(source.read_bytes()) == sha256_bytes(new_bytes):
-            source.write_text(plan.text, encoding="utf-8")
+    except Exception as exc:
+        head_now = _git(repo, "rev-parse", "HEAD", check=False)
+        # A commit may have succeeded even if a later verification or wrapper
+        # failed. Never restore old bytes over the committed plan in that case.
+        if commit_created or head_now.returncode or head_now.stdout.strip() != head_before:
+            raise RuntimeError("TaskFlow checkoff commit may exist; committed plan and snapshot left intact for recovery") from exc
+        if not source.exists() or source.read_bytes() != new_bytes:
+            raise RuntimeError("TaskFlow checkoff failed before commit, but plan changed concurrently; left intact") from exc
+        restore=source.with_name(source.name+".checkoff.restore.tmp")
+        restore.write_bytes(plan.text.encode("utf-8"))
+        restore.replace(source)
         _git(repo, "reset", "-q", "--", relative, snapshot_rel, check=False)
         if created_snapshot and snapshot.exists() and sha256_file(snapshot) == plan.sha256:
             snapshot.unlink()

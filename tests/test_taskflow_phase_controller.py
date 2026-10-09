@@ -179,6 +179,35 @@ id parallel
         plan=c.parse_plan_text('project Legacy\nid legacy\ninherited_checked H\n[x] H inherited\n[ ] N next\n    depends_on: H\n')
         self.assertFalse(c.completed_prerequisites(FakeQueue(),plan,plan.by_id()['N']))
 
+    def test_post_commit_verification_failure_never_rewrites_committed_plan(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo=Path(td); subprocess.run(['git','init','-q',str(repo)],check=True)
+            path=repo/'plans'/'one.plan'; path.parent.mkdir()
+            path.write_text('project One\nid one\n[ ] S deployed\n    effect_probe_command: /usr/bin/printf ok\n    effect_probe_expected: ok\n')
+            subprocess.run(['git','-C',str(repo),'add','plans/one.plan'],check=True)
+            subprocess.run(['git','-C',str(repo),'-c','user.name=Test','-c','user.email=test@example.invalid','commit','-qm','initial'],check=True)
+            plan=c.parse_plan(path); step=plan.by_id()['S']; q=FakeQueue()
+            job=c.job_base(plan,step,'external_effect',provider='codex.external-effect',priority=50,dependencies=[])
+            job.update(state='complete',effect_evidence=[
+                {'kind':'external_effect','ref':'deploy:real'}, {'kind':'external_effect_receipt','ref':'a'*64},
+                {'kind':'chatgpt_work_zip','ref':'b'*64},
+                {'kind':'independent_effect_probe','ref':'c'*64,'observed':'ok','command':step.fields['effect_probe_command']}])
+            q.jobs[job['id']]=job
+            real_verify=c.verify_plan_revision
+            def fail_after_commit(value):
+                if value.sha256 != plan.sha256:
+                    raise RuntimeError('injected post-commit verifier failure')
+                return real_verify(value)
+            with mock.patch.object(c,'verify_plan_revision',side_effect=fail_after_commit):
+                with self.assertRaisesRegex(RuntimeError,'commit may exist; committed plan and snapshot left intact'):
+                    c.checkoff_verified_effects(q,plan,expected_revision=plan.sha256,
+                                                expected_job_id=job['id'],step_id='S')
+            committed=subprocess.check_output(['git','-C',str(repo),'show','HEAD:plans/one.plan'])
+            self.assertEqual(path.read_bytes(),committed)
+            self.assertNotEqual(path.read_bytes(),plan.text.encode())
+            self.assertEqual(c.plan_revision_path(path,plan.sha256).read_bytes(),plan.text.encode())
+            self.assertEqual(subprocess.check_output(['git','-C',str(repo),'status','--porcelain','--','plans/one.plan']).strip(),b'')
+
     def test_checkoff_rejects_unverified_effect_and_dirty_plan(self):
         with tempfile.TemporaryDirectory() as td:
             repo=Path(td); subprocess.run(['git','init','-q',str(repo)],check=True)

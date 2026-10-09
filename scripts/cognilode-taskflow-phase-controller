@@ -756,6 +756,20 @@ def _pending_codex_session(run_dir: Path, *, plan_sha256: str,
     return None
 
 
+def _failed_effect_waits_for_another_chatgpt_device(run_dir: Path) -> bool:
+    """A failed failover proof needs a second real route before spending Codex quota."""
+    path = run_dir / "EXTERNAL_EFFECT_RESULT.json"
+    if not path.is_file():
+        return False
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    return (receipt.get("schema") == "cognilode.taskflow.external_effect.v1"
+            and receipt.get("status") == "failed"
+            and receipt.get("effect_kind") == "multi-device-chat-mode-failover")
+
+
 def resume_pending_codex_effect(*, pending: Mapping[str, Any], plan: Plan, step: Step,
                                 run_dir: Path, repo_path: Path, receipt_path: Path,
                                 work_sha256: str) -> dict[str, Any]:
@@ -781,9 +795,28 @@ def resume_pending_codex_effect(*, pending: Mapping[str, Any], plan: Plan, step:
         state_path = run_dir / "codex-resume-state.json"
         state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
         previous_attempts = int(state.get("attempts") or 0)
+        if _failed_effect_waits_for_another_chatgpt_device(run_dir):
+            if time.time() - float(state.get("last_device_check_at") or 0) < 300:
+                return {"state":"waiting_for_independent_chatgpt_device", "attempts":previous_attempts}
+            try:
+                shared = load_sender().operator_memory_post({"operation":"rhythm_read"})
+                devices = (shared.get("gate") or {}).get("devices") or []
+                alternate = any(isinstance(device,dict)
+                                and device.get("id") not in {"", "evanpc", "evanpc-gemini"}
+                                and device.get("available") is True
+                                and device.get("chatgpt_eligible") is True
+                                and device.get("network_route") in {"home", "mobile"}
+                                for device in devices)
+            except Exception:
+                alternate = False
+            atomic_json(state_path, {**state, "last_device_check_at":time.time(),
+                                     "state":"alternate_device_ready" if alternate
+                                             else "waiting_for_independent_chatgpt_device"})
+            if not alternate:
+                return {"state":"waiting_for_independent_chatgpt_device", "attempts":previous_attempts}
         retry_delay = min(6 * 3600, 900 * (2 ** min(previous_attempts, 5)))
         if time.time() - float(state.get("last_attempt_at") or 0) < retry_delay:
-            return {"state":"resume_backoff", "attempts":int(state.get("attempts") or 0)}
+            return {"state":"resume_backoff", "attempts":previous_attempts}
         source = _pending_codex_session(run_dir, plan_sha256=plan.sha256,
                                         step_id=step.step_id, work_sha256=work_sha256)
         if not source:

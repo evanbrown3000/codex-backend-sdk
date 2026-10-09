@@ -348,7 +348,12 @@ DX_MIN = 16
 DX_TAIL_MIN = 8
 DX_INPUT_CHAR_BUDGET = 70_000  # about 20K tokens, before ZIP compression
 DX_SCAN_INTERVAL_SECONDS = 600
+DX_STOCK_CACHE_SECONDS = 900
 DX_PRIORITY = 20
+_DX_STOCK_LOCK = threading.Lock()
+_DX_STOCK_THREAD = None
+_DX_STOCK_VALUE = None
+_DX_STOCK_AT = 0.0
 DX_PROMPT = """You are a ChatGPT.com Chat-mode DecisionX labeling employee. Read the attached
 episodes.jsonl completely. It contains MANY source-linked candidate IAE episodes
 from the existing conversation memory, never a replacement memory database.
@@ -430,6 +435,41 @@ def _dx_bridge():
     bridge = importlib.util.module_from_spec(spec)
     loader.exec_module(bridge)
     return bridge
+
+
+def _dx_refresh_stock():
+    """Read the large shared census off the queue-polling thread."""
+    global _DX_STOCK_VALUE, _DX_STOCK_AT
+    try:
+        stock = _dx_bridge().shared_stock_census(sender.operator_memory_post, minimum=500)
+        if not isinstance(stock, dict):
+            raise ValueError("DecisionX shared stock census malformed")
+    except Exception as exc:
+        event("decisionx_shared_stock_census_retry", error=type(exc).__name__ + ":" + str(exc)[:240])
+        stock = None
+    with _DX_STOCK_LOCK:
+        _DX_STOCK_VALUE = stock
+        _DX_STOCK_AT = time.time()
+
+
+def _dx_stock_snapshot():
+    """Return a recent full census or start one without missing a rhythm slot.
+
+    Even a ready cached census is only a candidate list: every selected source
+    is independently reread and reverified before physical upload.
+    """
+    global _DX_STOCK_THREAD
+    now = time.time()
+    with _DX_STOCK_LOCK:
+        ttl = 60 if _DX_STOCK_VALUE is None else DX_STOCK_CACHE_SECONDS
+        if _DX_STOCK_AT and now - _DX_STOCK_AT < ttl:
+            return _DX_STOCK_VALUE
+        if _DX_STOCK_THREAD is None or not _DX_STOCK_THREAD.is_alive():
+            _DX_STOCK_THREAD = threading.Thread(target=_dx_refresh_stock,
+                                                name="decisionx-shared-stock-census", daemon=True)
+            _DX_STOCK_THREAD.start()
+            event("decisionx_shared_stock_census_started")
+    return None
 
 
 def _dx_source_batch_builder():
@@ -592,17 +632,19 @@ def decisionx_batch_pump():
     """Incrementally create MULTI-episode Chat-mode jobs in the ONE hosted D1 queue."""
     state = _dx_load()
     if time.time() - float(state.get("last_scan") or 0) < DX_SCAN_INTERVAL_SECONDS: return
-    state["last_scan"] = time.time()
     # Do not build a private micro-corpus from whatever happens to have been
     # ingested on this device. A descriptor batch is a slice of the already
     # substantial, independently Drive-verified shared conversation stock.
-    bridge = _dx_bridge()
-    stock = bridge.shared_stock_census(sender.operator_memory_post, minimum=500)
+    stock = _dx_stock_snapshot()
+    if stock is None:
+        return
+    state["last_scan"] = time.time()
     if not stock.get("multi_year_ready"):
         atomic_json(DX_HOME / "scan.json", state)
         event("decisionx_batch_deferred_shared_stock", distinct_complete=stock.get("distinct_complete"),
               span_days=stock.get("span_days"))
         return
+    bridge = _dx_bridge()
     verified = {(row["provider"], row["conversation_id"])
                 for row in stock.get("verified_source_refs") or []}
     retired = _dx_retire_completed_inputs()

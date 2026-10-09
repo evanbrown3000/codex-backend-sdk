@@ -4,6 +4,8 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import json
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import zipfile
@@ -199,6 +201,7 @@ def test_decisionx_batch_waits_for_500_drive_verified_multi_year_sources(tmp_pat
             raise AssertionError('a sub-500 population must not scan or enqueue')
     module._dx_bridge = lambda: Bridge()
     module.sender = Sender()
+    module._dx_stock_snapshot = lambda: Bridge.shared_stock_census(None, minimum=500)
     module.decisionx_batch_pump()
     assert not (tmp_path / 'progress.sqlite3').exists()
     assert json.loads((tmp_path / 'scan.json').read_text())['spool'] == []
@@ -252,6 +255,7 @@ def test_decisionx_ready_stock_enqueues_one_xhigh_chatmode_job_with_full_source_
     module._dx_bridge=lambda:Bridge()
     module._dx_source_batch_builder=lambda:Builder()
     module.sender=Sender()
+    module._dx_stock_snapshot=lambda:Bridge.shared_stock_census(None,minimum=500)
     module.decisionx_batch_pump()
     assert len(queued)==1
     assert queued[0]['provider']=='chatgpt.com'
@@ -268,6 +272,33 @@ def test_decisionx_ready_stock_enqueues_one_xhigh_chatmode_job_with_full_source_
     module.decisionx_batch_pump()
     assert len(queued)==2
     assert queued[1]['job_id'] != queued[0]['job_id']
+
+
+def test_decisionx_shared_stock_census_cannot_block_queue_polling(tmp_path):
+    module = worker()
+    module.DX_HOME = tmp_path
+    module.event = lambda *_args, **_kwargs: None
+    started, release = threading.Event(), threading.Event()
+
+    class Bridge:
+        @staticmethod
+        def shared_stock_census(_post, minimum):
+            assert minimum == 500
+            started.set()
+            assert release.wait(3)
+            return {'multi_year_ready': False, 'distinct_complete': 42, 'span_days': 36}
+
+    module._dx_bridge = lambda: Bridge()
+    module.sender = SimpleNamespace(operator_memory_post=lambda _body: None)
+    start = time.monotonic()
+    module.decisionx_batch_pump()
+    assert time.monotonic() - start < 0.5
+    assert started.wait(1)
+    assert not (tmp_path / 'scan.json').exists()
+    release.set()
+    module._DX_STOCK_THREAD.join(3)
+    module.decisionx_batch_pump()
+    assert json.loads((tmp_path / 'scan.json').read_text())['spool'] == []
 
 
 def test_decisionx_native_batch_verifies_source_and_binds_returned_compute(tmp_path):

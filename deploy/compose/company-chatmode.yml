@@ -336,7 +336,7 @@ services:
     network_mode: bridge
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
     working_dir: /runtime
-    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-drive-rollouts]
+    entrypoint: [python3, /runtime/source/current/codex-backend-sdk/scripts/cognilode-drive-rollouts-runtime]
     environment:
       COGNILODE_ROLLOUT_SOCKET: /runtime/drive-rollouts/rollouts.sock
       COGNILODE_RCLONE_BIN: /memory-tools/runtime/tools/rclone
@@ -349,6 +349,7 @@ services:
       - memory_drive_auth:/memory-auth:ro
     depends_on:
       - credential-sync
+      - source-sync
 
   aws-broker:
     profiles: [aws-broker]

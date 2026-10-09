@@ -1,0 +1,622 @@
+#!/usr/bin/env python3
+"""Mechanical TaskFlow Steps 4-6 controller over the incumbent D1 job queue.
+
+This module deliberately does not implement a scheduler or substantive scorer.
+D1 remains the only job/lease/completion authority.  The historical rhythm remains
+responsible for starting chatgpt.com phase jobs.  RPE/DecisionX remain upstream of
+this transport.
+
+Safety invariant: TaskFlow dependency edges target only each prerequisite step's
+external_effect phase job.  Research and ChatGPT phase completion can therefore
+never release a dependent TaskFlow step.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
+from pathlib import Path, PurePosixPath
+from typing import Any, Iterable, Mapping, Sequence
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import zipfile
+
+HERE = Path(__file__).resolve().parent
+SENDER_PATH = HERE / "cognilode-b4pt0r-chatmode"
+DEFAULT_SECRETARY = Path.home() / "bin/modified-codex-secretary"
+DEFAULT_STATE_ROOT = Path.home() / ".local/share/cognilode/taskflow-phase-controller"
+MAX_ZIP_BYTES = 20 * 1024 * 1024
+MAX_EXPANDED_BYTES = 100 * 1024 * 1024
+MAX_ZIP_MEMBERS = 5000
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+STEP_RE = re.compile(r"^(?P<indent>\s*)\[(?P<check>[ xX])\]\s+(?P<id>[A-Za-z0-9_.-]+)\s+(?P<title>.+?)\s*$")
+FIELD_RE = re.compile(r"^(?P<indent>\s+)(?P<key>[A-Za-z0-9_-]+):\s*(?P<value>.*)$")
+
+
+def utc() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def atomic_json(path: Path, value: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, prefix=".receipt-", delete=False) as out:
+        temp = Path(out.name)
+        json.dump(value, out, indent=2, sort_keys=True)
+        out.write("\n")
+        out.flush()
+        os.fsync(out.fileno())
+    temp.replace(path)
+
+
+def stable_id(*parts: str) -> str:
+    raw = "\x1f".join(parts)
+    return "tf-" + hashlib.sha256(raw.encode()).hexdigest()[:40]
+
+
+@dataclass(frozen=True)
+class Step:
+    step_id: str
+    title: str
+    checked: bool
+    indent: int
+    fields: Mapping[str, str] = field(default_factory=dict)
+    dependencies: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Plan:
+    project_id: str
+    project_name: str
+    sha256: str
+    text: str
+    steps: tuple[Step, ...]
+    source_ref: str = ""
+
+    def by_id(self) -> dict[str, Step]:
+        return {s.step_id: s for s in self.steps}
+
+
+def _tokens(value: str) -> list[str]:
+    return [x for x in re.split(r"[\s,]+", value.strip()) if x]
+
+
+def parse_plan_text(text: str) -> Plan:
+    project_name = ""
+    project_id = ""
+    raw_steps: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for line in text.splitlines():
+        if line.startswith("project ") and not project_name:
+            project_name = line.removeprefix("project ").strip()
+        elif line.startswith("id ") and not project_id:
+            project_id = line.removeprefix("id ").strip()
+        match = STEP_RE.match(line)
+        if match:
+            current = {
+                "step_id": match.group("id"),
+                "title": match.group("title"),
+                "checked": match.group("check").lower() == "x",
+                "indent": len(match.group("indent").expandtabs(4)),
+                "fields": {},
+            }
+            raw_steps.append(current)
+            continue
+        field_match = FIELD_RE.match(line)
+        if current and field_match and len(field_match.group("indent").expandtabs(4)) > current["indent"]:
+            current["fields"][field_match.group("key")] = field_match.group("value").strip()
+    if not project_id or not raw_steps:
+        raise ValueError("plan must contain an id and at least one checkbox step")
+    ids = {row["step_id"] for row in raw_steps}
+    if len(ids) != len(raw_steps):
+        raise ValueError("duplicate step id")
+    stack: list[dict[str, Any]] = []
+    steps: list[Step] = []
+    for row in raw_steps:
+        while stack and stack[-1]["indent"] >= row["indent"]:
+            stack.pop()
+        deps: list[str] = []
+        for key in ("depends_on", "dependencies"):
+            deps.extend(_tokens(row["fields"].get(key, "")))
+        # A nested checkbox is ordered after its immediate parent unless it says otherwise.
+        if stack and not deps:
+            deps.append(stack[-1]["step_id"])
+        deps = list(dict.fromkeys(deps))
+        missing = [d for d in deps if d not in ids]
+        if missing:
+            raise ValueError(f"step {row['step_id']} references missing dependencies: {missing}")
+        steps.append(Step(row["step_id"], row["title"], row["checked"], row["indent"], dict(row["fields"]), tuple(deps)))
+        stack.append(row)
+    graph = {s.step_id: set(s.dependencies) for s in steps}
+    temporary: set[str] = set()
+    permanent: set[str] = set()
+    def visit(node: str) -> None:
+        if node in permanent: return
+        if node in temporary: raise ValueError(f"dependency cycle at {node}")
+        temporary.add(node)
+        for dep in graph[node]: visit(dep)
+        temporary.remove(node); permanent.add(node)
+    for node in graph: visit(node)
+    return Plan(project_id, project_name or project_id, sha256_bytes(text.encode()), text, tuple(steps))
+
+
+def parse_plan(path: Path) -> Plan:
+    path = path.resolve(strict=True)
+    raw = path.read_bytes()
+    plan = parse_plan_text(raw.decode("utf-8"))
+    return replace(plan, sha256=sha256_bytes(raw), source_ref="file:" + str(path))
+
+
+def verify_plan_revision(plan: Plan) -> None:
+    if not HEX64.fullmatch(plan.sha256):
+        raise ValueError("invalid plan revision")
+    if sha256_bytes(plan.text.encode("utf-8")) != plan.sha256:
+        raise ValueError("plan text differs from immutable revision")
+    if not plan.source_ref.startswith("file:"):
+        raise ValueError("plan_source_ref must identify the source file")
+    source = Path(plan.source_ref.removeprefix("file:"))
+    if sha256_file(source) != plan.sha256:
+        raise ValueError("plan source changed since parsing")
+
+
+def phase_job_id(plan: Plan, step_id: str, phase: str, attempt: int = 0) -> str:
+    return stable_id(plan.project_id, plan.sha256, step_id, phase, str(attempt))
+
+
+def final_dependency_ids(plan: Plan, step: Step) -> list[str]:
+    by_id = plan.by_id()
+    return [phase_job_id(plan, dep, "external_effect") for dep in step.dependencies if not by_id[dep].checked]
+
+
+def safe_zip_members(path: Path) -> list[zipfile.ZipInfo]:
+    if not path.is_file() or path.stat().st_size <= 0 or path.stat().st_size > MAX_ZIP_BYTES:
+        raise ValueError("ZIP missing/empty/too large")
+    if not zipfile.is_zipfile(path):
+        raise ValueError("not a ZIP")
+    total = 0
+    with zipfile.ZipFile(path) as archive:
+        infos = archive.infolist()
+        if not infos or len(infos) > MAX_ZIP_MEMBERS:
+            raise ValueError("invalid ZIP member count")
+        for info in infos:
+            p = PurePosixPath(info.filename)
+            if p.is_absolute() or ".." in p.parts or "\\" in info.filename:
+                raise ValueError("unsafe ZIP member path")
+            # Unix symlink file type.
+            if (info.external_attr >> 16) & 0o170000 == 0o120000:
+                raise ValueError("symlink in ZIP")
+            total += info.file_size
+            if total > MAX_EXPANDED_BYTES:
+                raise ValueError("ZIP expanded size too large")
+        return infos
+
+
+def verify_manifest_zip(path: Path, *, expected_plan_sha256: str | None = None, require_external_instructions: bool = False) -> dict[str, Any]:
+    infos = safe_zip_members(path)
+    names = {i.filename for i in infos if not i.is_dir()}
+    if len(names) != len([i for i in infos if not i.is_dir()]):
+        raise ValueError("duplicate ZIP member path")
+    manifest_name = next((n for n in ("MANIFEST.json", "manifest.json", "MANIFEST.sha256.json") if n in names), None)
+    if not manifest_name:
+        raise ValueError("ZIP lacks top-level manifest JSON")
+    if require_external_instructions and "EXTERNAL_EFFECT_INSTRUCTIONS.md" not in names:
+        raise ValueError("work ZIP lacks top-level EXTERNAL_EFFECT_INSTRUCTIONS.md")
+    with zipfile.ZipFile(path) as archive:
+        manifest = json.loads(archive.read(manifest_name))
+        if not isinstance(manifest, dict):
+            raise ValueError("manifest must be an object")
+        manifest_plan = str(manifest.get("plan_sha256") or "").lower()
+        if expected_plan_sha256 and manifest_plan != expected_plan_sha256.lower():
+            raise ValueError("manifest plan_sha256 mismatch")
+        rows = manifest.get("files")
+        if not isinstance(rows, list) or not rows:
+            raise ValueError("manifest files must be non-empty list")
+        seen: set[str] = set()
+        for row in rows:
+            if not isinstance(row, dict): raise ValueError("bad manifest file row")
+            name = str(row.get("path") or "")
+            expected = str(row.get("sha256") or "").lower()
+            if not name or name in seen or name not in names or not HEX64.match(expected):
+                raise ValueError("manifest entry invalid")
+            if name == manifest_name:
+                raise ValueError("manifest must not self-hash")
+            actual = sha256_bytes(archive.read(name))
+            if actual != expected: raise ValueError(f"manifest hash mismatch: {name}")
+            seen.add(name)
+        unhashed = names - seen - {manifest_name}
+        if unhashed:
+            raise ValueError(f"unmanifested ZIP members: {sorted(unhashed)[:5]}")
+        instructions_sha = None
+        if require_external_instructions:
+            instructions_sha = sha256_bytes(archive.read("EXTERNAL_EFFECT_INSTRUCTIONS.md"))
+    return {
+        "path": str(path), "sha256": sha256_file(path), "size": path.stat().st_size,
+        "manifest_name": manifest_name, "manifest_sha256": sha256_bytes(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()),
+        "member_count": len(names), "instructions_sha256": instructions_sha,
+    }
+
+
+class QueueClient:
+    def __init__(self, sender_module: Any): self.sender = sender_module
+    def post(self, body: dict[str, Any]) -> dict[str, Any]:
+        reply = self.sender.operator_memory_post(body)
+        if not isinstance(reply, dict): raise RuntimeError("D1 API returned non-object")
+        return reply
+    def get(self, job_id: str) -> dict[str, Any] | None:
+        try:
+            reply = self.post({"operation":"get_job","job_id":job_id})
+        except Exception as exc:
+            cause = exc.__cause__
+            if isinstance(cause, urllib.error.HTTPError) and cause.code == 404 and "job_not_found" in str(exc):
+                return None
+            raise
+        if reply.get("error") == "job_not_found": return None
+        if not reply.get("ok") or not isinstance(reply.get("job"), dict):
+            raise RuntimeError(f"D1 get_job failed: {reply.get('error') or reply}")
+        job = reply["job"]
+        if str(job.get("id")) != job_id:
+            raise RuntimeError("D1 get_job returned a different job")
+        return job
+    def enqueue(self, job: dict[str, Any]) -> dict[str, Any]:
+        body = {**job, "operation":"enqueue_job", "job_id":job["id"],
+                "prompt_authority":"taskflow_plan", "source":"taskflow-phase-controller"}
+        reply = self.post(body)
+        if not reply.get("ok") and not reply.get("job"):
+            raise RuntimeError(f"D1 enqueue failed: {reply.get('error') or reply}")
+        saved = reply.get("job")
+        if not isinstance(saved, dict) or saved.get("id") != job["id"]:
+            raise RuntimeError("D1 enqueue did not return the exact job")
+        proof = saved.get("taskflow_plan_receipt") or {}
+        if (saved.get("prompt_author") != "taskflow_plan" or saved.get("provider") != job["provider"]
+            or saved.get("prompt_sha256") != job["prompt_sha256"] or saved.get("plan_revision") != job["plan_revision"]
+            or saved.get("assigned_employee") != job["assigned_employee"]
+            or proof.get("plan_sha256") != job["plan_revision"]
+            or proof.get("plan_source_ref") != job["plan_source_ref"]
+            or proof.get("taskflow_step") != job["taskflow_step"]
+            or proof.get("phase") != job["phase"]):
+            raise RuntimeError("D1 enqueue returned a job without matching TaskFlow plan authority")
+        return saved
+    def claim(self, provider: str, worker_id: str) -> dict[str, Any] | None:
+        reply = self.post({"operation":"claim_jobs","provider":provider,"worker_id":worker_id,"limit":1})
+        rows = reply.get("jobs") or []
+        if not rows: return None
+        job = rows[0]
+        if job.get("provider") != provider or job.get("claimed_by") != worker_id or not job.get("lease_token") or job.get("lease_generation") is None:
+            raise RuntimeError("D1 claim does not match requested provider, employee, or fence")
+        return job
+    def begin(self, job: Mapping[str, Any]) -> dict[str, Any]:
+        return self.post({"operation":"begin_effect", "job_id":job["id"], "worker_id":job["claimed_by"], "lease_token":job["lease_token"], "lease_generation":job["lease_generation"]})
+    def complete(self, job: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]], *, conversation_id: str | None = None) -> dict[str, Any]:
+        body={"operation":"complete_job","job_id":job["id"],"worker_id":job["claimed_by"],"lease_token":job["lease_token"],"lease_generation":job["lease_generation"],"effect_evidence":list(evidence)}
+        if conversation_id: body["conversation_id"] = conversation_id
+        return self.post(body)
+
+
+def load_sender() -> Any:
+    loader = importlib.machinery.SourceFileLoader("cognilode_chatmode_sender_for_taskflow", str(SENDER_PATH))
+    spec = importlib.util.spec_from_loader(loader.name, loader); assert spec
+    module = importlib.util.module_from_spec(spec); loader.exec_module(module)
+    return module
+
+
+def job_base(plan: Plan, step: Step, phase: str, *, provider: str, priority: int, dependencies: Sequence[str]) -> dict[str, Any]:
+    verify_plan_revision(plan)
+    now = utc()
+    payload = {
+        "schema":"cognilode.taskflow.phase_job.v1", "taskflow_multi_phase":True,
+        "project":plan.project_id, "project_name":plan.project_name, "plan_revision":plan.sha256,
+        "plan_source_ref":plan.source_ref, "plan_text_sha256":plan.sha256,
+        "taskflow_step":step.step_id, "taskflow_title":step.title, "taskflow_phase":phase,
+        "taskflow_dependencies":list(dependencies), "priority":priority, "phase_attempt":0,
+    }
+    return {
+        "id":phase_job_id(plan, step.step_id, phase), "provider":provider, "state":"queued",
+        "prompt":"phase placeholder", "prompt_author":"taskflow_plan",
+        "prompt_sha256":sha256_bytes(b"phase placeholder"), "created_at":now, "due_at":now,
+        "priority":priority, "project":plan.project_id, "plan_revision":plan.sha256,
+        "plan_source_ref":plan.source_ref, "plan_text":plan.text,
+        "taskflow_step":step.step_id, "phase":phase, "taskflow_multi_phase":True, "phase_attempt":0,
+        "taskflow_dependencies":list(dependencies), "payload":payload,
+    }
+
+
+def research_prompt(plan: Plan, step: Step, role: str, out_zip: Path) -> str:
+    return f"""You are the named Codex research employee for this TaskFlow step.\nRole: {role}\nProject: {plan.project_id}\nPlan SHA-256: {plan.sha256}\nStep: {step.step_id} {step.title}\n\nRead and use the FULL plan below, not an isolated leaf. Research only; do not claim TaskFlow completion. Build a focused physically readable ZIP at exactly:\n{out_zip}\nThe ZIP must contain top-level MANIFEST.json with plan_sha256={plan.sha256!r} and a files list that SHA-256 covers every other non-directory member. Include relevant code/docs/data and a research report. Do not include secrets or credentials.\n\n--- FULL PLAN ---\n{plan.text}\n"""
+
+
+def chatgpt_prompt(plan: Plan, step: Step, research_meta: Mapping[str, Any]) -> str:
+    return f"""You are the ChatGPT.com chat-mode native sandbox phase for TaskFlow. Work from the physically attached research ZIP.\nProject: {plan.project_id}\nPlan SHA-256: {plan.sha256}\nStep: {step.step_id} {step.title}\nResearch ZIP SHA-256: {research_meta['sha256']}\n\nRead the full attached packet and the full plan. Perform substantive code/data work and tests in your native sandbox. Return a substantial terminal in-chat report plus exactly one downloadable ZIP. That ZIP MUST contain top-level EXTERNAL_EFFECT_INSTRUCTIONS.md and top-level MANIFEST.json whose plan_sha256 equals {plan.sha256}. The manifest must SHA-256 cover every other file. Do not claim external deployment/effects you did not perform. Provider conversation completion is only this sandbox phase; it is NOT TaskFlow step completion.\n\n--- FULL PLAN ---\n{plan.text}\n"""
+
+
+def external_prompt(plan: Plan, step: Step, work_zip: Path, effect_receipt: Path, employee: str) -> str:
+    return f"""You are the Codex external-effect employee assigned to apply this TaskFlow sandbox output.\nEmployee: {employee}\nProject: {plan.project_id}\nPlan SHA-256: {plan.sha256}\nStep: {step.step_id} {step.title}\nWork ZIP: {work_zip}\nWork ZIP SHA-256: {sha256_file(work_zip)}\n\nRead EXTERNAL_EFFECT_INSTRUCTIONS.md inside the ZIP, reconcile with current source/deployment, apply or deploy the work, and verify the real effect. Do not mark success for code/artifact production alone. On success, atomically write JSON to exactly {effect_receipt} with schema='cognilode.taskflow.external_effect.v1', status='applied', project_id, plan_sha256, step_id, work_zip_sha256, effect_kind, non-empty effect_ref, environment, checks (non-empty list of objects with command, exit_code, and observed result), and defects (list). If the effect is failed or uncertain, write status='failed' or 'uncertain'; that MUST NOT release dependents.\n\n--- FULL PLAN ---\n{plan.text}\n"""
+
+
+def run_secretary(secretary: Path, prompt_path: Path, *, employee: str, manager: str, repo_path: Path, phase: str) -> dict[str, Any]:
+    binary = next((p for p in (os.getenv("COGNILODE_CODEX_BIN"), str(Path.home()/".local/bin/codex-cognilode"), shutil.which("codex")) if p and Path(p).is_file() and os.access(p, os.X_OK)), None)
+    if not binary:
+        return {"completed":False,"error":"installed Codex executable unavailable","employee":employee,"phase":phase}
+    candidate = {"name":"taskflow-installed-codex", "family":"modified_codex", "mode":"workspace",
+                 "can_mutate_repo":True,"has_workspace_repo":True,"can_shell":True,
+                 "supports_artifact_return":True,"quota_cost":"codex","available":True,
+                 "effect_capabilities":{"shell":"available","repo":"available"},
+                 "metadata":{"binary":binary}}
+    candidates_path = prompt_path.parent / "secretary_candidates.json"
+    candidates_path.write_text(json.dumps([candidate],sort_keys=True,indent=2)+"\n",encoding="utf-8")
+    command=[str(secretary),"dispatch","--plan-file",str(prompt_path),"--employee",employee,
+             "--manager",manager,"--candidates-json",str(candidates_path),"--prefer-installed",
+             "--shell","--repo-path",str(repo_path),"--max-attempts","1"]
+    if phase == "external_effect": command.extend(["--repo-mutation","--external-effect","shell"])
+    command.append("Execute this TaskFlow phase and return a terminal receipt.")
+    try:
+        cp=subprocess.run(command,text=True,capture_output=True,timeout=int(os.getenv("COGNILODE_TASKFLOW_CODEX_TIMEOUT","3600")),check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"completed":False,"error":f"{type(exc).__name__}: {exc}","candidate":candidate}
+    try: body=json.loads(cp.stdout) if cp.stdout.strip() else {}
+    except json.JSONDecodeError: body={"raw_stdout":cp.stdout}
+    if not isinstance(body, dict): body={"raw_stdout":cp.stdout,"error":"Secretary returned non-object JSON"}
+    body.update({"returncode":cp.returncode,"stderr_tail":cp.stderr[-4000:]})
+    final = body.get("final_candidate") or {}
+    body["taskflow_route_verified"] = bool(cp.returncode == 0 and body.get("completed") is True and final.get("family") == "modified_codex" and final.get("name") == candidate["name"])
+    return body
+
+
+def secretary_succeeded(receipt: Mapping[str, Any]) -> bool:
+    return receipt.get("taskflow_route_verified") is True
+
+
+def verify_effect_receipt(path: Path, *, plan: Plan, step: Step, work_sha256: str) -> dict[str, Any]:
+    if not path.is_file(): raise ValueError("external effect receipt missing")
+    body=json.loads(path.read_text(encoding="utf-8"))
+    required={"schema":"cognilode.taskflow.external_effect.v1","status":"applied","project_id":plan.project_id,"plan_sha256":plan.sha256,"step_id":step.step_id,"work_zip_sha256":work_sha256}
+    for key,value in required.items():
+        if body.get(key) != value: raise ValueError(f"external receipt mismatch: {key}")
+    kind = str(body.get("effect_kind") or "").strip().lower()
+    if kind in {"zip", "artifact", "source_commit", "repository_commit", "git_commit", "commit", "source_patch", "code_patch", "file", "work_product"}:
+        raise ValueError("source artifact is not an external effect")
+    if not kind or not str(body.get("effect_ref") or "").strip() or not str(body.get("environment") or "").strip():
+        raise ValueError("external effect receipt lacks concrete identity/environment")
+    if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", str(body["effect_ref"]), flags=re.I):
+        raise ValueError("source commit/hash alone is not an external effect")
+    if str(body["effect_ref"]).lower().startswith(("git:","commit:","zip:","sha256:")):
+        raise ValueError("source artifact reference is not an external effect")
+    checks=body.get("checks")
+    if not isinstance(checks,list) or not checks: raise ValueError("external effect receipt lacks checks")
+    for check in checks:
+        if not isinstance(check,dict) or not str(check.get("command") or "").strip() or check.get("exit_code") != 0 or not str(check.get("result") or "").strip():
+            raise ValueError("external effect check is not successful/verifiable")
+    body["receipt_sha256"]=sha256_file(path)
+    return body
+
+
+def _artifact_from_chat_job(job: Mapping[str, Any]) -> Path | None:
+    candidates=[]
+    for row in job.get("effect_evidence") or job.get("effect_evidence_json") or []:
+        if isinstance(row,dict) and row.get("kind") == "chatgpt_sandbox_artifact" and row.get("path"):
+            candidates.append(Path(str(row["path"])))
+    return candidates[0] if len(candidates)==1 else None
+
+
+def verified_work_attachment(job: Mapping[str, Any], plan: Plan) -> dict[str, Any]:
+    attachments=job.get("attachment_refs") or []
+    if len(attachments) != 1 or not isinstance(attachments[0], dict):
+        raise ValueError("external-effect job lacks one immutable work ZIP reference")
+    ref=str(attachments[0].get("ref") or "")
+    expected=str(attachments[0].get("sha256") or "")
+    if not ref.startswith("file:") or not HEX64.fullmatch(expected):
+        raise ValueError("external-effect ZIP reference invalid")
+    meta=verify_manifest_zip(Path(ref.removeprefix("file:")),expected_plan_sha256=plan.sha256,require_external_instructions=True)
+    if meta["sha256"] != expected:
+        raise ValueError("external-effect ZIP differs from queued SHA-256")
+    return meta
+
+
+def ensure_chat_job(queue: QueueClient, plan: Plan, step: Step, research_meta: Mapping[str, Any], priority: int) -> dict[str, Any]:
+    jid=phase_job_id(plan,step.step_id,"chatgpt_sandbox")
+    existing=queue.get(jid)
+    if existing: return existing
+    prompt=chatgpt_prompt(plan,step,research_meta)
+    job=job_base(plan,step,"chatgpt_sandbox",provider="chatgpt.com",priority=priority,dependencies=[])
+    job.update({"prompt":prompt,"prompt_sha256":sha256_bytes(prompt.encode()),"reasoning_effort":"xhigh",
+                "assigned_employee":"ChatGPT chat-mode native sandbox",
+                "attachment_refs":[{"ref":"file:"+str(research_meta["path"]),"sha256":research_meta["sha256"]}]})
+    return queue.enqueue(job)
+
+
+def materialize_research_job(queue: QueueClient, plan: Plan, step: Step, priority: int, *, role: str, state_root: Path) -> dict[str, Any]:
+    jid=phase_job_id(plan,step.step_id,"research")
+    existing=queue.get(jid)
+    if existing: return existing
+    out_zip=state_root/plan.project_id/step.step_id/"research"/jid/"research.zip"
+    prompt=research_prompt(plan,step,role,out_zip)
+    job=job_base(plan,step,"research",provider="codex.research",priority=priority,dependencies=final_dependency_ids(plan,step))
+    job.update({"prompt":prompt,"prompt_sha256":sha256_bytes(prompt.encode()),"assigned_employee":role,"role":role})
+    return queue.enqueue(job)
+
+
+def ensure_external_job(queue: QueueClient, plan: Plan, step: Step, priority: int, work: Mapping[str,Any], *, state_root: Path, external_employee: str) -> dict[str,Any]:
+    jid=phase_job_id(plan,step.step_id,"external_effect")
+    existing=queue.get(jid)
+    if existing: return existing
+    effect_receipt=state_root/plan.project_id/step.step_id/"external_effect"/jid/"EXTERNAL_EFFECT_RESULT.json"
+    prompt=external_prompt(plan,step,Path(str(work["path"])),effect_receipt,external_employee)
+    job=job_base(plan,step,"external_effect",provider="codex.external-effect",priority=priority,dependencies=final_dependency_ids(plan,step))
+    job.update({"prompt":prompt,"prompt_sha256":sha256_bytes(prompt.encode()),"assigned_employee":external_employee,
+                "attachment_refs":[{"ref":"file:"+str(work["path"]),"sha256":work["sha256"]}]})
+    return queue.enqueue(job)
+
+
+def completed_prerequisites(queue: QueueClient, plan: Plan, step: Step) -> bool:
+    for jid in final_dependency_ids(plan,step):
+        row=queue.get(jid)
+        if not row or row.get("state") != "complete" or row.get("provider") != "codex.external-effect": return False
+        if not any(isinstance(e,dict) and e.get("kind")=="external_effect" and e.get("ref") for e in row.get("effect_evidence") or []): return False
+    return True
+
+
+def run_once(*, queue: QueueClient, plan: Plan, role: str, secretary: Path, state_root: Path, worker_id: str, manager: str, priority: int, external_employee: str, seed_step: str | None = None) -> dict[str,Any]:
+    verify_plan_revision(plan)
+    repo_path = Path(plan.source_ref.removeprefix("file:")).parent.parent
+    state_root.mkdir(parents=True,exist_ok=True)
+    action={"at":utc(),"project":plan.project_id,"plan_sha256":plan.sha256,"actions":[]}
+    # Materialize only newly dependency-eligible unchecked steps. Checked plan steps are inherited.
+    if seed_step and seed_step not in plan.by_id():
+        raise ValueError(f"unknown seed step: {seed_step}")
+    for step in plan.steps:
+        if seed_step and step.step_id != seed_step: continue
+        if step.checked or not completed_prerequisites(queue,plan,step): continue
+        rjob=materialize_research_job(queue,plan,step,priority,role=role,state_root=state_root)
+        action["actions"].append({"step":step.step_id,"phase":"research","state":rjob.get("state")})
+    # Reconcile research actions that crossed begin_effect before a crash/timeout. Never resend them.
+    pending_research=queue.post({"operation":"list_jobs","provider":"codex.research","state":"effect_pending","limit":100}).get("jobs") or []
+    for pending in pending_research:
+        payload=pending.get("payload") or {}
+        if (pending.get("plan_revision") or payload.get("plan_revision")) != plan.sha256: continue
+        step=plan.by_id().get(str(pending.get("taskflow_step") or payload.get("taskflow_step")))
+        if not step: continue
+        run_dir=state_root/plan.project_id/step.step_id/"research"/str(pending["id"]); out_zip=run_dir/"research.zip"
+        try:
+            if pending.get("claimed_by") != role or pending.get("assigned_employee") != role:
+                raise ValueError("research employee fence mismatch")
+            receipt_path=run_dir/"secretary_receipt.json"
+            if not secretary_succeeded(json.loads(receipt_path.read_text(encoding="utf-8"))):
+                raise ValueError("Codex invocation was not verified")
+            meta=verify_manifest_zip(out_zip,expected_plan_sha256=plan.sha256)
+        except Exception:
+            action["actions"].append({"step":step.step_id,"phase":"research_reconcile","ok":False,"state":"awaiting_readback"}); continue
+        evidence=[{"kind":"research_zip","ref":meta["sha256"],"path":meta["path"]}]
+        evidence.append({"kind":"research_invocation","ref":sha256_file(receipt_path),"path":str(receipt_path)})
+        done=queue.complete(pending,evidence)
+        committed=queue.get(str(pending["id"])) if done.get("ok") else None
+        readback_ok=bool(committed and committed.get("state")=="complete" and any(e.get("kind")=="research_zip" and e.get("ref")==meta["sha256"] for e in committed.get("effect_evidence") or [] if isinstance(e,dict)))
+        if readback_ok: ensure_chat_job(queue,plan,step,meta,priority)
+        action["actions"].append({"step":step.step_id,"phase":"research_reconcile","ok":readback_ok,"zip":meta["sha256"]})
+
+    # Research workers are generic D1 claims; this controller is their actuator.
+    rjob=queue.claim("codex.research",role)
+    if rjob:
+        step=plan.by_id().get(str(rjob.get("taskflow_step") or (rjob.get("payload") or {}).get("taskflow_step")))
+        if step and rjob.get("id") == phase_job_id(plan,step.step_id,"research") and rjob.get("plan_revision") == plan.sha256 and rjob.get("assigned_employee") == role:
+            begun=queue.begin(rjob)
+            if begun.get("ok"):
+                run_dir=state_root/plan.project_id/step.step_id/"research"/rjob["id"]
+                run_dir.mkdir(parents=True,exist_ok=True)
+                out_zip=run_dir/"research.zip"; prompt_path=run_dir/"prompt.md"
+                prompt_path.write_text(research_prompt(plan,step,role,out_zip),encoding="utf-8")
+                receipt=run_secretary(secretary,prompt_path,employee=role,manager=manager,repo_path=repo_path,phase="research")
+                atomic_json(run_dir/"secretary_receipt.json",receipt)
+                try:
+                    if not secretary_succeeded(receipt): raise ValueError("installed Codex invocation did not complete")
+                    meta=verify_manifest_zip(out_zip,expected_plan_sha256=plan.sha256)
+                    done=queue.complete(rjob,[{"kind":"research_zip","ref":meta["sha256"],"path":meta["path"]},{"kind":"research_invocation","ref":sha256_file(run_dir/"secretary_receipt.json")}])
+                    committed=queue.get(str(rjob["id"])) if done.get("ok") else None
+                    readback_ok=bool(committed and committed.get("state")=="complete" and any(e.get("kind")=="research_zip" and e.get("ref")==meta["sha256"] for e in committed.get("effect_evidence") or [] if isinstance(e,dict)))
+                    if readback_ok: ensure_chat_job(queue,plan,step,meta,priority)
+                    action["actions"].append({"step":step.step_id,"phase":"research_effect","ok":readback_ok,"zip":meta["sha256"]})
+                except Exception as exc:
+                    action["actions"].append({"step":step.step_id,"phase":"research_effect","ok":False,"error":f"{type(exc).__name__}:{exc}"})
+            else:
+                action["actions"].append({"step":step.step_id,"phase":"research_begin","ok":False,"error":begun.get("error") or "D1 rejected begin_effect"})
+        else:
+            action["actions"].append({"phase":"research_claim","ok":False,"error":"claimed job does not match plan and employee"})
+    # Advance completed ChatGPT phase jobs to an external-effect job. Never use ChatGPT completion as TaskFlow completion.
+    rows=queue.post({"operation":"list_jobs","provider":"chatgpt.com","state":"complete","limit":100}).get("jobs") or []
+    for cjob in rows:
+        payload=cjob.get("payload") or {}
+        if (cjob.get("phase") or payload.get("taskflow_phase")) != "chatgpt_sandbox" or (cjob.get("plan_revision") or payload.get("plan_revision")) != plan.sha256: continue
+        step=plan.by_id().get(str(cjob.get("taskflow_step") or payload.get("taskflow_step")))
+        if not step: continue
+        path=_artifact_from_chat_job(cjob)
+        if not path: continue
+        try:
+            meta=verify_manifest_zip(path,expected_plan_sha256=plan.sha256,require_external_instructions=True)
+            matching=[e for e in cjob.get("effect_evidence") or [] if isinstance(e,dict) and e.get("kind")=="chatgpt_sandbox_artifact" and e.get("path")==str(path) and e.get("ref")==meta["sha256"]]
+            if len(matching) != 1: raise ValueError("ChatGPT artifact evidence SHA mismatch")
+        except Exception as exc:
+            action["actions"].append({"step":step.step_id,"phase":"chatgpt_readback","ok":False,"error":f"{type(exc).__name__}:{exc}"}); continue
+        ejob=ensure_external_job(queue,plan,step,priority,meta,state_root=state_root,external_employee=external_employee)
+        action["actions"].append({"step":step.step_id,"phase":"external_effect","state":ejob.get("state"),"work_zip":meta["sha256"]})
+    # Reconcile external effects from their durable receipt before considering a new mutation.
+    pending_effects=queue.post({"operation":"list_jobs","provider":"codex.external-effect","state":"effect_pending","limit":100}).get("jobs") or []
+    for pending in pending_effects:
+        payload=pending.get("payload") or {}
+        if (pending.get("plan_revision") or payload.get("plan_revision")) != plan.sha256: continue
+        step=plan.by_id().get(str(pending.get("taskflow_step") or payload.get("taskflow_step")))
+        if not step: continue
+        receipt_path=state_root/plan.project_id/step.step_id/"external_effect"/str(pending["id"])/"EXTERNAL_EFFECT_RESULT.json"
+        try:
+            if pending.get("claimed_by") != external_employee or pending.get("assigned_employee") != external_employee:
+                raise ValueError("external-effect employee fence mismatch")
+            invocation_path=receipt_path.with_name("secretary_receipt.json")
+            if not secretary_succeeded(json.loads(invocation_path.read_text(encoding="utf-8"))):
+                raise ValueError("Codex invocation was not verified")
+            work=verified_work_attachment(pending,plan)
+            effect=verify_effect_receipt(receipt_path,plan=plan,step=step,work_sha256=work["sha256"])
+        except Exception:
+            action["actions"].append({"step":step.step_id,"phase":"external_effect_reconcile","ok":False,"state":"awaiting_readback"}); continue
+        evidence=[{"kind":"external_effect","ref":effect["effect_ref"],"environment":effect["environment"]},{"kind":"external_effect_receipt","ref":effect["receipt_sha256"],"path":str(receipt_path)},{"kind":"chatgpt_work_zip","ref":work["sha256"],"path":work["path"]}]
+        done=queue.complete(pending,evidence); committed=queue.get(str(pending["id"])) if done.get("ok") else None
+        readback_ok=bool(committed and committed.get("state")=="complete")
+        action["actions"].append({"step":step.step_id,"phase":"external_effect_reconcile","ok":bool(done.get("ok") and readback_ok),"central_readback_verified":readback_ok,"effect_ref":effect["effect_ref"]})
+
+    ejob=queue.claim("codex.external-effect",external_employee)
+    if ejob:
+        payload=ejob.get("payload") or {}; step=plan.by_id().get(str(ejob.get("taskflow_step") or payload.get("taskflow_step")))
+        if step and ejob.get("id") == phase_job_id(plan,step.step_id,"external_effect") and ejob.get("plan_revision") == plan.sha256 and ejob.get("assigned_employee") == external_employee:
+            try: work=verified_work_attachment(ejob,plan)
+            except Exception as exc:
+                action["actions"].append({"step":step.step_id,"phase":"external_preflight","ok":False,"error":f"{type(exc).__name__}:{exc}"}); return action
+            begun=queue.begin(ejob)
+            if begun.get("ok"):
+                run_dir=state_root/plan.project_id/step.step_id/"external_effect"/ejob["id"]; run_dir.mkdir(parents=True,exist_ok=True)
+                effect_receipt=run_dir/"EXTERNAL_EFFECT_RESULT.json"; prompt_path=run_dir/"prompt.md"
+                prompt_path.write_text(external_prompt(plan,step,Path(work["path"]),effect_receipt,external_employee),encoding="utf-8")
+                invocation=run_secretary(secretary,prompt_path,employee=external_employee,manager=manager,repo_path=repo_path,phase="external_effect")
+                atomic_json(run_dir/"secretary_receipt.json",invocation)
+                try:
+                    if not secretary_succeeded(invocation): raise ValueError("installed Codex invocation did not complete")
+                    effect=verify_effect_receipt(effect_receipt,plan=plan,step=step,work_sha256=work["sha256"])
+                    evidence=[{"kind":"external_effect","ref":effect["effect_ref"],"environment":effect["environment"]},{"kind":"external_effect_receipt","ref":effect["receipt_sha256"],"path":str(effect_receipt)},{"kind":"chatgpt_work_zip","ref":work["sha256"],"path":work["path"]}]
+                    done=queue.complete(ejob,evidence)
+                    committed=queue.get(str(ejob["id"])) if done.get("ok") else None
+                    readback_ok=bool(committed and committed.get("state")=="complete" and any(isinstance(e,dict) and e.get("kind")=="external_effect" and e.get("ref")==effect["effect_ref"] for e in committed.get("effect_evidence") or []))
+                    action["actions"].append({"step":step.step_id,"phase":"external_effect_complete","ok":bool(done.get("ok") and readback_ok),"central_readback_verified":readback_ok,"effect_ref":effect["effect_ref"]})
+                except Exception as exc:
+                    action["actions"].append({"step":step.step_id,"phase":"external_effect_complete","ok":False,"error":f"{type(exc).__name__}:{exc}"})
+            else:
+                action["actions"].append({"step":step.step_id,"phase":"external_effect_begin","ok":False,"error":begun.get("error") or "D1 rejected begin_effect"})
+        else:
+            action["actions"].append({"phase":"external_effect_claim","ok":False,"error":"claimed job does not match plan and employee"})
+    return action
+
+
+def main(argv: Sequence[str] | None=None) -> int:
+    p=argparse.ArgumentParser(); p.add_argument("--plan",required=True); p.add_argument("--role",default="Principal Platform Systems Engineer")
+    p.add_argument("--secretary",default=str(DEFAULT_SECRETARY)); p.add_argument("--state-root",default=str(DEFAULT_STATE_ROOT)); p.add_argument("--worker-id",default="taskflow-phase-controller")
+    p.add_argument("--manager",default="agent-memory-manager"); p.add_argument("--priority",type=int,default=50); p.add_argument("--external-employee",default="Codex external-effect employee"); p.add_argument("--seed-step",default="")
+    args=p.parse_args(argv); plan=parse_plan(Path(args.plan)); queue=QueueClient(load_sender())
+    result=run_once(queue=queue,plan=plan,role=args.role,secretary=Path(args.secretary),state_root=Path(args.state_root),worker_id=args.worker_id,manager=args.manager,priority=args.priority,external_employee=args.external_employee,seed_step=args.seed_step or None)
+    print(json.dumps(result,indent=2,sort_keys=True))
+    return 1 if any(row.get("ok") is False for row in result["actions"]) else 0
+
+if __name__ == "__main__": raise SystemExit(main())

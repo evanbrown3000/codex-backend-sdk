@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""Discover the newest OpenAI privacy-export link from the signed-in Gmail.
+
+This reads one Gmail inbox bootstrap and its exact export message, using the
+existing Chrome account session. The signed URL is written only to a private
+file; it is never printed or included in a log. Run infrequently (daily), not
+once per conversation. It does not request an export or send a Chat prompt.
+"""
+from __future__ import annotations
+
+import argparse
+from html.parser import HTMLParser
+from importlib.machinery import SourceFileLoader
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import sqlite3
+import tempfile
+from urllib.parse import urlparse
+
+HERE = Path(__file__).resolve().parent
+sender = SourceFileLoader("chatmode_sender_export_url", str(HERE / "cognilode-b4pt0r-chatmode")).load_module()
+PROFILE = Path.home() / ".config/google-chrome/Default"
+
+
+class Links(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.href = None
+        self.label = []
+        self.found = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            self.href = dict(attrs).get("href")
+            self.label = []
+
+    def handle_data(self, data):
+        if self.href is not None:
+            self.label.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self.href is not None:
+            if "Download data export" in " ".join(self.label):
+                self.found.append(self.href)
+            self.href = None
+            self.label = []
+
+
+def google_session():
+    from curl_cffi import requests
+    secret = sender._chrome_secret()
+    fd, name = tempfile.mkstemp(prefix="cognilode-google-cookies-", suffix=".sqlite")
+    os.close(fd)
+    shutil.copy2(PROFILE / "Cookies", name)
+    session = requests.Session(impersonate=sender.DEFAULT_IMPERSONATE, timeout=60)
+    count = 0
+    try:
+        with sqlite3.connect(name) as db:
+            for host, cookie, value, encrypted, path, secure in db.execute(
+                "SELECT host_key,name,value,encrypted_value,path,is_secure FROM cookies "
+                "WHERE host_key LIKE '%google.com'"):
+                try:
+                    plain = sender._decrypt_cookie(host, bytes(encrypted), value, secret)
+                except Exception:
+                    continue
+                if plain:
+                    session.cookies.set(cookie, plain, domain=host, path=path, secure=bool(secure))
+                    count += 1
+    finally:
+        os.unlink(name)
+    if not count:
+        raise RuntimeError("signed-in Google cookie session unavailable")
+    return session
+
+
+def discover(session):
+    page = session.get("https://mail.google.com/mail/u/0/", timeout=60)
+    page.raise_for_status()
+    if urlparse(page.url).hostname != "mail.google.com":
+        raise RuntimeError("Gmail session redirected outside Gmail")
+    if "evanbrown.engineering@gmail.com" not in page.text:
+        raise RuntimeError("Gmail account identity does not match expected export account")
+    ids = list(dict.fromkeys(re.findall(
+        r"thread-f:(\d+).{0,700}?ChatGPT - Your data export is ready",
+        page.text, re.S)))
+    if not ids:
+        raise FileNotFoundError("no export-ready message in bounded Gmail inbox view")
+    for thread in ids:
+        printable = session.get("https://mail.google.com/mail/u/0/", params={
+            "ui": "2", "view": "pt", "search": "all", "th": format(int(thread), "x")}, timeout=60)
+        if printable.status_code != 200 or "noreply@tm.openai.com" not in printable.text:
+            continue
+        links = Links()
+        links.feed(printable.text)
+        for link in links.found:
+            parsed = urlparse(link)
+            if (parsed.scheme == "https" and parsed.hostname == "chatgpt.com"
+                and parsed.path == "/backend-api/estuary/content"
+                and parsed.query):
+                return thread, link
+    raise FileNotFoundError("export-ready message lacks a verified download link")
+
+
+def write_private(path: Path, value: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    with temp.open("w", encoding="utf-8") as out:
+        out.write(value + "\n")
+        out.flush()
+        os.fsync(out.fileno())
+    os.chmod(temp, 0o600)
+    os.replace(temp, path)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--url-file", type=Path, required=True)
+    p.add_argument("--candidate-file", type=Path, default=None)
+    args = p.parse_args()
+    thread, url = discover(google_session())
+    if args.url_file.is_file():
+        current = args.url_file.read_text(encoding="utf-8").strip()
+        if current == url:
+            print(json.dumps({"state": "same_export_ready_email", "thread": thread}))
+            return
+        if args.candidate_file is None:
+            raise RuntimeError("new export URL requires a separate candidate file")
+        write_private(args.candidate_file, url)
+        print(json.dumps({"state": "new_export_candidate_held", "thread": thread}))
+        return
+    write_private(args.url_file, url)
+    print(json.dumps({"state": "export_url_discovered", "thread": thread}))
+
+
+if __name__ == "__main__":
+    main()

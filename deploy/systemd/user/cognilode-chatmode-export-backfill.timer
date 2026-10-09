@@ -1,0 +1,12 @@
+[Unit]
+Description=Resume bounded privacy-export shard cursor
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=2min
+AccuracySec=30s
+Unit=cognilode-chatmode-export-backfill.service
+
+[Install]
+WantedBy=timers.target
+

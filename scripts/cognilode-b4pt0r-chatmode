@@ -729,7 +729,9 @@ def admit_central_conversation(*, result_id: str, prompt: str, result: dict, att
         # A broken SSE can still leave a complete provider terminal in the
         # exact-turn hydration. Preserve its observed model/effort provenance.
         tool_history["provider_model_receipt"] = result.get("provider_model_receipt")
-    user_event = {"role": "user", "provider_message_id": "b4pt0r-user:" + result_id,
+    export_bound = result.get("identity_source") == "privacy_export_exact_prompt_message"
+    user_event = {"role": "user", "provider_message_id":
+                  str(result.get("user_message_id")) if export_bound else "b4pt0r-user:" + result_id,
                   "source_index": -1, "content": prompt, "authorship": "operator-authored",
                   "source_content_complete": True}
     terminal_event = {"role": "assistant", "provider_message_id": str(result.get("terminal_assistant_message_id") or "b4pt0r-terminal:" + result_id),
@@ -740,7 +742,8 @@ def admit_central_conversation(*, result_id: str, prompt: str, result: dict, att
         "provider": "chatgpt.com",
         "conversation_id": conversation_id,
         "title": "B4PT0R Chat-mode Prompt Dispatch",
-        "prompt_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(result.get("started_at") or time.time()))),
+        "prompt_at": (str(result.get("user_created_at")) if export_bound else
+                      time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(result.get("started_at") or time.time())))),
         "response_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(result.get("completed_at") or time.time()))),
         "capture": {
             "prompt": True,
@@ -750,6 +753,13 @@ def admit_central_conversation(*, result_id: str, prompt: str, result: dict, att
             "uploaded_files": True,
             "downloadable_files": True,
             "provider_sse_tool_history": bool(raw_sha),
+            **({"source_kind": "privacy_export_with_exact_live_provider_readback",
+                "source_content_complete": True,
+                "source_response_complete": True,
+                "export_member": result.get("export_member"),
+                "export_member_crc32": result.get("export_member_crc32"),
+                "export_etag": result.get("export_etag")}
+               if export_bound else {}),
         },
         "prompt": prompt,
         "response_excerpt": assistant,
@@ -759,7 +769,7 @@ def admit_central_conversation(*, result_id: str, prompt: str, result: dict, att
         "provider_structured_uploads": attachments,
         "downloadable_files": list(result.get("downloaded_files") or []),
         "conversation_urls": [f"https://chatgpt.com/c/{conversation_id}"] if conversation_id else [],
-        "source": "b4pt0r-chatmode-hot-path",
+        "source": "privacy-export-exact-live-readback" if export_bound else "b4pt0r-chatmode-hot-path",
         "raw_expansion_handle": f"b4pt0r-chatmode:{result_id}",
         "read_receipt": {
             "record_id": result_id,

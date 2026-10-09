@@ -1337,6 +1337,60 @@ def fence(job: dict) -> dict:
             "lease_token": job["lease_token"], "lease_generation": job["lease_generation"]}
 
 
+def complete_legacy_export_match(job: dict, value: dict) -> bool:
+    """Finish only a migrated text job bound by export and exact live readback.
+
+    These old status jobs predate the one-ZIP TaskFlow contract.  Their provider
+    effect can be recognized without inventing the newer deterministic message ID.
+    """
+    if (job.get("state") != "effect_pending"
+        or job.get("migrated_from") != "cloudflare-kv-agent-memory-prompt-job"
+        or job.get("migration_hold_reason") != "legacy_job_may_have_started_provider_effect"
+        or job.get("phase") is not None
+        or value.get("identity_source") != "privacy_export_exact_prompt_message"
+        or value.get("queue_job_id") != job.get("id")
+        or value.get("prompt_sha256") != job.get("prompt_sha256")
+        or value.get("collection_method") != "read_only_exact_branch_hydration"
+        or value.get("assistant_terminal") is not True
+        or not value.get("terminal_assistant_text")
+        or not value.get("terminal_assistant_message_id")
+        or not value.get("user_message_id")):
+        return False
+    cid = str(value.get("conversation_id") or "")
+    central = value.get("central_conversation_store") or {}
+    if not cid or central.get("conversation_id") != cid or central.get("central_readback_verified") is not True:
+        return False
+    collected = sender.DEFAULT_OUTPUT_ROOT / (job_stem(job["id"]) + ".collected.json")
+    try:
+        row = json.loads(collected.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if (row.get("complete") is not True or row.get("prompt_sha256") != job.get("prompt_sha256")
+        or hashlib.sha256(str(row.get("prompt") or "").encode()).hexdigest() != job.get("prompt_sha256")):
+        return False
+    evidence = [{"kind": "provider_conversation", "ref": cid},
+                {"kind": "provider_user_message", "ref": str(value["user_message_id"])},
+                {"kind": "central_conversation_readback", "ref": cid},
+                {"kind": "privacy_export_exact_match", "ref": str(value.get("export_member_crc32") or ""),
+                 "prompt_sha256": job["prompt_sha256"],
+                 "export_member": str(value.get("export_member") or ""),
+                 "export_etag": str(value.get("export_etag") or "")}]
+    reply = sender.operator_memory_post({"operation": "complete_job", **fence(job),
+                                          "conversation_id": cid, "effect_evidence": evidence})
+    if not reply.get("ok"):
+        event("legacy_export_completion_retry_required", job_id=job["id"], error=reply.get("error"))
+        return False
+    committed = sender.operator_memory_post({"operation": "get_job", "job_id": job["id"]}).get("job") or {}
+    if committed.get("state") != "complete" or committed.get("conversation_id") != cid:
+        event("legacy_export_completion_readback_retry_required", job_id=job["id"])
+        return False
+    atomic_json(job_state_path(job["id"]), {"state": "complete", "job_id": job["id"],
+                                           "conversation_id": cid,
+                                           "identity_source": "privacy_export_exact_prompt_message"})
+    event("legacy_export_job_completed", job_id=job["id"], conversation_id=cid)
+    return True
+
+
 def complete_from_result(job: dict, value: dict) -> bool:
     checked = validated_result(value)
     if not checked:
@@ -1384,6 +1438,8 @@ def recover(job: dict, device_id: str = DEVICE_ID) -> None:
     if value and definitive_rejection(value):
         requeue_definitive_rejection(job, value)
         return
+    if value and complete_legacy_export_match(job, value):
+        return
     if value and complete_from_result(job, value):
         return
     if value and validated_result(value):
@@ -1401,21 +1457,26 @@ def recover(job: dict, device_id: str = DEVICE_ID) -> None:
         # burns rate limit and can never establish the old turn's identity.
         # Keep D1 effect_pending until a real old receipt/export binds it.
         now = time.time()
-        if now < float(prior_state.get("legacy_identity_next_check_at") or 0):
-            return
-        custody = {}
-        try:
-            custody = (send_custody(job) or {}).get("custody") or {}
-        except Exception:
-            pass
         local = {}
         if receipt.is_file():
             try:
                 local = json.loads(receipt.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 pass
+        export_bound = (local.get("identity_source") == "privacy_export_exact_prompt_message"
+                        and local.get("queue_job_id") == job["id"]
+                        and local.get("prompt_sha256") == job.get("prompt_sha256")
+                        and bool(local.get("user_message_id"))
+                        and bool(local.get("conversation_id")))
+        if not export_bound and now < float(prior_state.get("legacy_identity_next_check_at") or 0):
+            return
+        custody = {}
+        try:
+            custody = (send_custody(job) or {}).get("custody") or {}
+        except Exception:
+            pass
         expected = stable_user_message_id(str(job["id"]))
-        if (custody.get("user_message_id") != expected
+        if (not export_bound and custody.get("user_message_id") != expected
             and local.get("user_message_id") != expected):
             atomic_json(state_path, {**prior_state, "state": "legacy_identity_missing",
                 "job_id": job["id"], "legacy_identity_next_check_at": now + 6 * 3600,
@@ -1453,7 +1514,7 @@ def recover(job: dict, device_id: str = DEVICE_ID) -> None:
             fresh_collection = False
         value = result_for_job(job["id"])
         if value:
-            if complete_from_result(job, value) or validated_result(value):
+            if complete_legacy_export_match(job, value) or complete_from_result(job, value) or validated_result(value):
                 return
         if terminal_deliverable_candidate(job, value):
             now = time.time()
@@ -1472,6 +1533,19 @@ def recover(job: dict, device_id: str = DEVICE_ID) -> None:
                                      "collector_state": outcomes[0].get("state") if collection.returncode == 0 and outcomes else "collector_error"})
             event("terminal_deliverable_collection_wait", job_id=job["id"], conversation_id=value["conversation_id"],
                   deadline_at=deadline, next_collect_at=next_at, fresh_collection=bool(latest_fresh))
+            return
+        # The export supplied the original user-message and conversation IDs.
+        # A deferred exact GET needs only the collector's Retry-After cadence;
+        # broad recent-index reconciliation cannot improve that identity.
+        try:
+            bound = json.loads(receipt.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            bound = {}
+        if (bound.get("identity_source") == "privacy_export_exact_prompt_message"
+            and bound.get("queue_job_id") == job["id"]
+            and bound.get("prompt_sha256") == job.get("prompt_sha256")):
+            event("legacy_export_exact_collection_pending", job_id=job["id"],
+                  collector_state=outcomes[0].get("state") if outcomes else "collector_deferred")
             return
     reconcile_ambiguous(job, device_id)
 

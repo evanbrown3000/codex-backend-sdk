@@ -94,10 +94,12 @@ def main() -> int:
         if candidate.is_file() and (synced / ".git").exists():
             current = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"],
                                      capture_output=True, text=True, check=False).stdout.strip()
-            newer = subprocess.run(["git", "-C", str(synced), "merge-base", "--is-ancestor",
-                                    current, "HEAD"], stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL, check=False).returncode == 0
-            if current and newer and candidate.resolve() != Path(__file__).resolve():
+            selected = subprocess.run(["git", "-C", str(synced), "rev-parse", "HEAD"],
+                                      capture_output=True, text=True, check=False).stdout.strip()
+            remote_main = subprocess.run(["git", "-C", str(synced), "rev-parse", "origin/main"],
+                                         capture_output=True, text=True, check=False).stdout.strip()
+            if (current and selected and selected == remote_main and selected != current
+                    and candidate.resolve() != Path(__file__).resolve()):
                 os.execve(sys.executable, [sys.executable, str(candidate)],
                           {**os.environ, "COGNILODE_BOOTSTRAP_FROM_SYNC": "1"})
     migrate_previous_state(Path(os.environ.get("COMPANY_LEGACY_DATA_ROOT", str(Path.home() / ".local/share/cognilode"))), runtime)

@@ -27,7 +27,7 @@ class FakeBridge:
     def __init__(self, refs):
         self.refs = refs
 
-    def shared_stock_census(self, post, minimum=500):
+    def shared_stock_census(self, post, minimum=500, **_kwargs):
         return {"multi_year_ready": len(self.refs) >= minimum,
                 "distinct_complete": len(self.refs), "span_days": 800,
                 "verified_source_refs": self.refs}

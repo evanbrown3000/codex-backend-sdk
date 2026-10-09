@@ -327,11 +327,14 @@ def verify_output(post: Callable[[dict[str, Any]], Mapping[str, Any]], job: Mapp
     target_id = str((job.get("decisionx") or {}).get("target_job_id") or "")
     target_job_result = post({"operation": "get_job", "job_id": target_id})
     target_job = target_job_result.get("job") or {}
+    if not target_job_result.get("ok") or target_job.get("id") != target_id:
+        raise ValueError("target D1 job read unavailable")
     target_read = post({"operation": "read", "provider": target_job.get("provider"),
                         "conversation_id": target_job.get("conversation_id")})
     target = target_read.get("conversation") or {}
-    if (not target_job_result.get("ok") or target_job.get("id") != target_id
-        or target_job.get("state") != "complete" or not target_read.get("ok")
+    if not target_read.get("ok"):
+        raise ValueError("target shared conversation read unavailable")
+    if (target_job.get("state") != "complete"
         or (target.get("provider"), target.get("conversation_id")) !=
            (target_job.get("provider"), target_job.get("conversation_id"))
         or any(advice.get(field) != target.get(key) for field, key in

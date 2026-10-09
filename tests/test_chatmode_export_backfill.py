@@ -312,7 +312,8 @@ def test_legacy_scope_repair_keeps_exact_events_and_drive_capture(monkeypatch):
 
 
 def test_legacy_scope_receipt_cursor_replays_one_member_without_new_admission(monkeypatch, tmp_path):
-    rows = [{"id": f"6ab2d995-14cc-83e9-b8e3-43d389f9a51{i}", "mapping": {}} for i in range(2)]
+    rows = [{"id": f"6ab2d995-14cc-83e9-b8e3-43d389f9a51{i}",
+             "create_time": 1.5 + i, "mapping": {}} for i in range(2)]
     archive_path = tmp_path / "source.zip"
     with zipfile.ZipFile(archive_path, "w") as archive:
         archive.writestr("conversations-150.json", json.dumps(rows))

@@ -28,6 +28,47 @@ SUPERVISORS: list[threading.Thread] = []
 SOURCE_ROOT = Path(os.environ.get("COGNILODE_COMPANY_SOURCE_ROOT", "/runtime/source"))
 
 
+def provider_generation_environment(interpreter: Path) -> dict[str, str]:
+    """Fence local provider brokers to this immutable SDK/runtime pair."""
+    source = HERE.parent.resolve()
+    transport = source / "scripts/cognilode-provider-transport"
+    transport_version = hashlib.sha256(transport.read_bytes()).hexdigest()
+    source_revision = source.name
+    runtime_python = str(interpreter.resolve())
+    runtime_fingerprint = hashlib.sha256(
+        f"{source_revision}|{runtime_python}".encode()
+    ).hexdigest()
+    fence_identity = hashlib.sha256(
+        f"{source_revision}|{transport_version}|{runtime_fingerprint}".encode()
+    ).hexdigest()
+    generation_id = hashlib.sha256(
+        f"{source_revision}|{fence_identity}|{runtime_fingerprint}|{transport_version}".encode()
+    ).hexdigest()
+    root = Path(os.environ.get(
+        "COGNILODE_GENERATION_MANIFEST_ROOT", "/runtime/provider-generations"
+    ))
+    root.mkdir(parents=True, exist_ok=True)
+    manifest = root / f"{generation_id}.json"
+    if not manifest.is_file():
+        temporary = manifest.with_suffix(f".tmp-{os.getpid()}")
+        temporary.write_text(json.dumps({
+            "generation_id": generation_id,
+            "source_revision": source_revision,
+            "runtime_fingerprint": runtime_fingerprint,
+            "provider_transport_version": transport_version,
+            "fence_identity": fence_identity,
+            "runtime_python": runtime_python,
+            "executable_root": str(source),
+        }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        temporary.replace(manifest)
+    return {
+        "COGNILODE_GENERATION_MANIFEST": str(manifest),
+        "COGNILODE_RUNTIME_GENERATION_FINGERPRINT": runtime_fingerprint,
+        "COGNILODE_PROVIDER_TRANSPORT_VERSION": transport_version,
+        "COGNILODE_GENERATION_FENCE_IDENTITY": fence_identity,
+    }
+
+
 def stop(_signal, _frame):
     global STOP
     STOP = True
@@ -212,6 +253,7 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
     )
     provider_worker = HERE / "cognilode-provider-queue-actuator"
     if provider_worker.is_file() and computerusex.is_dir():
+        interpreter = Path(CLI.rsplit("/", 1)[0] + "/python")
         pythonpath = str(computerusex)
         inherited = os.environ.get("PYTHONPATH", "")
         if inherited:
@@ -222,11 +264,13 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
             # later platforms incapable of consuming unrelated queued work
             # until every predecessor has produced accepted provider proof.
             if provider in requested or acceptance_seed.is_file():
+                worker_environment = {"PYTHONPATH": pythonpath}
+                worker_environment.update(provider_generation_environment(interpreter))
                 workers.append(([
-                    str(CLI.rsplit("/", 1)[0] + "/python"), str(provider_worker),
+                    str(interpreter), str(provider_worker),
                     "--provider", provider,
                     "--device-id", os.environ.get("COGNILODE_ENVIRONMENT_ID", "company-container"),
-                ], {"PYTHONPATH": pythonpath}))
+                ], worker_environment))
     return workers
 
 

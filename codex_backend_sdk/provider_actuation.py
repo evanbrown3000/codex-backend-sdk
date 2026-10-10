@@ -541,7 +541,7 @@ def configure_default_actuator(actuator: UnifiedProviderActuator) -> None:
 def prompt(
     provider: str,
     conversation: str | None,
-    prompt_text: str,
+    prompt: str,
     attachments: Sequence[str] = (),
     **options: Any,
 ) -> dict[str, Any]:
@@ -554,7 +554,7 @@ def prompt(
     request = ProviderPromptRequest(
         provider=provider,
         conversation_id=conversation,
-        prompt=prompt_text,
+        prompt=prompt,
         attachments=tuple(attachments),
         parent_operation=parent,
         **options,

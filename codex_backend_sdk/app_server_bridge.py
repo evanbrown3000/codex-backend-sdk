@@ -230,10 +230,16 @@ class Bridge:
         # Disable the older Modified-Codex Python prompter inside the delegate;
         # otherwise two independent bridges compete and the inner one calls a
         # retired operator route before native Codex can answer.
-        command = (
+        local_command = (
             "env",
             "CODEX_UNIFIED_PROMPTER=0",
             self.native_executable,
+            *self.native_args,
+        )
+        remote_command = (
+            "env",
+            "CODEX_UNIFIED_PROMPTER=0",
+            os.environ.get("B4PT0R_REMOTE_CODEX_EXECUTABLE", "codex"),
             *self.native_args,
         )
         with self._state_lock:
@@ -243,13 +249,13 @@ class Bridge:
                 prior.close()
             if environment_id == "local":
                 self._transport = LocalAppServerTransport(
-                    command, handler=self._native_message, stderr_handler=self.stderr
+                    local_command, handler=self._native_message, stderr_handler=self.stderr
                 )
             else:
                 self._transport = RemoteAppServerTransport(
                     self.remote,
                     environment_id,
-                    command,
+                    remote_command,
                     handler=self._native_message,
                     stderr_handler=self.stderr,
                 )

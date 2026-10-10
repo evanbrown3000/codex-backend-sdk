@@ -15,7 +15,10 @@ REMOTE=os.environ.get('COGNILODE_REMOTE_SHELL_ENDPOINT',BASE+'/api/operator/remo
 
 def post(url, token, payload, timeout=35):
     request=urllib.request.Request(url,data=json.dumps(payload,separators=(',',':')).encode(),
-        headers={'Authorization':'Bearer '+token,'Content-Type':'application/json','Accept':'application/json'},method='POST')
+        headers={'Authorization':'Bearer '+token,'Content-Type':'application/json',
+                 'Accept':'application/json,text/plain,*/*',
+                 'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36',
+                 'Origin':BASE,'Referer':BASE+'/'},method='POST')
     with urllib.request.urlopen(request,timeout=timeout) as response:
         return json.load(response)
 

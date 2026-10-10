@@ -34,7 +34,8 @@ def aws(*args: str, allowed_missing: bool = False) -> dict:
 
 
 def main() -> None:
-    if not re.fullmatch(r'arn:aws:iam::\d{12}:role/[A-Za-z0-9+=,.@_/-]+', TRUST):
+    if (not re.fullmatch(r'arn:aws:iam::\d{12}:role/[A-Za-z0-9+=,.@_/-]+', TRUST)
+            or not TRUST.startswith(f'arn:aws:iam::{ACCOUNT}:role/')):
         raise RuntimeError('COGNILODE_AWS_BROKER_TRUST_PRINCIPAL must identify one IAM role')
     if not re.fullmatch(r'\d{12}', ACCOUNT) or any(
         not re.fullmatch(r'[a-z0-9.-]+', bucket) for bucket in (BUCKET, MEMORY_BUCKET)):
@@ -62,6 +63,15 @@ def main() -> None:
             '--description', 'Short-lived company container sessions constrained by per-purpose session policy')
     aws('iam', 'put-role-policy', '--role-name', ROLE,
         '--policy-name', 'CognilodeCompanyScopedResources', '--policy-document', policy)
+    # The instance role needs an identity-side grant to assume exactly this
+    # broker role. Do not grant wildcards or access keys to the node itself.
+    source_role_name = TRUST.rsplit('/', 1)[-1]
+    assume_policy = json.dumps({'Version': '2012-10-17', 'Statement': [{
+        'Effect': 'Allow', 'Action': 'sts:AssumeRole',
+        'Resource': f'arn:aws:iam::{ACCOUNT}:role/{ROLE}'}]}, separators=(',', ':'))
+    aws('iam', 'put-role-policy', '--role-name', source_role_name,
+        '--policy-name', 'CognilodeAssumeScopedBrokerOnly',
+        '--policy-document', assume_policy)
     print(f'arn:aws:iam::{ACCOUNT}:role/{ROLE}')
 
 

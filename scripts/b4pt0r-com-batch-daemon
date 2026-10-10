@@ -103,10 +103,15 @@ def supervise(program: list[str], extra_environment: dict[str, str] | None = Non
             time.sleep(1)
         if process.poll() is None:
             process.terminate()
+            worker_name = Path(selected[1]).name if len(selected) > 1 else ""
+            mutation_worker = worker_name in {
+                "cognilode-provider-queue-actuator", "cognilode-chatmode-queue-worker",
+            }
+            drain_seconds = (max(300, float(os.environ.get(
+                "COGNILODE_PROVIDER_GENERATION_DRAIN_SECONDS", "2700"
+            ))) if mutation_worker else 30.0)
             try:
-                process.wait(timeout=max(300, float(os.environ.get(
-                    "COGNILODE_PROVIDER_GENERATION_DRAIN_SECONDS", "2700"
-                ))))
+                process.wait(timeout=drain_seconds)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()

@@ -90,10 +90,34 @@ def _sdk_worker_generation(program: list[str]) -> tuple[list[str], str]:
     return resolved, signature
 
 
+def _onboarding_ready(program: list[str]) -> bool:
+    """Expose provider actuators only in the mandated acceptance order."""
+    if "--provider" not in program:
+        return True
+    provider = program[program.index("--provider") + 1]
+    order = ("chatgpt.com", "gemini.com", "claude.com", "anthropic.com")
+    if provider not in order or provider == order[0]:
+        return True
+    proof = Path(os.environ.get(
+        "COGNILODE_PROVIDER_ACCEPTANCE_ROOT", "/runtime/area1-acceptance"
+    )) / "four-provider-proof.json"
+    try:
+        record = json.loads(proof.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    completed = {str(row.get("provider") or "") for row in record.get("providers") or []
+                 if isinstance(row, dict)}
+    return all(prior in completed for prior in order[:order.index(provider)])
+
+
 def supervise(program: list[str], extra_environment: dict[str, str] | None = None) -> None:
     environment = os.environ.copy()
     environment.update(extra_environment or {})
     while not STOP:
+        while not STOP and not _onboarding_ready(program):
+            time.sleep(5)
+        if STOP:
+            return
         selected, signature = _sdk_worker_generation(program)
         worker_name = Path(selected[1]).name if len(selected) > 1 else "external"
         log_root = ROOT / "supervisor-logs"
@@ -186,7 +210,11 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
         if inherited:
             pythonpath += os.pathsep + inherited
         for provider in ("chatgpt.com", "gemini.com", "claude.com", "anthropic.com"):
-            if provider in requested:
+            # The acceptance process unlocks these workers one at a time.
+            # Listing all four here is safe because `_onboarding_ready` keeps
+            # later platforms incapable of consuming unrelated queued work
+            # until every predecessor has produced accepted provider proof.
+            if provider in requested or acceptance_seed.is_file():
                 workers.append(([
                     str(CLI.rsplit("/", 1)[0] + "/python"), str(provider_worker),
                     "--provider", provider,

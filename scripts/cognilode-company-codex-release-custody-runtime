@@ -54,12 +54,15 @@ def reap_orphaned_publications() -> None:
             fields = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
             state, ppid, pgid = fields[0], int(fields[1]), int(fields[2])
             argv = (entry / 'cmdline').read_bytes().decode(errors='replace').split('\0')
+            comm = (entry / 'comm').read_text().strip()
         except (OSError, ValueError, IndexError):
             continue
-        if (ppid != 1 or pgid != 1 or len(argv) < 4 or
-                not any(arg.endswith('/aws') for arg in argv[:3]) or 's3api' not in argv or
-                'put-object' not in argv or BUCKET not in argv or
-                not any(arg.startswith('codex-releases/') for arg in argv)):
+        legacy_aws_zombie = state == 'Z' and comm == 'aws'
+        legacy_aws_live = (len(argv) >= 4 and
+                           any(arg.endswith('/aws') for arg in argv[:3]) and
+                           's3api' in argv and 'put-object' in argv and BUCKET in argv and
+                           any(arg.startswith('codex-releases/') for arg in argv))
+        if ppid != 1 or pgid != 1 or not (legacy_aws_zombie or legacy_aws_live):
             continue
         pid = int(entry.name)
         if state == 'Z':

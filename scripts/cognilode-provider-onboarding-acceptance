@@ -185,6 +185,7 @@ def main() -> int:
         "schema": "cognilode.four_provider_acceptance.v1", "providers": []
     }
     proof.setdefault("rejected_attempts", [])
+    proof.setdefault("inflight", {})
     # A source cutover may inherit proof written by an older acceptance
     # generation.  Never grandfather a row that lacks the exact provider
     # identities or the required physical evidence; demote it to an attempt
@@ -234,22 +235,27 @@ def main() -> int:
                 packet_identity.update(hashlib.sha256(Path(inherited_path).read_bytes()).digest())
             request_id = (f"area1-sequential-{provider.split('.')[0]}-attempt-{attempt}-"
                           + packet_identity.hexdigest()[:12])
-            queued = client.send_provider(
-                provider=provider, prompt=authored, attachments=tuple(inherited), request_id=request_id,
-                project="unified-provider-actuation", role="provider-implementation-worker",
-                source="area1-sequential-onboarding", prompt_authority="taskflow_plan", priority=100_000,
-                model="gpt-5.6-sol" if provider == "chatgpt.com" else None,
-                effort="max" if provider == "chatgpt.com" else None, collect_artifacts=True,
-                parent_operation={"operation_id": "area1-four-provider-acceptance",
-                                  "automation_order": 3, "kind": "taskflow_plan"},
-            )
-            # Acceptance is an explicit bootstrap operation, not ordinary
-            # production cadence.  Release exactly one preserved biological
-            # slot through the scheduler rather than mutating clocks or
-            # waiting behind an unrelated historical rest interval.
-            scheduler_call({"operation": "rhythm_fast_forward", "provider": provider, "slots": 1})
-            result = client.wait(str(queued.get("job_id") or queued.get("job", {}).get("id") or request_id))
+            job_id = str(proof["inflight"].get(provider) or "")
+            if not job_id:
+                queued = client.send_provider(
+                    provider=provider, prompt=authored, attachments=tuple(inherited), request_id=request_id,
+                    project="unified-provider-actuation", role="provider-implementation-worker",
+                    source="area1-sequential-onboarding", prompt_authority="taskflow_plan",
+                    priority=2_000_000_000 + int(time.time()),
+                    model="gpt-5.6-sol" if provider == "chatgpt.com" else None,
+                    effort="max" if provider == "chatgpt.com" else None, collect_artifacts=True,
+                    parent_operation={"operation_id": "area1-four-provider-acceptance",
+                                      "automation_order": 3, "kind": "taskflow_plan"},
+                )
+                job_id = str(queued.get("job_id") or queued.get("job", {}).get("id") or request_id)
+                proof["inflight"][provider] = job_id
+                state_path.write_text(json.dumps(proof, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+                # Acceptance is an explicit bootstrap operation, not ordinary
+                # production cadence. Release one preserved biological slot.
+                scheduler_call({"operation": "rhythm_fast_forward", "provider": provider, "slots": 1})
+            result = client.wait(job_id)
             job = result.get("job") if isinstance(result.get("job"), Mapping) else {}
+            proof["inflight"].pop(provider, None)
             reasons: list[str] = []
             if result.get("ok") is not True:
                 reasons.append("no_queue_recorded_terminal_completion")

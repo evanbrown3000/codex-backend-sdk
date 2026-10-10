@@ -187,6 +187,16 @@ def recover_terminal(job: Mapping[str, Any]) -> bool:
         "recovered_from_receipt": str(path),
         "queue_job_id": job_id,
     }
+    if str(job.get("provider") or "") == "chatgpt.com":
+        elapsed = provider_execution_seconds(result)
+        if elapsed is None or elapsed < 300.0:
+            scheduler_call({
+                "operation": "release_job", **fence(job),
+                "provider_state": "provider_turn_below_minimum_duration",
+                "reason": "provider_execution_below_300_seconds",
+                "retry_after_seconds": 60,
+            })
+            return True
     scheduler_call({
         "operation": "complete_job", **fence(job),
         "conversation_id": result.get("conversation_id"),

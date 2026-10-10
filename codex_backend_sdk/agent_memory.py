@@ -287,10 +287,18 @@ class AgentMemoryClient:
         readback = self.get(stored_id)
         readback = readback.get("result") if isinstance(readback, Mapping) and isinstance(readback.get("result"), Mapping) else readback
         events = list(readback.get("events") or []) if isinstance(readback, Mapping) else []
-        prompts = [str(row.get("text") or "") for row in events if isinstance(row, Mapping) and row.get("role") == "user"]
-        responses = [str(row.get("text") or "") for row in events if isinstance(row, Mapping) and row.get("role") == "assistant"]
-        actual_prompt = hashlib.sha256((prompts[-1] if prompts else "").encode("utf-8")).hexdigest()
-        actual_response = hashlib.sha256((responses[-1] if responses else "").encode("utf-8")).hexdigest()
+        prompt_event = next((
+            row for row in events
+            if isinstance(row, Mapping)
+            and user_message_id in tuple(row.get("provider_message_ids") or ())
+        ), {})
+        response_event = next((
+            row for row in events
+            if isinstance(row, Mapping)
+            and assistant_message_id in tuple(row.get("provider_message_ids") or ())
+        ), {})
+        actual_prompt = hashlib.sha256(str(prompt_event.get("text") or "").encode("utf-8")).hexdigest()
+        actual_response = hashlib.sha256(str(response_event.get("text") or "").encode("utf-8")).hexdigest()
         if actual_prompt != prompt_hash or actual_response != response_hash:
             raise RuntimeError("central memory turn readback mismatch")
         return {

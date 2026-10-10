@@ -22,10 +22,13 @@ def _purpose(method: str, url: str) -> tuple[str, str, str]:
     if host == "chatgpt.com" or host.endswith(".chatgpt.com"):
         if path.startswith("/api/auth/"):
             return "credential_refresh", host, path
+        if method in {"POST", "PUT", "PATCH"} and (
+            path == "/backend-api/files" or path.startswith("/backend-api/files/")
+            or "/conversation" in path or "/uploads" in path
+        ):
+            return "chatmode_prompt_or_upload", host, path
         if "/interpreter/download" in path or "/files/" in path:
             return "artifact_download", host, path
-        if method in {"POST", "PUT", "PATCH"} and ("/conversation" in path or "/uploads" in path):
-            return "chatmode_prompt_or_upload", host, path
         return "observability", host, path
     if host == "cognilode.com" and path.startswith("/api/operator/http-gate"):
         return "central_gate_control", host, path
@@ -62,7 +65,11 @@ def decide(method: str, url: str) -> dict:
         return _fallback(method, url, "socket_unconfigured")
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-            sock.settimeout(2)
+            # The gate's central authorization can take up to 35 seconds and
+            # its durable audit write can wait for the local SQLite lock. A
+            # shorter client timeout falsely denies an authorization that is
+            # still being processed, causing repeated pre-POST upload work.
+            sock.settimeout(60)
             sock.connect(path)
             body = {"method": method, "url": url, "source": _source()}
             sock.sendall((json.dumps(body, separators=(",", ":")) + "\n").encode())

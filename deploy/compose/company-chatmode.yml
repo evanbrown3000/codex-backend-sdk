@@ -121,10 +121,16 @@ services:
     working_dir: /runtime/source/current/control-execution-runtime
     entrypoint: [sh, -c]
     command:
-      - >-
-        while ! test -f /runtime/source/current/control-execution-runtime/scripts/cognilode-provider-scheduler-supervisor;
-        do sleep 2; done;
-        exec python3 /runtime/source/current/control-execution-runtime/scripts/cognilode-provider-scheduler-supervisor
+      - |
+        while true; do
+          while ! test -f /runtime/source/current/control-execution-runtime/scripts/cognilode-provider-scheduler; do sleep 2; done
+          source=$$(readlink -f /runtime/source/current/control-execution-runtime)
+          PYTHONPATH="$$source/src" python3 "$$source/scripts/cognilode-provider-scheduler" & child=$$!
+          while kill -0 $$child 2>/dev/null && test "$$(readlink -f /runtime/source/current/control-execution-runtime)" = "$$source"; do sleep 2; done
+          kill -TERM $$child 2>/dev/null || true
+          wait $$child 2>/dev/null || true
+          sleep 1
+        done
     environment:
       HOME: /home/worker
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source

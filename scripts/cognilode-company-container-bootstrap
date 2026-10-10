@@ -188,8 +188,12 @@ def provider_mutations_active(runtime: Path, *, drain: bool = False) -> int | No
     database = runtime / "shared/provider-scheduler/scheduler.sqlite3"
     try:
         with sqlite3.connect(database, timeout=5) as connection:
+            # Only a still-live scheduler effect lease fences replacement.
+            # Orphaned effect_pending rows whose persisted lease has expired
+            # are eligible for receipt recovery/retry in the successor.
             row = connection.execute(
-                "SELECT COUNT(*) FROM provider_jobs WHERE state = 'effect_pending'"
+                "SELECT COUNT(*) FROM provider_jobs WHERE state = 'effect_pending' AND lease_until > ?",
+                (time.time(),),
             ).fetchone()
         durable_active = int(row[0]) if row else 0
     except (OSError, sqlite3.Error, TypeError, ValueError):

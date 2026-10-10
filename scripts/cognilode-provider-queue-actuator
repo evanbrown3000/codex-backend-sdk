@@ -557,17 +557,18 @@ def main() -> int:
                         seen.add(job.get("id"))
                         if state == "effect_pending":
                             recovered = recover_terminal(job)
-                            chatgpt_orphan = (args.provider == "chatgpt.com" and
-                                              chatgpt_transport_has_job(str(job.get("id") or "")) is False)
-                            if not recovered and (args.provider != "chatgpt.com" or chatgpt_orphan):
-                                # A browser mutation from an exited immutable
-                                # generation has no live collector.  The
-                                # queue-authorized retry policy, not a human
-                                # observer, decides the successor attempt.
+                            with lock:
+                                still_active = str(job.get("id") or "") in active
+                            if (not recovered and not still_active
+                                    and lease_remaining_seconds(job) <= 0):
+                                # An accepted/in-turn effect remains fenced
+                                # until its persisted scheduler lease expires.
+                                # At expiry, recover any local terminal receipt
+                                # first; only then may the queue authorize retry.
                                 scheduler_call({
                                     "operation": "release_job", **fence(job),
                                     "provider_state": "provider_collection_interrupted",
-                                    "reason": "no_terminal_receipt_after_generation_handoff",
+                                    "reason": "effect_lease_expired_without_terminal_receipt",
                                     "retry_after_seconds": 1,
                                 })
                         else:

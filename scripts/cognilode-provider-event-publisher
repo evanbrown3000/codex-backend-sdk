@@ -29,7 +29,28 @@ def atomic_cursor(path: Path, value: int) -> None:
     os.replace(temporary, path)
 
 
-def cycle(outbox: Path, cursor_path: Path, memory: AgentMemoryClient) -> int:
+def publish_event(memory: AgentMemoryClient, event: dict) -> None:
+    """Route semantic conversations and operational facts to their native planes.
+
+    The provider outbox intentionally interleaves complete conversation
+    observations with request/lease/queue/artifact lifecycle events.  Sending
+    every record to the conversation parser discarded the operational stream
+    and, worse, placed valid conversation observations behind those rejected
+    rows.  The two Agent Memory surfaces are both idempotent: conversation
+    observations are content addressed and inventory events retain event IDs.
+    """
+    schema = str(event.get("schema") or "")
+    if schema == "memory_stock.conversation_observation.v1" or isinstance(
+        event.get("messages"), list
+    ):
+        memory.ingest(event)
+        return
+    memory.admit_inventory(event)
+
+
+def cycle(
+    outbox: Path, cursor_path: Path, memory: AgentMemoryClient, *, maximum: int = 512,
+) -> int:
     if not outbox.is_file():
         return 0
     try:
@@ -53,7 +74,7 @@ def cycle(outbox: Path, cursor_path: Path, memory: AgentMemoryClient) -> int:
                 event = json.loads(line)
                 if not isinstance(event, dict):
                     raise ValueError("event is not an object")
-                memory.ingest(event)
+                publish_event(memory, event)
             except requests.HTTPError as exc:
                 status = int(exc.response.status_code) if exc.response is not None else 0
                 if status not in {400, 404, 409, 422}:
@@ -74,6 +95,51 @@ def cycle(outbox: Path, cursor_path: Path, memory: AgentMemoryClient) -> int:
                     os.fsync(output.fileno())
                 atomic_cursor(cursor_path, stream.tell())
                 continue
+            except Exception:
+                stream.seek(start)
+                break
+            atomic_cursor(cursor_path, stream.tell())
+            admitted += 1
+            if admitted >= maximum:
+                break
+    return admitted
+
+
+def recover_dead_letters(
+    dead: Path, cursor_path: Path, memory: AgentMemoryClient, *, maximum: int = 64,
+) -> int:
+    """Continuously re-admit legacy rows that were routed to the wrong plane."""
+    if not dead.is_file():
+        return 0
+    try:
+        offset = int(cursor_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        offset = 0
+    size = dead.stat().st_size
+    if offset < 0 or offset > size:
+        offset = 0
+    admitted = 0
+    with dead.open("rb") as stream:
+        stream.seek(offset)
+        while admitted < maximum:
+            start = stream.tell()
+            line = stream.readline()
+            if not line or not line.endswith(b"\n"):
+                break
+            try:
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    raise ValueError("event is not an object")
+                publish_event(memory, event)
+            except requests.HTTPError as exc:
+                status = int(exc.response.status_code) if exc.response is not None else 0
+                if status not in {400, 404, 409, 422}:
+                    stream.seek(start)
+                    break
+                # A permanently invalid historical row cannot block later
+                # recoverable conversation or inventory events.
+            except (OSError, ValueError, json.JSONDecodeError):
+                pass
             except Exception:
                 stream.seek(start)
                 break
@@ -103,6 +169,11 @@ def main() -> int:
     memory = AgentMemoryClient(use_broker=False)
     while not STOP:
         cycle(args.outbox, args.cursor, memory)
+        recover_dead_letters(
+            args.cursor.with_name("agent-memory.dead-letter.jsonl"),
+            args.cursor.with_name("agent-memory.dead-letter-recovery.cursor"),
+            memory,
+        )
         for _ in range(max(1, int(args.interval * 2))):
             if STOP:
                 break

@@ -8,6 +8,7 @@ import fcntl
 from pathlib import Path
 import subprocess
 import signal
+import sys
 import threading
 import time
 
@@ -38,9 +39,11 @@ def complete(state: Path) -> bool:
     return bool(rows) and all(row.get("returncode") == 0 for row in rows)
 
 
-def supervise(program: list[str]) -> None:
+def supervise(program: list[str], extra_environment: dict[str, str] | None = None) -> None:
+    environment = os.environ.copy()
+    environment.update(extra_environment or {})
     while not STOP:
-        process = subprocess.Popen(program)
+        process = subprocess.Popen(program, env=environment)
         while not STOP and process.poll() is None:
             time.sleep(1)
         if process.poll() is None:
@@ -56,6 +59,54 @@ def supervise(program: list[str]) -> None:
             time.sleep(5)
 
 
+def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
+    """Select domain-owned workers for the independent native .com queues."""
+    requested = {
+        value.strip().casefold()
+        for value in os.environ.get(
+            "COGNILODE_HOSTED_RHYTHM_PROVIDERS",
+            "chatgpt.com,gemini.com,claude.com,anthropic.com",
+        ).split(",")
+        if value.strip()
+    }
+    workers: list[tuple[list[str], dict[str, str]]] = []
+    if "chatgpt.com" in requested:
+        workers.append(([
+            str(CLI.rsplit("/", 1)[0] + "/python"),
+            str(HERE / "cognilode-chatmode-queue-worker"),
+            "--device-id", os.environ.get("COGNILODE_ENVIRONMENT_ID", "company-container"),
+            "--interval", "60",
+        ], {}))
+
+    # Gemini belongs to ComputerUseX, not to B4PT0R's ChatGPT transport.  Its
+    # historical worker claims only gemini.com jobs from the same central D1
+    # queue, uses the zero-cost native Gemini web transport, writes the exact
+    # turn to Agent Memory, reads it back centrally, and only then completes
+    # the fenced job.  Keeping it under this supervisor makes source cutovers
+    # cooperative without copying that implementation into this repository.
+    computerusex = Path(os.environ.get(
+        "COGNILODE_COMPUTERUSEX_SOURCE",
+        "/company/automation-computeruse-vision/src",
+    ))
+    gemini_worker = computerusex / "computerusex" / "g3_gemini_agent_memory_worker.py"
+    if "gemini.com" in requested and gemini_worker.is_file():
+        pythonpath = str(computerusex)
+        inherited = os.environ.get("PYTHONPATH", "")
+        if inherited:
+            pythonpath += os.pathsep + inherited
+        workers.append(([
+            sys.executable,
+            "-m", "computerusex.g3_gemini_agent_memory_worker",
+            "--token-file", os.environ.get(
+                "COGNILODE_OPERATOR_TOKEN_FILE",
+                "/home/worker/.config/cognilode/operator-bearer",
+            ),
+            "--state-root", str(ROOT / "gemini.com"),
+            "--loop", "--interval-seconds", "60",
+        ], {"PYTHONPATH": pythonpath}))
+    return workers
+
+
 def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
@@ -65,20 +116,16 @@ def main() -> int:
         fcntl.flock(daemon_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         return 0
-    # The actuator watches only the central D1 queue.  It does not poll a
-    # provider: provider network traffic begins only after a rhythm claim and
-    # then remains on the streamed send.  The floor watcher has one separate
-    # leader in provider transport, while every chat-mode device needs its
-    # queue actuator here.
-    actuator = [
-        str(CLI.rsplit("/", 1)[0] + "/python"),
-        str(HERE / "cognilode-chatmode-queue-worker"),
-        "--device-id", os.environ.get("COGNILODE_ENVIRONMENT_ID", "company-container"),
-        "--interval", "60",
-    ]
-    thread = threading.Thread(target=supervise, args=(actuator,), daemon=False)
-    SUPERVISORS.append(thread)
-    thread.start()
+    # Provider queues are independent. A long Gemini turn cannot consume or
+    # delay a ChatGPT rhythm slot, and neither worker polls the other provider.
+    for actuator, extra_environment in native_provider_workers():
+        thread = threading.Thread(
+            target=supervise,
+            args=(actuator, extra_environment),
+            daemon=False,
+        )
+        SUPERVISORS.append(thread)
+        thread.start()
     retry: dict[str, tuple[int, float]] = {}
     while not STOP:
         now = time.time()

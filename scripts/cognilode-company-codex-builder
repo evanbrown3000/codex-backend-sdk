@@ -48,7 +48,10 @@ def run_once_unlocked() -> None:
         return
     installed = RELEASE / "releases" / PIN / "codex"
     if (installed.is_file() and os.access(installed, os.X_OK) and
+            (RELEASE / "releases" / PIN / "codex-code-mode-host").is_file() and
+            (RELEASE / "releases" / PIN / "code-mode-host-ready.json").is_file() and
             (RELEASE / "bin/codex").is_file() and
+            (RELEASE / "bin/codex-code-mode-host").is_file() and
             (RELEASE / "bin/central-rollouts").is_file()):
         return
     # Shared custody gets first chance to install the exact pinned release.

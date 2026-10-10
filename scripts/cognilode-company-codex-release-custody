@@ -31,6 +31,8 @@ PREFIX = f"codex-releases/{PIN}/{TARGET}"
 RELEASE = ROOT / "releases" / PIN
 LOOKUP = ROOT / "metadata" / f"lookup-{PIN}-{TARGET}.json"
 LOCK = ROOT / "metadata" / f"release-{PIN}-{TARGET}.lock"
+RELEASE_FILES = ("codex", "codex-code-mode-host", "central-rollouts")
+HOST_READY = "code-mode-host-ready.json"
 
 
 def aws(*args: str, timeout: int = 120) -> subprocess.CompletedProcess:
@@ -120,7 +122,7 @@ def remote_manifest() -> dict | None:
     if (value.get("schema") != "cognilode.codex-release.v1" or
             value.get("source_commit") != PIN or value.get("target") != TARGET):
         raise RuntimeError("private Codex release manifest identity mismatch")
-    for name in ("codex", "central-rollouts"):
+    for name in RELEASE_FILES:
         item = value.get("files", {}).get(name, {})
         if not re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256") or "")) or int(item.get("size") or 0) <= 0:
             raise RuntimeError("private Codex release manifest is incomplete")
@@ -129,7 +131,7 @@ def remote_manifest() -> dict | None:
 
 def link_release() -> None:
     (ROOT / "bin").mkdir(parents=True, exist_ok=True)
-    for name in ("codex", "central-rollouts"):
+    for name in RELEASE_FILES:
         temporary = ROOT / "bin" / ("." + name + "-next")
         temporary.unlink(missing_ok=True)
         temporary.symlink_to(f"../releases/{PIN}/{name}")
@@ -137,14 +139,14 @@ def link_release() -> None:
 
 
 def install_remote(manifest: dict) -> None:
-    if RELEASE.joinpath("codex").is_file() and RELEASE.joinpath("central-rollouts").is_file():
+    if all(RELEASE.joinpath(name).is_file() for name in RELEASE_FILES) and RELEASE.joinpath(HOST_READY).is_file():
         link_release()
         return
     RELEASE.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".download-", dir=RELEASE.parent) as temporary:
         stage = Path(temporary) / "release"
         stage.mkdir()
-        for name in ("codex", "central-rollouts"):
+        for name in RELEASE_FILES:
             path = stage / name
             result = aws("get-object", "--bucket", BUCKET, "--key", PREFIX + "/" + name,
                          str(path), "--output", "json", timeout=1800)
@@ -152,9 +154,20 @@ def install_remote(manifest: dict) -> None:
             if result.returncode or not path.is_file() or path.stat().st_size != expected["size"] or digest(path) != expected["sha256"]:
                 raise RuntimeError("private Codex release download checksum mismatch")
             path.chmod(0o755)
+        host = stage / "codex-code-mode-host"
+        probe = subprocess.run([str(host), "--help"], capture_output=True, timeout=15)
+        if probe.returncode:
+            raise RuntimeError("private Codex code-mode host executable failed local probe")
+        (stage / HOST_READY).write_text(json.dumps({
+            "schema": "cognilode.codex-code-mode-host-ready.v1",
+            "source_commit": PIN,
+            "host_sha256": manifest["files"]["codex-code-mode-host"]["sha256"],
+            "probe": "help-exit-0",
+        }, separators=(",", ":")) + "\n")
         (stage / "source-commit").write_text(PIN + "\n")
         (stage / "SHA256SUMS").write_text("".join(
-            f"{manifest['files'][name]['sha256']}  {name}\n" for name in ("codex", "central-rollouts")))
+            f"{manifest['files'][name]['sha256']}  {name}\n" for name in RELEASE_FILES) +
+            f"{digest(stage / HOST_READY)}  {HOST_READY}\n")
         if RELEASE.exists():
             if RELEASE.is_symlink() or not RELEASE.is_dir():
                 raise RuntimeError("local Codex release path is not a directory")
@@ -165,8 +178,8 @@ def install_remote(manifest: dict) -> None:
 
 
 def publish_local() -> None:
-    files = {name: RELEASE / name for name in ("codex", "central-rollouts")}
-    if not all(path.is_file() for path in files.values()):
+    files = {name: RELEASE / name for name in RELEASE_FILES}
+    if not all(path.is_file() for path in files.values()) or not RELEASE.joinpath(HOST_READY).is_file():
         return
     manifest = {"schema": "cognilode.codex-release.v1", "source_commit": PIN,
                 "target": TARGET, "files": {name: {"sha256": digest(path), "size": path.stat().st_size}
@@ -204,12 +217,12 @@ def run_once_unlocked() -> None:
             if (previous.get("pin") == PIN and previous.get("target") == TARGET and
                     previous.get("state") in ("local-ready", "downloaded") and
                     time.time() - float(previous.get("at", 0)) < 86400 and
-                    RELEASE.joinpath("codex").is_file() and
-                    RELEASE.joinpath("central-rollouts").is_file()):
+                    all(RELEASE.joinpath(name).is_file() for name in RELEASE_FILES) and
+                    RELEASE.joinpath(HOST_READY).is_file()):
                 return
         except (OSError, ValueError, TypeError):
             pass
-    if RELEASE.joinpath("codex").is_file() and RELEASE.joinpath("central-rollouts").is_file():
+    if all(RELEASE.joinpath(name).is_file() for name in RELEASE_FILES) and RELEASE.joinpath(HOST_READY).is_file():
         publish_local()
         link_release()
         marker("local-ready")

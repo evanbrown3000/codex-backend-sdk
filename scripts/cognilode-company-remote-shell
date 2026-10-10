@@ -80,7 +80,14 @@ def drive_rollout(payload):
             if not chunk: raise RuntimeError('incomplete Drive custody response')
             chunks.append(chunk); length-=len(chunk)
     response=json.loads(b''.join(chunks))
-    if not isinstance(response,dict) or not response.get('ok'):
+    if not isinstance(response,dict):
+        raise RuntimeError('Drive custody response invalid')
+    # A staged immutable object is a normal, durable pending state. Preserve
+    # its typed hold for the central endpoint, which already knows how to
+    # defer the reader without issuing another provider or Drive request.
+    if response.get('state') in ('held','ambiguous'):
+        return response
+    if not response.get('ok'):
         raise RuntimeError('Drive custody operation unavailable')
     return response
 

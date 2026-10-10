@@ -55,6 +55,15 @@ def _sdk_worker_generation(program: list[str]) -> tuple[list[str], str]:
             checkout / "codex_backend_sdk/provider_transport_client.py",
             selected.with_name("cognilode-provider-transport"),
         ])
+    elif selected.name == "cognilode-provider-scheduler":
+        scheduler_root = selected.parent.parent
+        dependencies.extend(sorted(
+            (scheduler_root / "src/cognilode_provider_scheduler").glob("*.py")
+        ))
+        dependencies.extend([
+            scheduler_root / "data/provider_scheduler/historical_rhythm.json",
+            scheduler_root / "data/provider_scheduler/historical_rhythm.uleb128",
+        ])
     digest = hashlib.sha256()
     try:
         for dependency in dependencies:
@@ -102,6 +111,9 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
         if value.strip()
     }
     workers: list[tuple[list[str], dict[str, str]]] = []
+    event_publisher = HERE / "cognilode-provider-event-publisher"
+    if event_publisher.is_file():
+        workers.append(([sys.executable, str(event_publisher)], {}))
     # Area 2 is a separate domain implementation.  B4PT0R only supervises its
     # durable process beside the Area 1 actuators; it neither owns nor embeds
     # scheduling policy.

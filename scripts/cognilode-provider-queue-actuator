@@ -131,6 +131,14 @@ def chatgpt_transport(job: Mapping[str, Any], attachments: tuple[str, ...]) -> d
         try: values.append(json.loads(line))
         except json.JSONDecodeError: pass
     raw = values[-1] if values else {}
+    if int(outer.get("exit_code") or 0) != 0 or raw.get("assistant_terminal") is not True:
+        print(json.dumps({
+            "kind": "chatgpt_transport_failure",
+            "job_id": job_id,
+            "exit_code": int(outer.get("exit_code") or 0),
+            "transport_stderr": str(outer.get("stderr") or "")[-4000:],
+            "provider_result": raw,
+        }, sort_keys=True), flush=True)
     return {
         "accepted": raw.get("provider_acceptance_observed") is True,
         "terminal": raw.get("assistant_terminal") is True,

@@ -51,39 +51,63 @@ def live_sender_count() -> int | None:
         return None
 
 
-def main() -> int:
-    here = Path(__file__).resolve().parent
-    sender = load(here / "cognilode-b4pt0r-chatmode", "cognilode_floor_sender")
-    worker = load(here / "cognilode-chatmode-queue-worker", "cognilode_floor_worker")
-    next_batch_scan = 0.0
-    batch_thread = None
-
-    def scan_batches():
-        try:
-            worker.decisionx_batch_pump()
-        except Exception as exc:
-            emit("decisionx_batch_retry", error=f"{type(exc).__name__}:{str(exc)[:200]}")
-
+def watch_provider(sender, provider: str, status_root: Path) -> None:
+    """Each provider has an independent clock and retry cadence."""
+    next_status_at = 0.0
+    last_event = None
     while True:
         try:
-            observed = live_sender_count()
-            request = {"operation": "rhythm_tick"}
+            observed = live_sender_count() if provider == "chatgpt.com" else None
+            include_status = time.monotonic() >= next_status_at
+            request = {"operation": "rhythm_tick", "provider": provider,
+                       "include_status": include_status}
             if observed is not None:
                 request["provider_active_turns"] = observed
             result = sender.operator_memory_post(request, timeout=90)
-            claims = result.get("claims") or []
-            if claims or result.get("stop_status") not in (None, "not_due"):
-                emit("hosted_queue_fill", status=result.get("status"), claims=len(claims),
-                     active_before=result.get("active_before"), active_after=result.get("active_after"),
-                     provider_active_observed=result.get("provider_active_observed"),
-                     stop_status=result.get("stop_status"), stop_reason=result.get("stop_reason"))
+            if include_status:
+                next_status_at = time.monotonic() + 300
+            status = result.get("scheduler_status")
+            if isinstance(status, dict):
+                status_root.mkdir(parents=True, exist_ok=True)
+                path = status_root / (provider.replace(".", "-") + ".json")
+                temp = path.with_name(path.name + ".tmp")
+                temp.write_text(json.dumps(status, sort_keys=True) + "\n", encoding="utf-8")
+                os.replace(temp, path)
+            job = result.get("job") or {}
+            event_key = (result.get("status"), result.get("reason"),
+                         result.get("slot_index"), job.get("id"))
+            if event_key != last_event and result.get("status") != "not_due":
+                emit("hosted_queue_tick", provider=provider,
+                     status=result.get("status"), reason=result.get("reason"),
+                     slot_index=result.get("slot_index"), due_at=result.get("due_at"),
+                     job_id=job.get("id"))
+                next_status_at = 0.0  # The next scheduled tick captures the new frontier.
+            last_event = event_key
         except Exception as exc:
-            emit("hosted_queue_fill_retry", error=f"{type(exc).__name__}:{str(exc)[:200]}")
-        if time.monotonic() >= next_batch_scan and (batch_thread is None or not batch_thread.is_alive()):
-            next_batch_scan = time.monotonic() + 600
-            batch_thread = threading.Thread(target=scan_batches, daemon=True, name="decisionx-batch-pump")
-            batch_thread.start()
+            emit("hosted_queue_tick_retry", provider=provider,
+                 error=f"{type(exc).__name__}:{str(exc)[:200]}")
         time.sleep(10)
+
+
+def main() -> int:
+    here = Path(__file__).resolve().parent
+    sender = load(here / "cognilode-b4pt0r-chatmode", "cognilode_floor_sender")
+    requested = os.environ.get("COGNILODE_HOSTED_RHYTHM_PROVIDERS", "chatgpt.com")
+    providers = tuple(dict.fromkeys(value.strip() for value in requested.split(",") if value.strip()))
+    allowed = {"chatgpt.com", "gemini.com", "claude.com", "anthropic.com"}
+    if not providers or any(provider not in allowed for provider in providers):
+        raise SystemExit("invalid hosted rhythm provider list")
+    status_root = Path(os.environ.get("COGNILODE_RHYTHM_STATUS_ROOT",
+                                   str(Path.home() / ".local/share/cognilode/rhythm-status")))
+    threads = []
+    for provider in providers:
+        thread = threading.Thread(target=watch_provider, args=(sender, provider, status_root),
+                                  daemon=False, name="rhythm-" + provider)
+        thread.start()
+        threads.append(thread)
+    for thread in threads:
+        thread.join()
+    return 0
 
 
 if __name__ == "__main__":

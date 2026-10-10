@@ -177,6 +177,25 @@ def launch_prepared(runner: Path, cli: Path) -> subprocess.Popen:
     )
 
 
+def launch_clock(source: Path) -> subprocess.Popen:
+    """Run the one Area-2 clock caller outside actuator generations."""
+    watcher = source / "scripts" / "cognilode-chatmode-floor-watcher"
+    return subprocess.Popen(
+        [sys.executable, str(watcher)], env=os.environ.copy(), start_new_session=True
+    )
+
+
+def stop_clock(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
 def replace_supervisor(source: Path, draining_pids: list[int] | None = None) -> None:
     """Continue supervision with the synchronized generation's own code."""
     supervisor = (source / "scripts" / "cognilode-company-chatmode-runtime").resolve()
@@ -313,6 +332,11 @@ def main() -> int:
     reap_inherited_drains()
     source = active_source()
     active_revision = source_revision(source)
+    # The clock belongs to the stable Area-2 queue boundary, not to an
+    # actuator generation.  Keeping it here lets accepted provider capability
+    # heartbeats drive independent clocks while old provider effects drain.
+    # The watcher's durable lock also fences any predecessor during handoff.
+    clock = launch_clock(source)
     bootstrap_cli = latest_complete_cli()
     target_cli = Path(os.environ.get(
         "COGNILODE_B4PT0R_RELEASE_ROOT", "/runtime/b4pt0r-releases/locked-v2"
@@ -336,6 +360,8 @@ def main() -> int:
         "COGNILODE_PROVIDER_SOURCE_MAX_STALENESS_SECONDS", "240"
     ))
     while not STOP:
+        if clock.poll() is not None:
+            clock = launch_clock(source)
         if process.poll() is not None:
             source, runner, cli = prepare_frontier()
             process = launch_prepared(runner, cli)
@@ -368,6 +394,7 @@ def main() -> int:
                 # worker scripts beneath it.  Candidate preparation happens
                 # before the drain, so provider custody remains live during the
                 # potentially slow immutable-release build.
+                stop_clock(clock)
                 replace_supervisor(candidate, draining)
                 source = candidate
                 active_revision = source_revision(candidate)
@@ -380,6 +407,7 @@ def main() -> int:
         time.sleep(2)
     if process.poll() is None:
         drain(process, handoff=False)
+    stop_clock(clock)
     return 0
 
 

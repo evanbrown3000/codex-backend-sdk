@@ -233,10 +233,63 @@ class ProviderCommandClient:
         priority: int | None = None,
         decisionx: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        return self.send_provider(
+            provider="chatgpt.com",
+            prompt=prompt,
+            conversation_id=conversation_id,
+            parent_message_id=parent_message_id,
+            model=model,
+            effort=effort,
+            attachments=attachments,
+            request_id=request_id,
+            project=project,
+            role=role,
+            source=source,
+            prompt_authority=prompt_authority,
+            priority=priority,
+            decisionx=decisionx,
+        )
+
+    def send_provider(
+        self,
+        *,
+        provider: str,
+        prompt: str,
+        conversation_id: str | None = None,
+        parent_message_id: str | None = None,
+        environment_id: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        attachments: Sequence[str] = (),
+        request_id: str | None = None,
+        project: str = "unified-b4pt0r",
+        role: str = "interactive-operator",
+        source: str = "b4pt0r-unified-cli",
+        prompt_authority: str = "interactive_operator",
+        priority: int | None = None,
+        decisionx: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Admit any supported agent turn through one provider-neutral API.
+
+        Each provider keeps its own queue clock and actuator.  This method owns
+        neither provider credentials nor provider HTTP and therefore behaves
+        identically from every environment.
+        """
+        aliases = {
+            "chatgpt": "chatgpt.com", "chatgpt.com": "chatgpt.com",
+            "gemini": "gemini.com", "gemini.com": "gemini.com",
+            "claude": "claude.com", "claude.com": "claude.com",
+            "anthropic": "anthropic.com", "anthropic.com": "anthropic.com",
+            "codex": "codex.research", "codex.research": "codex.research",
+        }
+        selected = aliases.get(str(provider).strip().casefold())
+        if selected is None:
+            raise ValueError("unsupported provider: " + str(provider))
         return self._enqueue({
-            "provider": "chatgpt.com",
+            "provider": selected,
             "conversation_id": conversation_id,
             "parent_message_id": parent_message_id,
+            "environment_id": environment_id,
             "prompt": prompt,
             "model": model,
             "reasoning_effort": effort,

@@ -83,6 +83,34 @@ def _chatgpt(args: argparse.Namespace) -> Any:
     raise ValueError(f"Unknown ChatGPT command: {args.chatgpt_command}")
 
 
+def _prompting(args: argparse.Namespace) -> Any:
+    provider = ProviderCommandClient()
+    if args.prompting_command == "send":
+        queued = provider.send_provider(
+            provider=args.destination,
+            prompt=_prompt(args),
+            conversation_id=args.conversation_id,
+            parent_message_id=args.parent_message_id,
+            environment_id=args.environment_id,
+            model=args.model,
+            effort=args.effort,
+            attachments=args.attach,
+            request_id=args.request_id,
+            project=args.project,
+            role=args.role,
+            source=args.source,
+            prompt_authority=args.prompt_authority,
+            priority=args.priority,
+            decisionx=_json_object(args.decisionx),
+        )
+        return queued if args.no_readback else provider.wait(str(queued["job_id"]))
+    if args.prompting_command == "collect":
+        return provider.wait(args.job_id)
+    if args.prompting_command == "queue":
+        return provider.queue_status(args.destination)
+    raise ValueError(f"Unknown prompting command: {args.prompting_command}")
+
+
 def _remote(args: argparse.Namespace) -> Any:
     client = RemoteShellClient(actor_id=args.actor_id)
     if args.remote_command == "list":
@@ -192,6 +220,35 @@ def parser() -> argparse.ArgumentParser:
     collect = chat.add_parser("collect")
     collect.add_argument("job_id")
 
+    prompting = providers.add_parser(
+        "prompt", help="Queue any supported provider through one interface"
+    )
+    prompt_ops = prompting.add_subparsers(dest="prompting_command", required=True)
+    unified_send = prompt_ops.add_parser("send")
+    unified_send.add_argument("--provider", dest="destination", required=True,
+                              choices=("chatgpt.com", "gemini.com", "claude.com",
+                                       "anthropic.com", "codex.research"))
+    unified_send.add_argument("--prompt")
+    unified_send.add_argument("--prompt-file")
+    unified_send.add_argument("--conversation-id")
+    unified_send.add_argument("--parent-message-id")
+    unified_send.add_argument("--environment-id")
+    unified_send.add_argument("--model")
+    unified_send.add_argument("--effort")
+    unified_send.add_argument("--attach", action="append", default=[])
+    unified_send.add_argument("--request-id")
+    unified_send.add_argument("--project", default="unified-b4pt0r")
+    unified_send.add_argument("--role", default="interactive-operator")
+    unified_send.add_argument("--source", default="b4pt0r-unified-cli")
+    unified_send.add_argument("--prompt-authority", default="interactive_operator")
+    unified_send.add_argument("--priority", type=int)
+    unified_send.add_argument("--decisionx")
+    unified_send.add_argument("--no-readback", action="store_true")
+    unified_collect = prompt_ops.add_parser("collect")
+    unified_collect.add_argument("job_id")
+    unified_queue = prompt_ops.add_parser("queue")
+    unified_queue.add_argument("--provider", dest="destination", required=True)
+
     remote = providers.add_parser("remote")
     remote.add_argument("--actor-id", default="default")
     shell = remote.add_subparsers(dest="remote_command", required=True)
@@ -248,6 +305,8 @@ def main(argv: list[str] | None = None) -> int:
             result = _auth(args)
         elif args.provider == "chatgpt":
             result = _chatgpt(args)
+        elif args.provider == "prompt":
+            result = _prompting(args)
         elif args.provider == "remote":
             result = _remote(args)
         elif args.provider == "memory":

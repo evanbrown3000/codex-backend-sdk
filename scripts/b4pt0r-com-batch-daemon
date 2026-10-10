@@ -55,8 +55,12 @@ def _sdk_worker_generation(program: list[str]) -> tuple[list[str], str]:
         for dependency in sorted(package.glob("*.py")):
             digest.update(dependency.read_bytes())
         return program, digest.hexdigest()
-    current = SOURCE_ROOT / "current/codex-backend-sdk/scripts" / Path(program[1]).name
-    selected = current if current.is_file() else Path(program[1])
+    # The batch daemon is itself launched from an immutable source generation.
+    # Keep every supervised SDK worker on that same generation. Following the
+    # moving ``current`` link here caused each source publication to terminate
+    # live provider turns before the outer generation supervisor could drain
+    # them. The outer supervisor alone owns generation handoff.
+    selected = Path(program[1])
     dependencies = [selected]
     if selected.name == "cognilode-chatmode-queue-worker":
         checkout = selected.parent.parent

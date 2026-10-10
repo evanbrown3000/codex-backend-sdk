@@ -142,6 +142,17 @@ def chatgpt_transport(job: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
+    try:
+        attachments = tuple(local_attachment(row) for row in job.get("attachment_refs") or ())
+    except RuntimeError:
+        # Missing staged input is a pre-effect admission problem. Release the
+        # scheduler lease without crossing the mutation boundary or consuming
+        # a provider turn; source/artifact custody can materialize it and retry.
+        scheduler_call({"operation": "release_job", **fence(job),
+                        "provider_state": "input_unavailable",
+                        "reason": "scheduled_attachment_unavailable",
+                        "retry_after_seconds": 60})
+        return
     boundary = scheduler_call({"operation": "begin_effect", **fence(job)})
     if boundary.get("send_authorized") is not True:
         return
@@ -150,7 +161,7 @@ def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
         str(job["provider"]),
         str(job.get("conversation_id") or "") or None,
         str(job.get("prompt") or ""),
-        tuple(local_attachment(row) for row in job.get("attachment_refs") or ()),
+        attachments,
         operation_id=str(job["id"]) + ":lease:" + str(job.get("lease_generation") or 0),
         account_id=str(job.get("assigned_account") or "primary"),
         parent_operation={

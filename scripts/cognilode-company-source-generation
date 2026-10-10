@@ -148,7 +148,23 @@ def main() -> int:
         # because the moving source frontier is ahead of its immutable build.
         # Start the newest complete runtime, then the loop below changes over
         # only after the exact frontier release is published.
-        interpreter = service_python(selected) or newest_complete_python()
+        interpreter = service_python(selected)
+        if interpreter is None:
+            interpreter = newest_complete_python()
+            if interpreter is not None:
+                # A completed interpreter and a newer script are not an
+                # immutable generation.  During a cold build, run the script
+                # from the checkout that produced the fallback release; the
+                # normal generation comparison below will hand over once the
+                # exact frontier release exists.
+                fallback_revision = interpreter.parent.parent.name
+                fallback_script = (root / "checkouts/codex-backend-sdk" /
+                                   fallback_revision / "scripts" / options.script)
+                fallback_generation = content_generation(fallback_script)
+                if fallback_generation is None:
+                    interpreter = None
+                else:
+                    selected, signature = fallback_generation
         if interpreter is None:
             print(f"SDK service {options.script} waiting for matching immutable release", flush=True)
             time.sleep(2)

@@ -87,11 +87,14 @@ services:
   provider-browser:
     image: ${COGNILODE_BROWSER_IMAGE:-362928919715.dkr.ecr.us-west-2.amazonaws.com/cognilode-always-on-node:20261002-v2}
     restart: unless-stopped
+    # Docker bridge forwarding is intentionally disabled on company hosts.
+    # Provider navigation therefore shares the host network just like the
+    # mutation transport. DevTools remains loopback-only and is reachable only
+    # by the host-network provider actuator population.
+    network_mode: host
     shm_size: 1gb
     tmpfs:
       - /run/provider-browser:size=6g,mode=0700
-    ports:
-      - "127.0.0.1:9334:9334"
     entrypoint: [sh, -c]
     command:
       - |
@@ -164,7 +167,7 @@ services:
           try: await writer.wait_closed()
           except Exception: pass
         async def main():
-          server=await asyncio.start_server(serve,"0.0.0.0",9334)
+          server=await asyncio.start_server(serve,"127.0.0.1",9334)
           async with server: await server.serve_forever()
         asyncio.run(main())' & relay=$$!
         wait "$$child"
@@ -268,8 +271,10 @@ services:
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
     stop_grace_period: 2h
-    networks:
-      - company-universe
+    # Queue actuators share provider-browser's loopback custody endpoint and
+    # require provider egress; the host firewall already blocks Docker bridge
+    # forwarding. Control planes remain loopback or Unix-socket scoped.
+    network_mode: host
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
     cpus: 1
     mem_limit: 2g
@@ -295,10 +300,10 @@ services:
       # The centrally-custodied provider browser is attached to the company
       # network; provider actuators must never fall back to a host/personal
       # browser on the unrelated Docker bridge.
-      COMPUTERUSEX_CDP_ENDPOINT: ${COMPUTERUSEX_CDP_ENDPOINT:-http://provider-browser:9334}
-      AGENT_MEMORY_ENDPOINT: http://memory:8098/v1/conversations
-      AGENT_MEMORY_INGEST_ENDPOINT: http://memory:8098/v1/conversations/ingest
-      AGENT_MEMORY_INVENTORY_ENDPOINT: http://memory:8098/v1/inventory/events
+      COMPUTERUSEX_CDP_ENDPOINT: ${COMPUTERUSEX_CDP_ENDPOINT:-http://127.0.0.1:9334}
+      AGENT_MEMORY_ENDPOINT: http://127.0.0.1:8098/v1/conversations
+      AGENT_MEMORY_INGEST_ENDPOINT: http://127.0.0.1:8098/v1/conversations/ingest
+      AGENT_MEMORY_INVENTORY_ENDPOINT: http://127.0.0.1:8098/v1/inventory/events
       PYTHONPATH: /runtime/source/current/codex-backend-sdk/gate:/runtime/source/current/modified-codex-runtime/src
       COGNILODE_HTTP_GATE_SOCKET: /runtime/http-gate/gate.sock
       COGNILODE_HTTP_GATE_FALLBACK_LOG: /runtime/http-gate/fallback.jsonl

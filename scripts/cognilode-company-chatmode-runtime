@@ -262,6 +262,11 @@ def main() -> int:
     else:
         source, runner, cli = prepare_frontier()
         process = launch_prepared(runner, cli)
+    pending_generation: tuple[Path, str] | None = None
+    pending_since = 0.0
+    stability_seconds = float(os.environ.get(
+        "COGNILODE_PROVIDER_SOURCE_STABILITY_SECONDS", "120"
+    ))
     while not STOP:
         if process.poll() is not None:
             source, runner, cli = prepare_frontier()
@@ -270,6 +275,19 @@ def main() -> int:
             candidate = active_source()
             candidate_revision = source_revision(candidate)
             if candidate != source or candidate_revision != active_revision:
+                identity = (candidate, candidate_revision)
+                if pending_generation != identity:
+                    pending_generation = identity
+                    pending_since = time.monotonic()
+                    time.sleep(2)
+                    continue
+                # Source convergence can advance many times while agents are
+                # publishing related changes.  Keep the admitted provider
+                # population live and coalesce that burst into one generation
+                # instead of placing the transport perpetually in draining.
+                if time.monotonic() - pending_since < stability_seconds:
+                    time.sleep(2)
+                    continue
                 candidate, runner, cli = prepare_frontier()
                 drain(process)
                 # A source cutover includes the supervisor itself, not only its
@@ -281,7 +299,10 @@ def main() -> int:
                 replace_supervisor(candidate)
                 source = candidate
                 active_revision = source_revision(candidate)
+                pending_generation = None
                 process = launch_prepared(runner, cli)
+            else:
+                pending_generation = None
         time.sleep(2)
     if process.poll() is None:
         drain(process)

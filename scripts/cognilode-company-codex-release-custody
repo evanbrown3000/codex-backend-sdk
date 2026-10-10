@@ -76,7 +76,12 @@ def aws_failure(result: subprocess.CompletedProcess) -> str:
         return 'access_denied'
     if 'could not connect' in detail or 'endpointconnectionerror' in detail:
         return 'endpoint_unreachable'
-    return f'aws_cli_exit_{result.returncode}'
+    # Retain only short alphabetic words from an unfamiliar CLI diagnostic.
+    # Paths, account numbers, object keys, URLs, and credential values are not
+    # copied into the service receipt.
+    words = [word.lower() for word in re.findall(r'[A-Za-z]+', result.stderr or '')
+             if len(word) <= 24]
+    return f'aws_cli_exit_{result.returncode}:' + '_'.join(words[:12])
 
 
 def remote_manifest() -> dict | None:

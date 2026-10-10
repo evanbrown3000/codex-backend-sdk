@@ -16,6 +16,7 @@ import select
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from cognilode_central_http import request_json
 
@@ -26,6 +27,7 @@ AUTH_HOME = Path(os.environ.get('CODEX_HOME', '/home/worker/.codex'))
 TOKEN_FILE = Path(os.environ.get('COGNILODE_OPERATOR_TOKEN_FILE',
     '/home/worker/.config/cognilode/operator-bearer'))
 MARKER_ROOT = Path(os.environ.get('COGNILODE_ACCEPTANCE_ROOT', '/runtime/acceptance'))
+RECONCILE_FRONTIER = MARKER_ROOT / 'rollout-pointer-reconcile.json'
 UUID = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,40}$')
 
 
@@ -54,6 +56,37 @@ def save_pending(pin: str, value: dict) -> None:
     temporary = target.with_name(target.name + f'.{os.getpid()}.tmp')
     temporary.write_text(json.dumps(value, separators=(',', ':')) + '\n')
     temporary.replace(target)
+
+
+def reconcile_loop() -> None:
+    """Promote only sole-writer verified receipts through the central D1 API."""
+    while True:
+        try:
+            try:
+                frontier = json.loads(RECONCILE_FRONTIER.read_text())
+                due = float(frontier.get('next_at', 0))
+            except (OSError, ValueError, TypeError, AttributeError):
+                due = 0
+            if due > time.time():
+                time.sleep(min(300, max(1, due - time.time())))
+                continue
+            token = TOKEN_FILE.read_text().strip().removeprefix('Bearer ').strip()
+            result = request_json(BASE, '/api/operator/codex-rollouts/reconcile',
+                token, body={}, timeout=60)
+            if not result.get('ok'):
+                raise RuntimeError('verified rollout pointer reconciliation unavailable')
+            print(json.dumps({'rollout_pointer_reconcile': result}, separators=(',', ':')),
+                flush=True)
+            delay = 300 if result.get('has_more') else 900
+        except Exception as error:
+            print(json.dumps({'rollout_pointer_reconcile': 'held',
+                'error': type(error).__name__, 'detail': str(error)[:160]},
+                separators=(',', ':')), flush=True)
+            delay = 300
+        MARKER_ROOT.mkdir(parents=True, exist_ok=True)
+        temporary = RECONCILE_FRONTIER.with_name(RECONCILE_FRONTIER.name + f'.{os.getpid()}.tmp')
+        temporary.write_text(json.dumps({'next_at': time.time() + delay}) + '\n')
+        temporary.replace(RECONCILE_FRONTIER)
 
 
 def stock(body: dict) -> dict:
@@ -242,11 +275,15 @@ def run() -> dict:
 
 if __name__ == '__main__':
     daemon = '--daemon' in sys.argv[1:]
+    if daemon:
+        threading.Thread(target=reconcile_loop, daemon=True).start()
     delay = 60
     while True:
         try:
             print(json.dumps(run(), separators=(',', ':')), flush=True)
-            break
+            if not daemon:
+                break
+            time.sleep(900)
         except Exception as error:
             detail = str(error)[:220]
             advice = re.search(r'retry_after_seconds=(\d+)', detail)

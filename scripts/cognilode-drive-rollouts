@@ -38,13 +38,18 @@ def read_exact(connection, length):
     return b''.join(chunks)
 
 
-def writer(operation, name, value=None, expected_sha=None):
-    request = {'schema': 'cognilode.drive-writer.v1',
-               'operation': operation, 'name': 'codex-rollouts/' + name}
+def writer(operation, name=None, value=None, expected_sha=None, limit=None, after=None):
+    request = {'schema': 'cognilode.drive-writer.v1', 'operation': operation}
+    if name is not None:
+        request['name'] = 'codex-rollouts/' + name
     if value is not None:
         request['value'] = value
     if expected_sha:
         request['sha256'] = expected_sha
+    if limit is not None:
+        request['limit'] = limit
+    if after is not None:
+        request['after'] = after
     encoded = json.dumps(request, ensure_ascii=False, separators=(',', ':')).encode()
     if len(encoded) > MAX_FRAME:
         raise ValueError('Drive writer request exceeds bound')
@@ -69,6 +74,29 @@ def valid_rollout(value, revision):
 
 def handle(payload):
     operation = str(payload.get('operation') or '')
+    if operation == 'list_committed':
+        limit = payload.get('limit', 25)
+        after = payload.get('after')
+        if not isinstance(limit, int) or not 1 <= limit <= 25 or \
+                (after is not None and (not isinstance(after, str) or len(after) > 200)):
+            raise ValueError('invalid committed rollout page')
+        result = writer('list_committed', limit=limit, after=after)
+        if result.get('schema') != 'cognilode.drive-writer.v1' or \
+                not result.get('ok') or result.get('state') != 'committed':
+            raise RuntimeError('verified rollout catalog unavailable')
+        entries = result.get('entries')
+        if not isinstance(entries, list) or len(entries) > limit:
+            raise ValueError('invalid verified rollout catalog page')
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get('name'), str) or \
+                    not entry['name'].startswith('codex-rollouts/') or \
+                    not NAME.fullmatch(entry['name'][len('codex-rollouts/'):]) or \
+                    not re.fullmatch(r'[0-9a-f]{64}', str(entry.get('sha256') or '')) or \
+                    not isinstance(entry.get('readback_receipt'), dict) or \
+                    entry['readback_receipt'].get('sha256') != entry['sha256']:
+                raise ValueError('invalid verified rollout receipt')
+        return {'ok': True, 'state': 'committed', 'entries': entries,
+                'next_after': result.get('next_after'), 'has_more': bool(result.get('has_more'))}
     name = str(payload.get('name') or '')
     if not NAME.fullmatch(name):
         raise ValueError('invalid content-addressed rollout name')

@@ -157,12 +157,10 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
             "--interval", "60",
         ], {}))
 
-    # Gemini belongs to ComputerUseX, not to B4PT0R's ChatGPT transport.  Its
-    # historical worker claims only gemini.com jobs from the same central D1
-    # queue, uses the zero-cost native Gemini web transport, writes the exact
-    # turn to Agent Memory, reads it back centrally, and only then completes
-    # the fenced job.  Keeping it under this supervisor makes source cutovers
-    # cooperative without copying that implementation into this repository.
+    # ComputerUseX remains the domain-owned browser adapter.  B4PT0R owns the
+    # singular queue-to-actuator boundary for every non-ChatGPT .com provider,
+    # so the same lease, result envelope, artifact custody, and memory events
+    # apply without a second provider-specific queue implementation.
     configured_computerusex = os.environ.get("COGNILODE_COMPUTERUSEX_SOURCE", "").strip()
     candidates = [Path(configured_computerusex)] if configured_computerusex else [
         Path("/runtime/source/current/automation-computeruse-vision/src"),
@@ -172,22 +170,19 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
         (candidate for candidate in candidates if (candidate / "computerusex").is_dir()),
         candidates[0],
     )
-    gemini_worker = computerusex / "computerusex" / "gemini_agent_memory_worker.py"
-    if "gemini.com" in requested and gemini_worker.is_file():
+    provider_worker = HERE / "cognilode-provider-queue-actuator"
+    if provider_worker.is_file() and computerusex.is_dir():
         pythonpath = str(computerusex)
         inherited = os.environ.get("PYTHONPATH", "")
         if inherited:
             pythonpath += os.pathsep + inherited
-        workers.append(([
-            sys.executable,
-            "-m", "computerusex.gemini_agent_memory_worker",
-            "--token-file", os.environ.get(
-                "COGNILODE_OPERATOR_TOKEN_FILE",
-                "/home/worker/.config/cognilode/operator-bearer",
-            ),
-            "--state-root", str(ROOT / "gemini.com"),
-            "--loop", "--interval-seconds", "60",
-        ], {"PYTHONPATH": pythonpath}))
+        for provider in ("gemini.com", "claude.com", "anthropic.com"):
+            if provider in requested:
+                workers.append(([
+                    str(CLI.rsplit("/", 1)[0] + "/python"), str(provider_worker),
+                    "--provider", provider,
+                    "--device-id", os.environ.get("COGNILODE_ENVIRONMENT_ID", "company-container"),
+                ], {"PYTHONPATH": pythonpath}))
     return workers
 
 

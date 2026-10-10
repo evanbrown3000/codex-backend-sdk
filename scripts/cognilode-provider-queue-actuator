@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Consume one scheduled .com queue through the singular Area-1 actuator.
+
+The scheduler owns clocks, priority, assignment, and retry permission.  This
+process only advertises a concrete actuator, consumes leases assigned to it,
+crosses the fenced effect boundary, and reports the normalized provider result.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+from typing import Any, Mapping
+
+from codex_backend_sdk.provider_actuation_client import ProviderActuationClient
+from codex_backend_sdk.provider_scheduler_client import scheduler_call
+
+STOP = False
+
+
+def stop(*_args: object) -> None:
+    global STOP
+    STOP = True
+
+
+def fence(job: Mapping[str, Any]) -> dict[str, Any]:
+    lease = job.get("lease") if isinstance(job.get("lease"), Mapping) else {}
+    return {
+        "job_id": str(job["id"]),
+        "worker_id": str(job.get("claimed_by") or ""),
+        "lease_token": str(lease.get("token") or job.get("lease_token") or ""),
+        "lease_generation": int(lease.get("generation") or job.get("lease_generation") or 0),
+    }
+
+
+def local_attachment(row: object) -> str:
+    value = row if isinstance(row, str) else str((row or {}).get("ref") or (row or {}).get("path") or "")
+    if value.startswith("file:"):
+        value = value[5:]
+    path = Path(value)
+    if not path.is_file():
+        raise RuntimeError("scheduled_attachment_unavailable")
+    return str(path)
+
+
+def evidence(result: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows = [
+        {"kind": "provider_conversation", "ref": str(result.get("conversation_id") or "")},
+        {"kind": "provider_user_message", "ref": str(result.get("user_message_id") or "")},
+        {"kind": "provider_assistant_message", "ref": str(result.get("assistant_message_id") or "")},
+    ]
+    for artifact in result.get("artifacts") or []:
+        if isinstance(artifact, Mapping):
+            custody = artifact.get("custody") if isinstance(artifact.get("custody"), Mapping) else {}
+            rows.append({"kind": "provider_returned_artifact", "ref": str(
+                custody.get("artifact_id") or custody.get("sha256") or artifact.get("sha256") or artifact.get("path") or ""
+            )})
+    return [row for row in rows if row["ref"]]
+
+
+def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
+    boundary = scheduler_call({"operation": "begin_effect", **fence(job)})
+    if boundary.get("send_authorized") is not True:
+        return
+    parent = job.get("parent_operation") if isinstance(job.get("parent_operation"), Mapping) else {}
+    result = client.prompt(
+        str(job["provider"]),
+        str(job.get("conversation_id") or "") or None,
+        str(job.get("prompt") or ""),
+        tuple(local_attachment(row) for row in job.get("attachment_refs") or ()),
+        operation_id=str(job["id"]) + ":lease:" + str(job.get("lease_generation") or 0),
+        account_id=str(job.get("assigned_account") or "primary"),
+        parent_operation={
+            "operation_id": str(parent.get("operation_id") or job.get("parent_operation_id") or job["id"]),
+            "automation_order": int(parent.get("automation_order") or job.get("parent_automation_order") or 2),
+            "origin": str(parent.get("kind") or job.get("parent_kind") or "provider_queue"),
+            "taskflow_node": parent.get("taskflow_node"),
+        },
+        parent_message_id=str(job.get("parent_message_id") or "") or None,
+        model=str(job.get("model") or "") or None,
+        reasoning_effort=str(job.get("reasoning_effort") or "") or None,
+        metadata={"timeout_seconds": 1800, "queue_job_id": job["id"]},
+    )
+    if result.get("accepted") is not True or result.get("terminal") is not True:
+        scheduler_call({
+            "operation": "release_job", **fence(job), "provider_state": "provider_error",
+            "reason": str((result.get("provider_error") or {}).get("code") or result.get("state") or "provider_incomplete"),
+            "retry_after_seconds": 60,
+        })
+        return
+    scheduler_call({
+        "operation": "complete_job", **fence(job),
+        "conversation_id": result.get("conversation_id"),
+        "effect_evidence": evidence(result),
+        "artifacts": result.get("artifacts") or [],
+        "normalized_provider_result": dict(result),
+    })
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--provider", required=True, choices=("gemini.com", "claude.com", "anthropic.com"))
+    parser.add_argument("--device-id", default=os.environ.get("COGNILODE_ENVIRONMENT_ID", "company-container"))
+    parser.add_argument("--interval", type=float, default=10)
+    args = parser.parse_args()
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    device = args.device_id + ":b4pt0r:" + args.provider
+    client = ProviderActuationClient([sys.executable, "-m", "codex_backend_sdk.provider_broker"], timeout=2400)
+    while not STOP:
+        try:
+            scheduler_call({
+                "operation": "rhythm_device_heartbeat",
+                "device": {
+                    "id": device, "available": True, "active_turns": 0, "max_concurrency": 1,
+                    "environment_id": args.device_id,
+                    "capabilities": {
+                        "environment": args.device_id, "accounts": ["primary"],
+                        "providers": {args.provider: {
+                            "enabled": True, "authentication": "both", "attachments": True,
+                            "artifact_downloads": True, "continuation": True,
+                            "models": [], "reasoning_modes": [], "max_concurrency": 1,
+                        }},
+                    },
+                },
+            })
+            listed = scheduler_call({
+                "operation": "list_jobs", "provider": args.provider,
+                "state": "claimed", "assigned_device": device, "limit": 10,
+            })
+            for job in listed.get("jobs") or []:
+                if isinstance(job, Mapping):
+                    process(job, client)
+        except Exception as exc:
+            print(json.dumps({"kind": "provider_actuator_retry", "provider": args.provider,
+                              "error": type(exc).__name__ + ":" + str(exc)[:300]}), flush=True)
+        if not STOP:
+            time.sleep(max(1.0, args.interval))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

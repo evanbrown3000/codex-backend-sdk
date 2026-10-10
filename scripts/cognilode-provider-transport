@@ -296,9 +296,10 @@ def main() -> int:
     args.socket.unlink(missing_ok=True)
     server = Server(str(args.socket), Handler)
     os.chmod(args.socket, 0o660)
-    # Queue clocks and provider workers are owned by the independent batch
-    # supervisor. Credential-bearing transport owns only the mutation socket;
-    # it must neither kill nor start scheduling processes during source handoff.
+    # Retire only legacy children in this transport container's PID namespace.
+    # The authoritative queue clock lives in the separate chatmode container,
+    # so it is unaffected. Never start a replacement from this transport.
+    retire_stale_children()
     server.serve_forever()
     return 0
 

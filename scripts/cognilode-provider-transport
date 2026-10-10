@@ -26,6 +26,10 @@ def transport(args: list[str], send_fence: dict | None = None) -> dict:
     if len(args) < 3 or args[0] != "--auth-source" or args[1] not in {"codex", "chrome"} or args[2] not in {"send", "reconcile", "health"}:
         return {"exit_code": 64, "stderr": "unsupported provider operation"}
     verb = args[2]
+    if verb == "reconcile":
+        return {"exit_code": 64, "stdout": json.dumps({"ok": False,
+                "state": "provider_observability_disabled",
+                "provider_acceptance_observed": False})}
     if verb == "send" and (not isinstance(send_fence, dict) or
             not all(send_fence.get(key) for key in
                     ("job_id", "worker_id", "lease_token", "lease_generation", "device_id"))):
@@ -106,7 +110,6 @@ def main() -> int:
     args.socket.unlink(missing_ok=True)
     server = Server(str(args.socket), Handler)
     os.chmod(args.socket, 0o660)
-    threading.Thread(target=collect_forever, daemon=True).start()
     children = [
         subprocess.Popen([sys.executable, str(Path(__file__).with_name("cognilode-chatmode-queue-worker")),
                           "--device-id", os.environ.get("COGNILODE_ENVIRONMENT_ID", "company-container"),

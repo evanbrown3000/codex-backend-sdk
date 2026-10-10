@@ -29,7 +29,7 @@ def run(cli: str, root: Path, item: dict) -> dict:
     # Direct SDK sends are the same credential-custody capability as the
     # established Chat-mode sender.  Preserve that centrally authorized source
     # identity rather than falling into the policy's generic `b4pt0r` bucket.
-    environment.setdefault("COGNILODE_HTTP_SOURCE", "cognilode-b4pt0r-chatmode")
+    environment["COGNILODE_HTTP_SOURCE"] = "cognilode-b4pt0r-chatmode"
     completed = subprocess.run(command, env=environment, text=True, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, check=False)
     (job / "provider-result.json").write_text(completed.stdout, encoding="utf-8")

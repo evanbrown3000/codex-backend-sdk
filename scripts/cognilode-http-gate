@@ -105,31 +105,24 @@ class Gate:
         request_purpose, host, path = purpose(method, url)
         source = str(body.get("source") or "unknown")[:256]
         if host == "chatgpt.com" or host.endswith(".chatgpt.com"):
-            # The central service grants every credential-bearing provider
-            # request before it reaches ChatGPT. It also leases provider reads
-            # so ordinary agent polling stays on shared conversation deltas.
-            event_id = str(uuid.uuid4())
-            try:
-                decision = self.central("POST", {
-                    "operation": "authorize_request", "event_id": event_id,
-                    "environment": self.environment, "source": source,
-                    "purpose": request_purpose, "method": method,
-                    "host": host, "path": path,
-                })
-                if decision.get("ok") is not True or decision.get("purpose") != request_purpose:
-                    raise RuntimeError("central provider decision malformed")
-                allowed = decision.get("allowed") is True
-                outcome = str(decision.get("outcome") or "central_decision")
-                revision = int(decision.get("policy_revision") or 0)
-            except Exception as exc:
-                allowed = False
-                outcome = "central_unavailable:" + type(exc).__name__
-                revision = 0
-            self.record(source=source, request_purpose=request_purpose, method=method,
-                        host=host, path=path, allowed=allowed, outcome=outcome)
+            # Queue/rhythm admission is the authority for provider mutations.
+            # The gate applies the last centrally synchronized purpose policy
+            # locally, so a prompt does not depend on an extra per-request HTTP
+            # round trip while forbidden observability remains fail-closed.
+            with self.lock:
+                policy = dict(self.policy)
+            purpose_policy = policy.get("purposes") if isinstance(policy.get("purposes"), dict) else {}
+            allowed = bool(purpose_policy.get(request_purpose,
+                                               policy.get("default_allow", False)))
+            outcome = "cached_central_policy"
+            revision = int(policy.get("revision") or 0)
+            event_id = self.record(
+                source=source, request_purpose=request_purpose, method=method,
+                host=host, path=path, allowed=allowed, outcome=outcome,
+            )
             return {"ok": True, "allowed": allowed, "purpose": request_purpose,
                     "event_id": event_id, "policy_revision": revision,
-                    "central_first": True}
+                    "central_policy_cached": True}
         with self.lock:
             rule = self.policy.get("purposes", {}).get(request_purpose)
             allowed = bool(self.policy.get("default_allow", False) if rule is None else rule)

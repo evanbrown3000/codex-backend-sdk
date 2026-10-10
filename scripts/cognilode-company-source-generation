@@ -8,6 +8,7 @@ source-sync service itself remains the bootstrap source and does not use this.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,22 @@ import time
 
 
 STOP = False
+
+
+def content_generation(current: Path) -> tuple[Path, str] | None:
+    """Identify the executable closure rather than the checkout directory."""
+    selected = current.resolve()
+    if not selected.is_file():
+        return None
+    digest = hashlib.sha256()
+    sources = [selected]
+    package = selected.parent.parent / "codex_backend_sdk"
+    if package.is_dir():
+        sources.extend(sorted(package.rglob("*.py")))
+    for source in sources:
+        digest.update(str(source.relative_to(selected.parent.parent)).encode())
+        digest.update(source.read_bytes())
+    return selected, digest.hexdigest()
 
 
 def request_stop(_signum, _frame):
@@ -62,14 +79,18 @@ def main() -> int:
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
     while not STOP:
-        selected = current.resolve()
-        if not selected.is_file():
+        generation = content_generation(current)
+        if generation is None:
             print("SDK source generation pending", flush=True)
             time.sleep(5)
             continue
+        selected, signature = generation
         print(f"SDK service {options.script} source generation {selected}", flush=True)
         child = subprocess.Popen([sys.executable, str(selected), *child_args], env=os.environ.copy())
-        while child.poll() is None and not STOP and current.resolve() == selected:
+        while child.poll() is None and not STOP:
+            active_generation = content_generation(current)
+            if active_generation is None or active_generation[1] != signature:
+                break
             time.sleep(2)
         if child.poll() is None:
             last_report = 0.0

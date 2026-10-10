@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 from pathlib import Path
 import signal
 import subprocess
@@ -15,6 +16,18 @@ BOOT_WRAPPER = Path(__file__).resolve()
 STOP = False
 
 
+def content_generation() -> tuple[Path, str] | None:
+    service = (CURRENT / 'cognilode-company-remote-shell').resolve()
+    wrapper = (CURRENT / 'cognilode-company-remote-shell-runtime').resolve()
+    if not service.is_file() or not wrapper.is_file():
+        return None
+    digest = hashlib.sha256()
+    for source in (service, wrapper):
+        digest.update(source.name.encode())
+        digest.update(source.read_bytes())
+    return service, digest.hexdigest()
+
+
 def stop(_signum, _frame):
     global STOP
     STOP = True
@@ -24,14 +37,18 @@ def main() -> None:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     while not STOP:
-        selected = (CURRENT / 'cognilode-company-remote-shell').resolve()
-        if not selected.is_file():
+        generation = content_generation()
+        if generation is None:
             print('company relay waiting for synchronized SDK source', flush=True)
             time.sleep(5)
             continue
+        selected, signature = generation
         print(f'company relay source generation {selected}', flush=True)
         child = subprocess.Popen([sys.executable, str(selected)], env=os.environ.copy())
-        while not STOP and child.poll() is None and selected == (CURRENT / 'cognilode-company-remote-shell').resolve():
+        while not STOP and child.poll() is None:
+            current = content_generation()
+            if current is None or current[1] != signature:
+                break
             time.sleep(5)
         if child.poll() is None:
             child.terminate()

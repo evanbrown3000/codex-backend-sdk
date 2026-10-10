@@ -58,10 +58,15 @@ def b4pt0r_send(args: list[str]) -> dict:
         "user_message_id": str(uuid.uuid5(uuid.NAMESPACE_URL, "cognilode-chatmode-queue:" + job_id)),
         "artifact_directory": str(artifact_root),
     }
+    environment = os.environ.copy()
+    source_root = str(Path(__file__).resolve().parent.parent)
+    environment["PYTHONPATH"] = source_root + (
+        os.pathsep + environment["PYTHONPATH"] if environment.get("PYTHONPATH") else ""
+    )
     completed = subprocess.run(
         [str(runtime_python()), "-m", "codex_backend_sdk.provider_broker"],
         input=json.dumps(payload, separators=(",", ":")) + "\n", text=True,
-        capture_output=True, timeout=1900, check=False, env=os.environ.copy(),
+        capture_output=True, timeout=1900, check=False, env=environment,
     )
     try:
         value = json.loads(completed.stdout.splitlines()[-1])

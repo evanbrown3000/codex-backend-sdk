@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import fcntl
 from pathlib import Path
 import subprocess
 import signal
@@ -55,6 +56,11 @@ def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     ROOT.mkdir(parents=True, exist_ok=True)
+    daemon_lock = (ROOT / ".batch-daemon.lock").open("a+")
+    try:
+        fcntl.flock(daemon_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return 0
     # The actuator watches only the central D1 queue.  It does not poll a
     # provider: provider network traffic begins only after a rhythm claim and
     # then remains on the streamed send.  The floor watcher has one separate

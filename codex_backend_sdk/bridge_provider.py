@@ -9,6 +9,7 @@ this client observes only queue state and normalized Agent Memory.
 from __future__ import annotations
 
 import os
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -112,7 +113,32 @@ class ProviderCommandClient:
             "source": source,
             "request_id": request_id,
         }
-        value = self._queue_call(request)
+        try:
+            value = self._queue_call(request)
+        except RuntimeError as exc:
+            if str(exc) != "idempotency_conflict":
+                raise
+            # A durable batch can be resumed by another identical container
+            # after its first admission response was lost.  Resolve only the
+            # central queue identity (never provider history), and accept it
+            # only when the immutable work identity still matches.
+            existing_value = self._queue_call({"operation": "get_job", "job_id": request_id})
+            existing = existing_value.get("job") if isinstance(existing_value.get("job"), Mapping) else {}
+            prompt_hash = hashlib.sha256(str(request.get("prompt") or "").encode("utf-8")).hexdigest()
+            expected_attachments = sorted(
+                str(row.get("sha256") or "") for row in request.get("attachment_refs") or []
+                if isinstance(row, Mapping)
+            )
+            actual_attachments = sorted(
+                str(row.get("sha256") or "") for row in existing.get("attachment_refs") or []
+                if isinstance(row, Mapping)
+            )
+            if (not existing
+                    or existing.get("prompt_sha256") != prompt_hash
+                    or str(existing.get("provider") or "") != str(request.get("provider") or "")
+                    or expected_attachments != actual_attachments):
+                raise
+            value = {**existing_value, "job": existing, "idempotent_existing": True}
         job = value.get("job") if isinstance(value.get("job"), Mapping) else {}
         job_id = str(value.get("id") or job.get("id") or request["request_id"])
         return {**value, "job_id": job_id, "queued": True}

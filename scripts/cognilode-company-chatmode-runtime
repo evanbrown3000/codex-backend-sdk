@@ -131,6 +131,14 @@ def release_for(source: Path) -> tuple[Path, Path]:
                 str(release / "bin" / "python"), "-m", "pip", "install",
                 "--no-cache-dir", "mcp>=1.0,<2", "filelock>=3.13,<4",
             ], check=True, timeout=300)
+        elif computerusex.is_dir():
+            # A copied immutable base can predate ComputerUseX's profile lock.
+            # Publish only after the provider adapter's public dependency is
+            # present in this exact runtime generation.
+            subprocess.run([
+                str(release / "bin" / "python"), "-m", "pip", "install",
+                "--no-cache-dir", "filelock>=3.13,<4",
+            ], check=True, timeout=300)
         (release / ".complete").write_text(revision + "\n", encoding="utf-8")
     return source / "scripts" / "b4pt0r-com-batch-daemon", release / "bin" / "b4pt0r"
 

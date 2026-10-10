@@ -45,6 +45,16 @@ def _sdk_worker_generation(program: list[str]) -> tuple[list[str], str]:
     """Resolve SDK worker code from the moving source pointer, never stale HERE."""
     if len(program) < 2:
         return program, "external"
+    if len(program) >= 3 and program[1] == "-m" and program[2].startswith("computerusex."):
+        roots = [Path("/runtime/source/current/automation-computeruse-vision/src"),
+                 Path("/company/automation-computeruse-vision/src")]
+        package = next((root / "computerusex" for root in roots if (root / "computerusex").is_dir()), None)
+        if package is None:
+            return program, "computerusex-unavailable"
+        digest = hashlib.sha256()
+        for dependency in sorted(package.glob("*.py")):
+            digest.update(dependency.read_bytes())
+        return program, digest.hexdigest()
     current = SOURCE_ROOT / "current/codex-backend-sdk/scripts" / Path(program[1]).name
     selected = current if current.is_file() else Path(program[1])
     dependencies = [selected]

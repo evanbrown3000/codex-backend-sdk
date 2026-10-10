@@ -169,7 +169,11 @@ class Bridge:
     def __init__(self, native_args: Sequence[str]) -> None:
         self.native_args = tuple(native_args or ("app-server", "--stdio"))
         self.native_executable = os.environ.get("CODEX_EXECUTABLE", "codex")
-        self.actor_id = os.environ.get("B4PT0R_ACTOR_ID", f"b4pt0r-bridge:{os.getpid()}")
+        self.actor_id = (
+            os.environ.get("B4PT0R_ACTOR_ID")
+            or os.environ.get("COGNILODE_ACTOR_ID")
+            or "b4pt0r-desktop"
+        )
         self.memory = AgentMemoryClient()
         self.provider = ProviderCommandClient()
         self.remote = RemoteShellClient(actor_id=self.actor_id)
@@ -392,8 +396,7 @@ class Bridge:
         environment_id = str(params.get("environmentId") or params.get("environment_id") or "").strip()
         if not environment_id:
             raise ValueError("environmentId is required")
-        if environment_id != "local":
-            self.remote.select(environment_id)
+        self.remote.select(environment_id)
         self._start_transport(environment_id)
         self.emit({"id": request_id, "result": {"environmentId": environment_id, "selected": True}})
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.4
+
+- Use a stable relay actor identity across bridge restarts and honor the
+  existing `COGNILODE_ACTOR_ID` contract.
+- Record local and remote environment choices through the same persistent
+  relay selection operation.
+
 ## 0.6.3
 
 - Keep B4PT0R Electron unchanged and install the bridge under its discovered

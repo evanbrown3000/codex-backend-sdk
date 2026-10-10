@@ -27,8 +27,10 @@ the existing App Server thread and turn shapes.
 `cognilode/environment/list` returns the relay's environments and the current
 selection. `cognilode/environment/select` records an actor-scoped selection and
 starts the native App Server through the existing remote-shell relay. The actor
-identity defaults to the bridge process identity and can be supplied with
-`B4PT0R_ACTOR_ID` for persistence across process restarts.
+identity can be supplied with `B4PT0R_ACTOR_ID` or `COGNILODE_ACTOR_ID`.
+Without either variable it uses the
+stable `b4pt0r-desktop` identity. Local and remote selections are both recorded
+through the relay so a bridge restart keeps the last explicit choice.
 
 The remote transport starts `CODEX_EXECUTABLE app-server --stdio`, writes App
 Server JSON lines to the remote process, and consumes response deltas through

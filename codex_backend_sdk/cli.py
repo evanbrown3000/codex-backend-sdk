@@ -108,6 +108,22 @@ def _prompting(args: argparse.Namespace) -> Any:
         return provider.wait(args.job_id)
     if args.prompting_command == "queue":
         return provider.queue_status(args.destination)
+    memory = AgentMemoryClient()
+    if args.prompting_command == "list":
+        filters = {"provider": args.destination} if args.destination else {}
+        return memory.list(limit=args.limit, cursor=args.cursor, **filters)
+    if args.prompting_command == "search":
+        filters = {"provider": args.destination} if args.destination else {}
+        return memory.search(args.query, limit=args.limit, cursor=args.cursor, **filters)
+    if args.prompting_command == "read":
+        return memory.read(
+            args.conversation_id,
+            reader_id=args.reader_id,
+            after=args.after,
+            full=args.full,
+            peek=args.peek,
+            projection=args.projection,
+        )
     raise ValueError(f"Unknown prompting command: {args.prompting_command}")
 
 
@@ -248,6 +264,22 @@ def parser() -> argparse.ArgumentParser:
     unified_collect.add_argument("job_id")
     unified_queue = prompt_ops.add_parser("queue")
     unified_queue.add_argument("--provider", dest="destination", required=True)
+    unified_list = prompt_ops.add_parser("list")
+    unified_list.add_argument("--provider", dest="destination")
+    unified_list.add_argument("--limit", type=int, default=50)
+    unified_list.add_argument("--cursor")
+    unified_search = prompt_ops.add_parser("search")
+    unified_search.add_argument("query")
+    unified_search.add_argument("--provider", dest="destination")
+    unified_search.add_argument("--limit", type=int, default=50)
+    unified_search.add_argument("--cursor")
+    unified_read = prompt_ops.add_parser("read")
+    unified_read.add_argument("conversation_id")
+    unified_read.add_argument("--reader-id", default="b4pt0r-cli")
+    unified_read.add_argument("--after")
+    unified_read.add_argument("--full", action="store_true")
+    unified_read.add_argument("--peek", action="store_true")
+    unified_read.add_argument("--projection", default="read-model")
 
     remote = providers.add_parser("remote")
     remote.add_argument("--actor-id", default="default")

@@ -78,11 +78,20 @@ def main() -> int:
             failures, due = retry.get(str(batch), (0, 0.0))
             if now < due:
                 continue
-            result = subprocess.run([
+            process = subprocess.Popen([
                 str(HERE / "b4pt0r-com-batch"), str(batch),
                 "--state-root", str(state), "--cli", CLI,
-            ], check=False)
-            failures = 0 if result.returncode == 0 else failures + 1
+            ])
+            while not STOP and process.poll() is None:
+                time.sleep(1)
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            failures = 0 if process.returncode == 0 else failures + 1
             retry[str(batch)] = (failures, time.time() + min(900, 15 * (2 ** min(failures, 6))))
             if STOP:
                 break

@@ -36,6 +36,36 @@ def commit_bytes(
         root = prompt_root + "/returned" if prompt_root else ""
     digest = hashlib.sha256(data).hexdigest()
     if not endpoint or not root:
+        # The EvanPC Electron app and company containers address the same
+        # durable queue-input mount through different filesystem paths.  Store
+        # once beneath that shared mount and publish the stable container
+        # locator.  Configured Universe Storage remains the first choice.
+        physical_roots = [
+            Path(os.environ.get("COGNILODE_QUEUE_INPUT_SHARED_ROOT", "/runtime/queue-inputs")),
+            Path.home() / ".local/share/cognilode/company-runtime/shared/queue-inputs",
+        ]
+        shared = next((candidate for candidate in physical_roots
+                       if candidate.parent.is_dir() and os.access(candidate.parent, os.W_OK)), None)
+        if shared is not None:
+            safe_name = Path(name).name or "attachment"
+            destination = shared / digest / safe_name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if not destination.is_file() or hashlib.sha256(destination.read_bytes()).hexdigest() != digest:
+                with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as temporary:
+                    temporary.write(data)
+                    temporary.flush()
+                    os.fsync(temporary.fileno())
+                    staged = Path(temporary.name)
+                try:
+                    os.replace(staged, destination)
+                finally:
+                    staged.unlink(missing_ok=True)
+            return {
+                "ref": f"file:/runtime/queue-inputs/{digest}/{safe_name}",
+                "sha256": digest,
+                "name": safe_name,
+                "size": len(data),
+            }
         bucket = os.environ.get(
             "COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET",
             "cognilode-ephemeral-artifacts-362928919715-us-west-2",

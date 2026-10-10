@@ -265,13 +265,19 @@ def execute(payload: Mapping[str, Any]) -> Any:
             provider: authority.accounts(provider)
             for provider in ("chatgpt.com", "gemini.com", "claude.com", "anthropic.com")
         }
-        capabilities["agent_memory"] = actuator.publisher._publish({
-            **capabilities,
-            "observation_kind": "provider_capability_inventory",
-            "conversation_id": "inventory:provider-capabilities",
-            "observed_at": datetime.now(timezone.utc).isoformat(),
-            "source": {"type": "b4pt0r_provider_custody", "provenance": "runtime_capabilities"},
-        })
+        capabilities["agent_memory"] = {
+            provider: actuator.publisher._publish({
+                "schema": "cognilode.provider_capabilities.v1",
+                "observation_kind": "provider_capability_inventory",
+                "provider": provider,
+                "conversation_id": "inventory:provider-capabilities:" + provider,
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "source": {"type": "b4pt0r_provider_custody", "provenance": "runtime_capabilities"},
+                "capabilities": capabilities["providers"][provider],
+                "accounts": capabilities["accounts"][provider],
+            })
+            for provider in capabilities["providers"]
+        }
         return capabilities
     if operation == "provider_lease_issue":
         lease = _lease_authority().issue(

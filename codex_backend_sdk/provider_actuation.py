@@ -381,14 +381,19 @@ class UnifiedProviderActuator:
 
     def publish_capabilities(self) -> dict[str, Any]:
         value = self.capabilities()
-        receipt = self.publisher._publish({
-            **value,
-            "observation_kind": "provider_capability_inventory",
-            "conversation_id": "inventory:provider-capabilities",
-            "observed_at": datetime.now(timezone.utc).isoformat(),
-            "source": {"type": "b4pt0r_provider_actuator", "provenance": "runtime_capabilities"},
-        })
-        return {**value, "agent_memory": receipt}
+        receipts = {
+            provider: self.publisher._publish({
+                "schema": value["schema"],
+                "observation_kind": "provider_capability_inventory",
+                "provider": provider,
+                "conversation_id": "inventory:provider-capabilities:" + provider,
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "source": {"type": "b4pt0r_provider_actuator", "provenance": "runtime_capabilities"},
+                "capabilities": capabilities,
+            })
+            for provider, capabilities in value["providers"].items()
+        }
+        return {**value, "agent_memory": receipts}
 
     def prompt(self, request: ProviderPromptRequest) -> ProviderResultEnvelope:
         request = request.normalized()

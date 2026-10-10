@@ -29,6 +29,7 @@ services:
       - ${COMPANY_REPOS_ROOT}:/company:ro
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
       - company_operator:/home/worker/.config/cognilode:ro
+      - company_deploy_custody:/deploy:ro
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
 
   credential-sync:
@@ -58,6 +59,8 @@ services:
       - cognilode/memory-drive/rclone-config#rclone_config=/memory-auth/rclone.conf
       - --credential
       - cognilode/google-drive/rollout-service-account=/deploy/drive-rollout.json
+      - --credential
+      - /cognilode/agent-credentials/github/owner=/deploy/github-owner.json
       - --writer-secret
       - cognilode/chatmode/codex-auth
       - --writer-secret
@@ -70,7 +73,6 @@ services:
       - ${COMPANY_REPOS_ROOT}:/company:ro
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime:ro
       - company_auth:/home/worker/.codex
-      - memory_data:/runtime/agent-memory:ro
       - company_operator:/home/worker/.config/cognilode
       - company_deploy_custody:/deploy
       - company_relay_custody:/relay
@@ -206,6 +208,7 @@ services:
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
       - company_codex_release:/codex:ro
       - company_auth:/home/worker/.codex
+      - memory_data:/runtime/agent-memory:ro
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
     depends_on:
       - provider-transport
@@ -227,11 +230,13 @@ services:
       COGNILODE_SOURCE_SYNC_INTERVAL: "30"
       COGNILODE_SOURCE_SYNC_GENERATION: full-history-v1
       COGNILODE_AWS_PURPOSE: secrets-read
+      COGNILODE_GITHUB_CREDENTIAL_FILE: /deploy/github-owner.json
       COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
       - company_operator:/home/worker/.config/cognilode:ro
+      - company_deploy_custody:/deploy:ro
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
 
   codex-release-custody:
@@ -656,6 +661,7 @@ services:
       - ${COMPANY_REPOS_ROOT}:/company:ro
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
       - ${COMPANY_RUNTIME_ROOT}/worker:/runtime/worker
+      - company_deploy_custody:/deploy:ro
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
       - company_operator:/home/worker/.config/cognilode:ro
       - company_codex_release:/codex:ro
@@ -730,6 +736,7 @@ services:
       PYTHONPATH: /runtime/source/current/codex-manager/src
       COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID:-evanpc-company-container}
       COGNILODE_AWS_PURPOSE: secrets-read
+      COGNILODE_GITHUB_CREDENTIAL_FILE: /deploy/github-owner.json
       AWS_CONFIG_FILE: /home/worker/.aws/config
       AWS_SHARED_CREDENTIALS_FILE: /home/worker/.aws/credentials
       GIT_CONFIG_COUNT: "1"
@@ -738,6 +745,7 @@ services:
     volumes:
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
       - ${COMPANY_RUNTIME_ROOT}/worker:/runtime/worker
+      - company_deploy_custody:/deploy:ro
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
     depends_on:
       - source-sync

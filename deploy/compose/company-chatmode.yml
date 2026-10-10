@@ -417,6 +417,7 @@ services:
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - ${COMPANY_RUNTIME_ROOT}/worker:/runtime/worker
       - company_relay_custody:/relay:ro
       - company_codex_release:/codex:ro
       - company_operator:/home/worker/.config/cognilode:ro

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Dispatch a durable JSON batch through the B4PT0R provider API in parallel."""
+"""Admit a durable JSON batch to the single provider rhythm queue in parallel.
+
+This runner is deliberately an admission client, not a second provider sender.
+The central queue owns provider timing and the B4PT0R queue actuator owns every
+credential-bearing mutation.
+"""
 from __future__ import annotations
 
 import argparse
@@ -7,67 +12,49 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 from pathlib import Path
-import subprocess
 import sys
 import uuid
 import os
+
+from codex_backend_sdk.bridge_provider import ProviderCommandClient
 
 
 SDK_ROOT = Path(__file__).resolve().parent.parent
 
 
-def run(cli: str, root: Path, item: dict) -> dict:
+def run(_cli: str, root: Path, item: dict) -> dict:
     job_id = str(item.get("id") or uuid.uuid4())
     job = root / job_id
     job.mkdir(parents=True, exist_ok=True)
-    prompt = job / "prompt.txt"
     prompt_text = str(item["prompt"])
-    prompt.write_text(prompt_text, encoding="utf-8")
     prompt_identity = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
-    attempt_file = job / "provider-attempt.json"
+    request_id = str(uuid.uuid5(
+        uuid.NAMESPACE_URL, "b4pt0r-batch:" + job_id + ":" + prompt_identity
+    ))
+    client = ProviderCommandClient(timeout=120)
     try:
-        attempt = max(0, int(json.loads(attempt_file.read_text(encoding="utf-8"))["attempt"]))
-    except (OSError, ValueError, KeyError, TypeError):
-        attempt = 0
-    command = [cli, "chatgpt", "send", "--prompt-file", str(prompt),
-               "--model", str(item.get("model") or "gpt-5-6-thinking"),
-               "--effort", str(item.get("effort") or "xhigh"),
-               "--user-message-id", str(uuid.uuid5(
-                   uuid.NAMESPACE_URL,
-                   "b4pt0r-batch:" + job_id + ":" + prompt_identity + f":attempt:{attempt}"
-               )),
-               "--project", str(item.get("project") or "unified-b4pt0r"),
-               "--role", str(item.get("role") or "automated-provider-worker"),
-               "--source", str(item.get("source") or "b4pt0r-batch"),
-               "--prompt-authority", str(item.get("prompt_authority") or "interactive_operator")]
-    if isinstance(item.get("decisionx"), dict):
-        command.extend(("--decisionx", json.dumps(item["decisionx"], separators=(",", ":"))))
-    for attachment in item.get("attachments") or []:
-        command.extend(("--attach", str(Path(attachment).resolve())))
-    environment = os.environ.copy()
-    # The long-lived company container deliberately survives source cutovers.
-    # Its console-script entry point may therefore have been installed from an
-    # older editable checkout.  Always import the SDK adjacent to this batch
-    # runner so a cutover changes implementation without rebuilding a container
-    # or mutating its credential volume.
-    pythonpath = environment.get("PYTHONPATH", "")
-    environment["PYTHONPATH"] = str(SDK_ROOT) + (os.pathsep + pythonpath if pythonpath else "")
-    # Direct SDK sends are the same credential-custody capability as the
-    # established Chat-mode sender.  Preserve that centrally authorized source
-    # identity rather than falling into the policy's generic `b4pt0r` bucket.
-    environment["COGNILODE_HTTP_SOURCE"] = "cognilode-b4pt0r-chatmode"
-    completed = subprocess.run(command, env=environment, text=True, stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, check=False)
-    (job / "provider-result.json").write_text(completed.stdout, encoding="utf-8")
-    try:
-        result = json.loads(completed.stdout)
-    except (ValueError, TypeError):
-        result = {}
-    if result.get("error") == "RuntimeError" and result.get("message") == "idempotency_conflict":
-        temporary = attempt_file.with_suffix(".tmp")
-        temporary.write_text(json.dumps({"attempt": attempt + 1}) + "\n", encoding="utf-8")
-        os.replace(temporary, attempt_file)
-    return {"id": job_id, "returncode": completed.returncode}
+        result = client.send_chatgpt(
+            prompt=prompt_text,
+            conversation_id=item.get("conversation_id"),
+            parent_message_id=item.get("parent_message_id"),
+            model=str(item.get("model") or "gpt-5-6-thinking"),
+            effort=str(item.get("effort") or "xhigh"),
+            attachments=tuple(str(Path(value).resolve()) for value in item.get("attachments") or ()),
+            request_id=request_id,
+            project=str(item.get("project") or "unified-b4pt0r"),
+            role=str(item.get("role") or "automated-provider-worker"),
+            source=str(item.get("source") or "b4pt0r-batch"),
+            prompt_authority=str(item.get("prompt_authority") or "interactive_operator"),
+            priority=item.get("priority"),
+            decisionx=item.get("decisionx") if isinstance(item.get("decisionx"), dict) else None,
+        )
+    except Exception as exc:
+        result = {"ok": False, "error": type(exc).__name__, "message": str(exc)}
+    temporary = (job / "queue-admission.json.tmp")
+    temporary.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, job / "queue-admission.json")
+    return {"id": job_id, "returncode": 0 if result.get("queued") else 1,
+            "queue_job_id": result.get("job_id")}
 
 
 def main() -> int:

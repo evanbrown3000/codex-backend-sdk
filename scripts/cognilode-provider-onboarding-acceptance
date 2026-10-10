@@ -62,16 +62,31 @@ def provider_seconds(job: Mapping[str, Any]) -> float:
 def provider_reasoning_evidence(job: Mapping[str, Any]) -> tuple[float, int]:
     """Measure from the first provider-visible assistant event to terminal."""
     result = job.get("normalized_provider_result") if isinstance(job.get("normalized_provider_result"), Mapping) else {}
-    receipt = result.get("provider_receipt") if isinstance(result.get("provider_receipt"), Mapping) else {}
-    summary = receipt.get("provider_summary") if isinstance(receipt.get("provider_summary"), Mapping) else {}
-    first = summary.get("first_assistant_event_at")
-    count = int(summary.get("assistant_event_count") or 0)
-    completed = receipt.get("completed_at")
+    candidates: list[Mapping[str, Any]] = [result]
+    receipts: list[Mapping[str, Any]] = []
+    seen: set[int] = set()
+    while candidates:
+        row = candidates.pop(0)
+        if id(row) in seen:
+            continue
+        seen.add(id(row)); receipts.append(row)
+        for key in ("provider_receipt", "provider_model_receipt", "model_receipt",
+                    "provider_summary", "response_observation"):
+            child = row.get(key)
+            if isinstance(child, Mapping):
+                candidates.append(child)
+    first = next((row.get("first_assistant_event_at") for row in receipts
+                  if row.get("first_assistant_event_at") is not None), None)
+    count = max((int(row.get("assistant_event_count") or 0) for row in receipts), default=0)
+    completed = next((row.get("provider_completed_at") or row.get("completed_at")
+                      for row in receipts
+                      if row.get("provider_completed_at") is not None or row.get("completed_at") is not None), None)
     # Receipts created immediately before this field existed still have an
     # immutable raw SSE.  Recover first-thought evidence locally; never query
     # provider history merely to satisfy acceptance.
     if first is None:
-        raw = Path(str(receipt.get("raw_path") or ""))
+        raw_value = next((row.get("raw_path") for row in receipts if row.get("raw_path")), "")
+        raw = Path(str(raw_value or ""))
         if raw.is_file():
             observed: list[float] = []
             for line in raw.read_text(encoding="utf-8", errors="replace").splitlines():

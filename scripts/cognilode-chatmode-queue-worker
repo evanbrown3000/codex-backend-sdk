@@ -26,6 +26,7 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 import uuid
 import threading
 import time
@@ -329,14 +330,52 @@ def _stage_remote_attachment(url: str, expected: str, *, max_bytes: int = MAX_AT
     return target
 
 
+def _stage_universe_attachment(locator: str, expected: str) -> Path:
+    """Materialize a custody locator through the elected Universe Storage API."""
+    from universe_storage.client import UniverseStorageClient
+
+    endpoint = os.environ.get("UNIVERSE_STORAGE_ENDPOINT", "").strip()
+    password = os.environ.get("UNIVERSE_STORAGE_OPERATOR_PASSWORD", "").strip()
+    password_file = os.environ.get("UNIVERSE_STORAGE_OPERATOR_PASSWORD_FILE", "").strip()
+    if not password and password_file:
+        password = Path(password_file).read_text(encoding="utf-8").strip()
+    if not endpoint or not password:
+        raise RuntimeError("central Universe Storage custody is not configured")
+    data = UniverseStorageClient(endpoint, operator_password=password, timeout=180).read(locator)
+    if len(data) > MAX_ATTACHMENT_BYTES:
+        raise ValueError("attachment exceeds bounded size")
+    actual = hashlib.sha256(data).hexdigest()
+    if expected and actual != expected.lower():
+        raise ValueError("staged attachment SHA-256 mismatch")
+    STAGE_ROOT.mkdir(parents=True, exist_ok=True)
+    target = STAGE_ROOT / actual
+    if not target.is_file():
+        with tempfile.NamedTemporaryFile(dir=STAGE_ROOT, delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return target
+
+
 def attachment_paths(job: dict) -> list[Path]:
     paths = []
     for row in job.get("attachment_refs") or []:
         expected = "" if isinstance(row, str) else str(row.get("sha256") or "")
         ref = row if isinstance(row, str) else str(row.get("ref") or "")
-        if ref.startswith("file:"):
+        parsed = urlsplit(ref)
+        custody_locator = bool(parsed.scheme and parsed.netloc) and parsed.scheme not in {"http", "https", "s3"}
+        if custody_locator:
+            path = _stage_universe_attachment(ref, expected)
+        elif ref.startswith("file:"):
             ref = ref.removeprefix("file:")
-        path = Path(ref).expanduser() if ref and not ref.startswith(("https://", "http://", "s3://")) else None
+            path = Path(ref).expanduser()
+        else:
+            path = Path(ref).expanduser() if ref and not ref.startswith(("https://", "http://", "s3://")) else None
         if not path or not path.is_absolute() or not path.is_file():
             mirrors = [] if isinstance(row, str) else list(row.get("mirrors") or [])
             if ref.startswith(("https://", "s3://")):

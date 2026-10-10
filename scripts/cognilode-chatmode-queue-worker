@@ -1267,12 +1267,28 @@ def _dx_native_preflight(job, files, value, evidence):
     return None
 
 
-def validated_result(value: dict) -> tuple[str, list[dict]] | None:
+def validated_result(value: dict, job: dict | None = None) -> tuple[str, list[dict]] | None:
     central = value.get("central_conversation_store") or {}
     conversation_id = str(value.get("conversation_id") or "")
     if not (value.get("assistant_terminal") is True and central.get("central_readback_verified") is True
             and central.get("conversation_id") == conversation_id and conversation_id):
         return None
+    # RPE producer cells ask for source analysis in the terminal response, not
+    # an external-effect ZIP. Bind text-only completion to the exact D1 RPE
+    # request and centrally read-back response so a different turn cannot
+    # satisfy this cell or borrow the TaskFlow sandbox-artifact contract.
+    if job is not None and job.get("prompt_author") == "rpe_run":
+        proof = job.get("rpe_run_receipt") or {}
+        answer = value.get("terminal_assistant_text") or ""
+        if (proof.get("schema") != "cognilode.rpe.model_request.v1"
+                or job.get("id") != f"rpe-{proof.get('request_id')}"
+                or value.get("queue_job_id") != job.get("id")
+                or central.get("central_prompt_sha256") != job.get("prompt_sha256")
+                or not isinstance(answer, str) or not answer.strip()
+                or hashlib.sha256(answer.encode("utf-8")).hexdigest()
+                   != central.get("central_response_sha256")):
+            return None
+        return conversation_id, []
     files = []
     for item in value.get("downloaded_files") or []:
         path = Path(str(item.get("path") or ""))
@@ -1497,10 +1513,29 @@ def complete_legacy_export_match(job: dict, value: dict) -> bool:
 
 
 def complete_from_result(job: dict, value: dict) -> bool:
-    checked = validated_result(value)
+    checked = validated_result(value, job)
     if not checked:
         return False
     conversation_id, files = checked
+    if job.get("prompt_author") == "rpe_run":
+        text_sha = hashlib.sha256(value["terminal_assistant_text"].encode("utf-8")).hexdigest()
+        evidence = [{"kind": "provider_conversation", "ref": conversation_id},
+                    {"kind": "central_conversation_readback", "ref": conversation_id},
+                    {"kind": "rpe_terminal_research_text", "ref": text_sha,
+                     "request_id": job["rpe_run_receipt"]["request_id"],
+                     "run_id": job["rpe_run_receipt"]["run_id"]}]
+        reply = sender.operator_memory_post({"operation": "complete_job", **fence(job),
+                                             "conversation_id": conversation_id,
+                                             "effect_evidence": evidence})
+        if reply.get("ok"):
+            atomic_json(job_state_path(job["id"]), {"state": "complete", "job_id": job["id"],
+                                                    "conversation_id": conversation_id,
+                                                    "terminal_text_sha256": text_sha})
+            event("rpe_research_turn_completed", job_id=job["id"],
+                  conversation_id=conversation_id, terminal_text_sha256=text_sha)
+            return True
+        event("completion_rejected", job_id=job["id"], error=reply.get("error"))
+        return False
     if (job.get("taskflow_multi_phase") or (job.get("payload") or {}).get("taskflow_multi_phase")
         or job.get("phase") == "decisionx_successor"):
         try:
@@ -1547,7 +1582,7 @@ def recover(job: dict, device_id: str = DEVICE_ID) -> None:
         return
     if value and complete_from_result(job, value):
         return
-    if value and validated_result(value):
+    if value and validated_result(value, job):
         return  # Central/effect admission can retry without more provider reads.
     state_path = job_state_path(job["id"])
     try:
@@ -1620,7 +1655,7 @@ def recover(job: dict, device_id: str = DEVICE_ID) -> None:
             fresh_collection = False
         value = result_for_job(job["id"])
         if value:
-            if complete_legacy_export_match(job, value) or complete_from_result(job, value) or validated_result(value):
+            if complete_legacy_export_match(job, value) or complete_from_result(job, value) or validated_result(value, job):
                 return
         if terminal_deliverable_candidate(job, value):
             now = time.time()

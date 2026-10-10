@@ -5,6 +5,7 @@ import argparse
 import base64
 import datetime as dt
 import email.utils
+import fcntl
 import hashlib
 import json
 import os
@@ -310,6 +311,28 @@ def new_session(profile: Path, impersonate: str):
 
 
 def codex_device_id() -> str:
+    if os.environ.get("COGNILODE_CHATMODE_PORTABLE") == "1":
+        # A company container is itself the credential-custody device.  Keep a
+        # stable provider identity beside its writable Codex auth volume rather
+        # than depending on an Electron profile that intentionally is not
+        # mounted into the container.
+        path = (Path(os.environ["CODEX_HOME"]) / "chatmode-provider-device-id"
+                if os.environ.get("CODEX_HOME") else
+                Path.home() / ".config/cognilode/chatmode-provider-device-id")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = path.with_name(path.name + ".lock")
+        with lock_path.open("a+", encoding="ascii") as lock:
+            os.chmod(lock_path, 0o600)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            if path.exists():
+                return str(uuid.UUID(path.read_text(encoding="ascii").strip()))
+            value = str(uuid.uuid4())
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="ascii") as stream:
+                stream.write(value + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            return value
     local_storage = Path.home() / ".config/Codex/Default/Local Storage/leveldb"
     if not local_storage.exists():
         return ""

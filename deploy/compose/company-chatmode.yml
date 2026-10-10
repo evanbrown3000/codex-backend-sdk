@@ -1,0 +1,665 @@
+x-company-aws-cli-cache: &company_aws_cli_cache
+  - /home/worker/.aws/cli/cache:uid=1000,gid=1000,mode=0700
+
+services:
+  http-gate:
+    tmpfs: *company_aws_cli_cache
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /company/codex-backend-sdk
+    entrypoint: [sh, -c]
+    command:
+      - |
+        while ! test -f /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-source-generation; do sleep 2; done
+        exec python3 /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-source-generation \
+          --script cognilode-http-gate --drain-socket /runtime/http-gate/gate.sock --no-drain -- \
+          --socket /runtime/http-gate/gate.sock --state /runtime/http-gate \
+          --fallback-log /runtime/http-gate/fallback.jsonl \
+          --environment ${COGNILODE_ENVIRONMENT_ID} --aws /usr/bin/aws
+    environment:
+      HOME: /home/worker
+      COGNILODE_HTTP_GATE_BYPASS: "1"
+      COGNILODE_AWS_PURPOSE: secrets-read
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
+      PATH: /usr/bin:/usr/local/bin:/bin
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - company_operator:/home/worker/.config/cognilode:ro
+      - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+
+  credential-sync:
+    tmpfs: *company_aws_cli_cache
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /company/codex-backend-sdk
+    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-central-credential-sync]
+    command:
+      - --credential
+      - cognilode/chatmode/codex-auth=/home/worker/.codex/auth.json
+      - --credential
+      - cognilode/http-gate-operator-token=/home/worker/.config/cognilode/operator-bearer
+      - --credential
+      - cognilode/population/authority/cloudflare-pages-deploy-token=/deploy/pages-token.json
+      - --credential
+      - /cognilode/agent-credentials/cloudflare/full-admin=/deploy/worker-token.json
+      - --credential
+      - cognilode/http-gate-operator-token=/deploy/operator-bearer
+      - --credential
+      - ${COGNILODE_RELAY_NODE_SECRET_ID:-cognilode/remote-shell/node}=/relay/node.json
+      - --credential
+      - ${COGNILODE_RELAY_TUNNEL_SECRET_ID:-cognilode/remote-shell/tunnel-token}=/relay/tunnel-token
+      - --credential
+      - cognilode/memory-drive/rclone-config#rclone_config=/memory-auth/rclone.conf
+      - --credential
+      - cognilode/google-drive/rollout-service-account=/deploy/drive-rollout.json
+      - --writer-secret
+      - cognilode/chatmode/codex-auth
+      - --writer-secret
+      - cognilode/memory-drive/rclone-config
+    environment:
+      HOME: /home/worker
+      COGNILODE_AWS_PURPOSE: secrets-write
+      PATH: /usr/bin:/usr/local/bin:/bin
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime:ro
+      - company_auth:/home/worker/.codex
+      - company_operator:/home/worker/.config/cognilode
+      - company_deploy_custody:/deploy
+      - company_relay_custody:/relay
+      - memory_drive_auth:/memory-auth
+      - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+
+  provider-transport:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    cpus: 1
+    mem_limit: 2g
+    pids_limit: 192
+    working_dir: /company/codex-backend-sdk
+    entrypoint: [sh, -c]
+    command:
+      - |
+        while ! test -f /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-source-generation; do sleep 2; done
+        exec python3 /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-source-generation --script cognilode-provider-transport --drain-socket /runtime/provider.sock -- --socket /runtime/provider.sock
+    environment:
+      HOME: /home/worker
+      CODEX_HOME: /home/worker/.codex
+      COGNILODE_CHATMODE_PORTABLE: "1"
+      PYTHONPATH: /runtime/source/current/codex-backend-sdk/gate
+      COGNILODE_HTTP_GATE_SOCKET: /runtime/http-gate/gate.sock
+      COGNILODE_HTTP_GATE_FALLBACK_LOG: /runtime/http-gate/fallback.jsonl
+      COGNILODE_HTTP_GATE_POLICY_FILE: /runtime/http-gate/policy.json
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
+      COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
+      PATH: /node-runtime:/usr/bin:/usr/local/bin:/bin
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - company_node_runtime:/node-runtime:ro
+      - company_auth:/home/worker/.codex
+      - company_browser:/custody/browser:ro
+      - company_operator:/home/worker/.config/cognilode:ro
+      - ${COMPANY_RUNTIME_ROOT}/worker:/home/worker/.local/share/cognilode
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+    depends_on:
+      - http-gate
+      - credential-sync
+
+  chatmode:
+    tmpfs: *company_aws_cli_cache
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    cpus: 1
+    mem_limit: 2g
+    pids_limit: 192
+    working_dir: /runtime
+    entrypoint: [sh, -c]
+    command:
+      - >-
+        while ! test -f /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-chatmode-runtime; do sleep 2; done;
+        exec python3 /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-chatmode-runtime
+    environment:
+      HOME: /home/worker
+      COGNILODE_CHATMODE_PORTABLE: "1"
+      COGNILODE_CHATMODE_RUNTIME_EPOCH: bounded-drain-20261010
+      COGNILODE_CHATMODE_DRAIN_GRACE_SECONDS: "120"
+      COGNILODE_HOSTED_RHYTHM_PROVIDERS: chatgpt.com,gemini.com,claude.com,anthropic.com
+      PYTHONPATH: /runtime/source/current/codex-backend-sdk/gate:/runtime/source/current/modified-codex-runtime/src
+      COGNILODE_HTTP_GATE_SOCKET: /runtime/http-gate/gate.sock
+      COGNILODE_HTTP_GATE_FALLBACK_LOG: /runtime/http-gate/fallback.jsonl
+      COGNILODE_HTTP_GATE_POLICY_FILE: /runtime/http-gate/policy.json
+      COGNILODE_PROVIDER_SOCKET: /runtime/provider.sock
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
+      COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
+      COGNILODE_COMPANY_ROOT: /company
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+      COGNILODE_B4PT0R_SDK_ROOT: /runtime/source/current/codex-backend-sdk
+      COGNILODE_UNIFIED_PROMPTER: /runtime/source/current/modified-codex-runtime/src/modified_codex/unified_bridge.py
+      COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
+      COGNILODE_TASKFLOW_ATTACHMENT_S3_READ_BUCKETS: cognilode-conversation-visibility-362928919715-us-west-2
+      COGNILODE_AWS_CLI: /usr/bin/aws
+      COGNILODE_AWS_PURPOSE: artifact-write
+      PATH: /usr/bin:/usr/local/bin:/bin
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - company_operator:/home/worker/.config/cognilode:ro
+      - ${COMPANY_RUNTIME_ROOT}/worker:/home/worker/.local/share/cognilode
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+    depends_on:
+      - provider-transport
+      - source-sync
+
+  source-sync:
+    tmpfs: *company_aws_cli_cache
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /company/codex-backend-sdk
+    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-company-source-sync]
+    environment:
+      HOME: /home/worker
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+      COGNILODE_SOURCE_SYNC_INTERVAL: "300"
+      COGNILODE_SOURCE_SYNC_GENERATION: full-history-v1
+      COGNILODE_AWS_PURPOSE: secrets-read
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
+      COGNILODE_CODEX_SOURCE_COMMIT: 213bb80435a63a99f89327bb5acef8724b33dd53
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - company_operator:/home/worker/.config/cognilode:ro
+      - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+
+  codex-release-custody:
+    tmpfs: *company_aws_cli_cache
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "0:0"
+    working_dir: /company/codex-backend-sdk
+    entrypoint: [python3, /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-codex-release-custody-runtime]
+    environment:
+      HOME: /tmp/cognilode-codex-release-custody
+      AWS_CONFIG_FILE: /root/.aws/config
+      AWS_SHARED_CREDENTIALS_FILE: /root/.aws/credentials
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+      COGNILODE_CODEX_SOURCE_COMMIT: 213bb80435a63a99f89327bb5acef8724b33dd53
+      COGNILODE_CODEX_INSTALL_ROOT: /codex
+      COGNILODE_CODEX_RELEASE_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
+      COGNILODE_AWS_CLI: /usr/bin/aws
+      COGNILODE_AWS_PURPOSE: artifact-write
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime:ro
+      - company_operator:/home/worker/.config/cognilode:ro
+      - ${AWS_AUTH_ROOT}:/root/.aws:ro
+      - company_codex_release:/codex
+
+  codex-builder:
+    image: rust:1.95-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1
+    restart: unless-stopped
+    network_mode: bridge
+    user: "0:0"
+    working_dir: /company/codex-backend-sdk
+    entrypoint: [python3, /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-codex-builder]
+    environment:
+      HOME: /root
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+      COGNILODE_CODEX_INSTALL_ROOT: /codex
+      COGNILODE_BUILDER_GENERATION: synced-resolved-pin-v2
+      COGNILODE_CODEX_MIN_BUILD_MEMORY_BYTES: "5368709120"
+      CARGO_TARGET_DIR: /cargo-target
+      CARGO_BUILD_JOBS: "4"
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - company_codex_release:/codex
+      - company_codex_target:/cargo-target
+      - company_cargo_registry:/usr/local/cargo/registry
+      - company_cargo_git:/usr/local/cargo/git
+    depends_on:
+      - source-sync
+      - codex-release-custody
+
+  site-publisher:
+    image: node:22-bookworm
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /company/codex-backend-sdk
+    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-company-site-publisher]
+    environment:
+      HOME: /tmp
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+      COGNILODE_CLOUDFLARE_TOKEN_FILE: /deploy/pages-token.json
+      COGNILODE_CLOUDFLARE_WORKER_TOKEN_FILE: /deploy/worker-token.json
+      COGNILODE_OPERATOR_TOKEN_FILE: /deploy/operator-bearer
+      COGNILODE_SITE_PUBLISH_INTERVAL: "60"
+      PATH: /usr/bin:/usr/local/bin:/bin
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - company_deploy_custody:/deploy:ro
+    depends_on:
+      - source-sync
+      - credential-sync
+
+  drive-provisioner:
+    image: node:22-bookworm
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /runtime/source/current/cognilode-cloudflare-pages-site
+    entrypoint: [sh, -c]
+    command:
+      - >-
+        while :; do
+          if test -f /runtime/source/current/cognilode-cloudflare-pages-site/scripts/provision-drive-rollout-pages-secrets.py; then
+            python3 /runtime/source/current/cognilode-cloudflare-pages-site/scripts/provision-drive-rollout-pages-secrets.py || true;
+          fi;
+          sleep 300;
+        done
+    environment:
+      HOME: /tmp
+      COGNILODE_DRIVE_ROLLOUT_CUSTODY_FILE: /deploy/drive-rollout.json
+      COGNILODE_CLOUDFLARE_TOKEN_FILE: /deploy/pages-token.json
+      COGNILODE_DRIVE_PAGES_SYNC_STATE: /runtime/drive-pages-sync.json
+      PATH: /usr/bin:/usr/local/bin:/bin
+    volumes:
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - company_deploy_custody:/deploy:ro
+    depends_on:
+      - source-sync
+      - credential-sync
+
+  taskflow-worker:
+    tmpfs: *company_aws_cli_cache
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /company/codex-backend-sdk
+    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-company-taskflow-runtime]
+    environment:
+      HOME: /home/worker
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+      COGNILODE_TASKFLOW_PLAN_ROOT: /runtime/worker/rpe-runs
+      COGNILODE_TASKFLOW_SECRETARY_ROOT: /runtime/worker/taskflow-secretary
+      COGNILODE_LLM_GOVERNANCE_ROOT: /runtime/worker/llm-governance
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
+      COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
+      COGNILODE_CODEX_BIN: /runtime/source/current/codex-backend-sdk/scripts/cognilode-codex-exec-client
+      COGNILODE_CODEX_RELEASE_BIN: /codex/bin/codex
+      COGNILODE_CODEX_EXEC_SOCKET: /codex-exec/broker.sock
+      COGNILODE_CENTRAL_ROLLOUT_HELPER: /codex/bin/central-rollouts
+      CODEX_HOME: /home/worker/.codex
+      COGNILODE_RELAY_NODE_FILE: /relay/node.json
+      COGNILODE_AWS_PURPOSE: artifact-write
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - company_operator:/home/worker/.config/cognilode:ro
+      - company_codex_release:/codex:ro
+      - company_codex_exec:/codex-exec
+      - company_relay_custody:/relay:ro
+      - ${COMPANY_RUNTIME_ROOT}/worker:/runtime/worker
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+    depends_on:
+      - source-sync
+      - codex-builder
+      - credential-sync
+      - codex-exec-broker
+
+  codex-rollout-sync:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    entrypoint: [sh, -c]
+    command:
+      - >-
+        python3 /runtime/source/current/codex-backend-sdk/scripts/cognilode-central-rollout-acceptance-runtime &
+        exec python3 /codex/bin/central-rollouts daemon
+    environment:
+      HOME: /home/worker
+      CODEX_HOME: /home/worker/.codex
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - company_codex_release:/codex:ro
+      - company_auth:/home/worker/.codex
+      - /dev/null:/home/worker/.codex/auth.json:ro
+      - company_operator:/home/worker/.config/cognilode:ro
+    depends_on:
+      - source-sync
+      - codex-builder
+      - credential-sync
+
+  drive-rollouts:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /runtime
+    entrypoint: [python3, /runtime/source/current/codex-backend-sdk/scripts/cognilode-drive-rollouts-runtime]
+    environment:
+      COGNILODE_ROLLOUT_SOCKET: /runtime/drive-rollouts/rollouts.sock
+      COGNILODE_DRIVE_WRITER_SOCKET: /runtime/worker/drive-writer.sock
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - ${COMPANY_RUNTIME_ROOT}/worker:/runtime/worker
+    depends_on:
+      - source-sync
+
+  aws-broker:
+    profiles: [aws-broker]
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /runtime
+    entrypoint: [python3, /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-aws-broker]
+    environment:
+      HOME: /home/worker
+      AWS_DEFAULT_REGION: us-west-2
+      AWS_EC2_METADATA_DISABLED: "false"
+      COGNILODE_AWS_BROKER_SOCKET: /runtime/aws-broker/broker.sock
+      COGNILODE_AWS_BROKER_ROLE_ARN: ${COGNILODE_AWS_BROKER_ROLE_ARN:-}
+      COGNILODE_AWS_ACCOUNT_ID: ${COGNILODE_AWS_ACCOUNT_ID:-362928919715}
+      COGNILODE_AWS_ARTIFACT_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
+      COGNILODE_AWS_MEMORY_BUCKET: cognilode-conversation-visibility-362928919715-us-west-2
+      COGNILODE_AWS_CLI: /usr/bin/aws
+    volumes:
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+    depends_on:
+      - source-sync
+
+  remote-shell:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    # The named tunnel needs the host's egress route to Cloudflare edge :7844.
+    # The process remains in Docker and binds loopback only; the authenticated
+    # tunnel is its sole inbound route.
+    network_mode: host
+    cpus: 2
+    pids_limit: 512
+    mem_limit: 4g
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /runtime
+    entrypoint: [python3, /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-remote-shell-runtime]
+    healthcheck:
+      test: [CMD, python3, -c, "from pathlib import Path; import urllib.request; assert Path('/relay/node.json').is_file() and Path('/relay/tunnel-token').is_file(); assert Path('/relay/tunnel-token').stat().st_size > 0; urllib.request.urlopen('http://127.0.0.1:8899/healthz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+    environment:
+      HOME: /home/worker
+      CODEX_HOME: /home/worker/.codex
+      COGNILODE_WORKSPACE: /runtime/source/current
+      COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
+      COGNILODE_MCP_BIND_HOST: 127.0.0.1
+      COGNILODE_RELAY_NODE_FILE: /relay/node.json
+      COGNILODE_HEARTBEAT_STATUS: /runtime/relay/heartbeat.json
+      COGNILODE_ROLLOUT_SOCKET: /runtime/drive-rollouts/rollouts.sock
+      COGNILODE_STOCK_CLI: /runtime/source/current/memory-stock-canonical/deploy/conversation-vacuum/conversation_stock_api.py
+      COGNILODE_STOCK_DB: /memory-stock/runtime/conversation-vacuum/intake.sqlite3
+      COGNILODE_CENTRAL_ROLLOUT_HELPER: /codex/bin/central-rollouts
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
+      PATH: /codex/bin:/usr/bin:/usr/local/bin:/bin
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - ${COMPANY_RUNTIME_ROOT}/worker:/runtime/worker
+      - company_relay_custody:/relay:ro
+      - company_codex_release:/codex:ro
+      - company_operator:/home/worker/.config/cognilode:ro
+      - memory_data:/memory-stock:ro
+    depends_on:
+      - credential-sync
+      - source-sync
+      - codex-builder
+      - drive-rollouts
+
+  codex-exec-server:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: host
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /runtime/source/current
+    entrypoint: [sh, -c, "until test -x /codex/bin/codex; do sleep 10; done; exec /codex/bin/codex exec-server --listen ws://127.0.0.1:8799"]
+    environment:
+      HOME: /home/worker
+      CODEX_HOME: /home/worker/.codex
+      COGNILODE_CENTRAL_ROLLOUT_HELPER: /codex/bin/central-rollouts
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
+    volumes:
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - company_codex_release:/codex:ro
+      - company_auth:/home/worker/.codex
+      - company_operator:/home/worker/.config/cognilode:ro
+    depends_on:
+      - remote-shell
+
+  codex-exec-broker:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    stop_grace_period: 2h
+    network_mode: bridge
+    # Docker's default seccomp and AppArmor profiles deny the unprivileged
+    # namespace/mount operations that Codex's inner read-only bubblewrap
+    # sandbox requires. Keep the broker unprivileged after socket setup and
+    # prohibit setuid elevation; its own sandbox probe gates the exec socket.
+    security_opt:
+      - seccomp:unconfined
+      - apparmor:unconfined
+      - no-new-privileges:true
+    user: "0:0"
+    working_dir: /runtime/source/current
+    entrypoint: [sh, -c]
+    command:
+      - >-
+        while [ ! -f /runtime/source/current/codex-backend-sdk/scripts/cognilode-codex-exec-broker-runtime ];
+        do sleep 5; done;
+        exec python3 /runtime/source/current/codex-backend-sdk/scripts/cognilode-codex-exec-broker-runtime
+    environment:
+      HOME: /home/worker
+      CODEX_HOME: /home/worker/.codex
+      COGNILODE_CODEX_BIN: /codex/bin/codex
+      COGNILODE_CODEX_EXEC_SOCKET: /codex-exec/broker.sock
+      COGNILODE_CODEX_BROKER_SANDBOX_GENERATION: quota-observer-independent-v4
+      COGNILODE_DROP_UID: ${COMPANY_UID:-1000}
+      COGNILODE_DROP_GID: ${COMPANY_GID:-1000}
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+      COGNILODE_LLM_GOVERNANCE_ROOT: /runtime/worker/llm-governance
+      COGNILODE_CENTRAL_ROLLOUT_HELPER: /codex/bin/central-rollouts
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
+      PYTHONPATH: /runtime/source/current/modified-codex-runtime/src
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - ${COMPANY_RUNTIME_ROOT}/worker:/runtime/worker
+      - company_codex_release:/codex:ro
+      - company_codex_exec:/codex-exec
+      - company_codex_bwrap_cache:/var/cache/cognilode-bwrap
+      - company_auth:/home/worker/.codex
+      - company_operator:/home/worker/.config/cognilode:ro
+      - memory_data:/workspace/company:ro
+    healthcheck:
+      test: [CMD, python3, -c, "import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(1); s.connect('/codex-exec/broker.sock'); s.close()"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    depends_on:
+      - source-sync
+      - codex-builder
+      - credential-sync
+
+  remote-shell-tunnel:
+    image: cloudflare/cloudflared:2026.9.0@sha256:ff69a2225ad7c6f85ed84fbd5f3087df46202426b2388ec60214098e0adf05e9
+    restart: unless-stopped
+    network_mode: host
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    # This environment has no usable UDP route to the edge; QUIC loops on
+    # network-unreachable while the registered node appears healthy locally.
+    command: [tunnel, --protocol, "${COGNILODE_TUNNEL_PROTOCOL:-http2}", run, --token-file, /relay/tunnel-token]
+    volumes:
+      - company_relay_custody:/relay:ro
+    depends_on:
+      remote-shell:
+        condition: service_healthy
+
+  memory:
+    tmpfs: *company_aws_cli_cache
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /runtime/source/current/memory-stock-canonical
+    entrypoint: [python3, /runtime/source/current/memory-stock-canonical/deploy/conversation-vacuum/company_memory_runtime.py]
+    environment:
+      HOME: /home/worker
+      PYTHONPATH: /runtime/source/current/memory-stock-canonical/src:/runtime/source/current/modified-codex-runtime/src
+      COGNILODE_VACUUM_HOME: /workspace/company/runtime/conversation-vacuum
+      COGNILODE_VACUUM_ROOTS: /workspace/company/data/conversation-imports
+      COGNILODE_PRIVACY_EXPORT_DIR: /workspace/company/data/privacy-imports
+      RCLONE_CONFIG: /memory-auth/rclone.conf
+      COGNILODE_ENABLE_D1_BRIDGE: "0"
+      COGNILODE_ENABLE_OPENAI_LIBRARY: "0"
+      COGNILODE_DRIVE_WEB_UPLOAD: "0"
+      COGNILODE_MEMORY_ARCHIVE_BUCKET: cognilode-conversation-visibility-362928919715-us-west-2
+      DECISIONX_DERIVED_DB: /workspace/company/runtime/conversation-vacuum/decisionx-derived.sqlite3
+      DECISIONX_EXISTING_LLM_COMMAND: python3 /runtime/source/current/memory-stock-canonical/deploy/conversation-vacuum/decisionx_codex_command.py
+      COGNILODE_CODEX_BIN: /runtime/source/current/codex-backend-sdk/scripts/cognilode-codex-exec-client
+      COGNILODE_CODEX_RELEASE_BIN: /codex/bin/codex
+      COGNILODE_CODEX_EXEC_SOCKET: /codex-exec/broker.sock
+      COGNILODE_CODEX_INFERENCE_ROOT: /runtime/worker/codex-inference
+      COGNILODE_LLM_GOVERNANCE_ROOT: /runtime/worker/llm-governance
+      COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
+      COGNILODE_AWS_PURPOSE: artifact-write
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
+    volumes:
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime:ro
+      - ${COMPANY_RUNTIME_ROOT}/worker:/runtime/worker
+      - memory_data:/workspace/company
+      - memory_drive_auth:/memory-auth
+      - company_codex_release:/codex:ro
+      - company_codex_exec:/codex-exec
+      - company_operator:/home/worker/.config/cognilode:ro
+      - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+    depends_on:
+      - source-sync
+      - credential-sync
+
+  rpe-worker:
+    tmpfs: *company_aws_cli_cache
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /runtime/source/current/research-plan-execute
+    entrypoint: [sh, -c]
+    command:
+      - |
+        set -e
+        mkdir -p /runtime/worker/rpe-intake /runtime/worker/rpe-runs
+        cp -n /runtime/source/current/research-plan-execute/deploy/unified-operation.goal.md /runtime/worker/rpe-intake/unified-operation.goal.md
+        exec python3 -m recursive_rpe.autonomy --inbox /runtime/worker/rpe-intake --runs /runtime/worker/rpe-runs --interval 60 --parallel 4
+    environment:
+      HOME: /home/worker
+      COGNILODE_SOURCE_WATCH_GENERATION: source-aware-1
+      PYTHONPATH: /runtime/source/current/research-plan-execute/src:/runtime/source/current/modified-codex-runtime/src:/runtime/source/current/taskflow-orchestration-history/src
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+      COGNILODE_REPOSITORIES_ROOT: /runtime/source/current
+      COGNILODE_RPE_PROVIDER: chatgpt.com
+      COGNILODE_RPE_CRITICAL_PILOT_RUN_ID: rpe-cf35d031f25f907c907ec3f4
+      COGNILODE_RPE_REPOSITORY_REF: company://repository/codex-backend-sdk
+      COGNILODE_TASKFLOW_DISPATCH_CLI: /company/codex-backend-sdk/scripts/cognilode-taskflow-dispatch
+      COGNILODE_TASKFLOW_SECRETARY_COMMAND: python3 -m modified_codex.taskflow_secretary submit
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
+      COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
+      COGNILODE_AWS_CLI: /usr/bin/aws
+      COGNILODE_AWS_PURPOSE: artifact-write
+      COGNILODE_TASKFLOW_SECRETARY_ROOT: /runtime/worker/taskflow-secretary
+      COGNILODE_LLM_GOVERNANCE_ROOT: /runtime/worker/llm-governance
+      COGNILODE_CODEX_BIN: /runtime/source/current/codex-backend-sdk/scripts/cognilode-codex-exec-client
+      COGNILODE_CODEX_RELEASE_BIN: /codex/bin/codex
+      COGNILODE_CODEX_EXEC_SOCKET: /codex-exec/broker.sock
+      COGNILODE_CODEX_INFERENCE_ROOT: /runtime/worker/codex-inference
+    volumes:
+      - ${COMPANY_REPOS_ROOT}:/company:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - ${COMPANY_RUNTIME_ROOT}/worker:/runtime/worker
+      - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+      - company_operator:/home/worker/.config/cognilode:ro
+      - company_codex_release:/codex:ro
+      - company_codex_exec:/codex-exec
+    depends_on:
+      - source-sync
+      - credential-sync
+      - codex-builder
+      - codex-exec-broker
+
+  effect-reviewer:
+    tmpfs: *company_aws_cli_cache
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /runtime/source/current/modified-codex-runtime
+    entrypoint: [python3, -m, modified_codex.taskflow_effect_reviewer]
+    command: [--runs, /runtime/worker/rpe-runs, --interval, "300"]
+    environment:
+      HOME: /home/worker
+      COGNILODE_SOURCE_WATCH_GENERATION: source-aware-1
+      PYTHONPATH: /runtime/source/current/modified-codex-runtime/src:/runtime/source/current/taskflow-orchestration-history/src
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+      COGNILODE_REPOSITORIES_ROOT: /runtime/source/current
+      COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
+      COGNILODE_TASKFLOW_SECRETARY_COMMAND: python3 -m modified_codex.taskflow_secretary submit
+      COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
+      COGNILODE_TASKFLOW_SECRETARY_ROOT: /runtime/worker/taskflow-secretary
+      COGNILODE_AWS_CLI: /usr/bin/aws
+      COGNILODE_AWS_PURPOSE: artifact-write
+      COGNILODE_RELAY_NODE_FILE: /relay/node.json
+    volumes:
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - ${COMPANY_RUNTIME_ROOT}/worker:/runtime/worker
+      - company_operator:/home/worker/.config/cognilode:ro
+      - company_relay_custody:/relay:ro
+      - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+    depends_on:
+      - source-sync
+      - credential-sync
+      - taskflow-worker
+
+volumes:
+  company_auth:
+  company_browser:
+  company_operator:
+  company_node_runtime:
+  company_deploy_custody:
+  company_codex_release:
+  company_codex_exec:
+  company_codex_bwrap_cache:
+  company_codex_target:
+  company_cargo_registry:
+  company_cargo_git:
+  company_relay_custody:
+  company_aws_client:
+  memory_data:
+  memory_drive_auth:

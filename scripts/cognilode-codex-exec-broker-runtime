@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""Keep credential-bearing Codex exec and quota read on synced source."""
+from __future__ import annotations
+
+import os
+import hashlib
+import json
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+
+ROOT = Path(os.getenv("COGNILODE_COMPANY_SOURCE_ROOT", "/runtime/source"))
+CURRENT = ROOT / "current/codex-backend-sdk/scripts"
+SOCKET = Path(os.getenv("COGNILODE_CODEX_EXEC_SOCKET", "/codex-exec/broker.sock"))
+ACTIVE_FILE = SOCKET.with_suffix(".active")
+DRAIN_FILE = SOCKET.with_suffix(".draining")
+SANDBOX_READY = SOCKET.with_suffix(".sandbox-ready.json")
+BWRAP = Path("/usr/bin/bwrap")
+BWRAP_CACHE = Path("/var/cache/cognilode-bwrap")
+CODEX = Path(os.getenv("COGNILODE_CODEX_BIN", "/codex/bin/codex"))
+CODEX_SOURCE = ROOT / "current/cognilode-codex"
+STOP = False
+
+
+def stop(_signum, _frame):
+    global STOP
+    STOP = True
+
+
+def retire(child: subprocess.Popen | None) -> None:
+    if child is None or child.poll() is not None:
+        return
+    child.terminate()
+    try:
+        child.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait(timeout=10)
+
+
+def active() -> int:
+    try:
+        return max(0, int(ACTIVE_FILE.read_text().strip()))
+    except (OSError, ValueError):
+        return 1
+
+
+def ensure_bubblewrap() -> None:
+    """Install signed Debian bubblewrap into this container, caching its package.
+
+    The workspace image is intentionally immutable and has no bwrap. The
+    package archive lives in a broker-only root-owned Docker volume so a
+    container recreation does not redownload it. No host package or image is
+    changed, and workers cannot replace a package later installed as root.
+    """
+    if BWRAP.is_file() and os.access(BWRAP, os.X_OK):
+        return
+    if os.geteuid() != 0:
+        raise RuntimeError("bubblewrap_missing_without_container_root")
+    BWRAP_CACHE.mkdir(parents=True, exist_ok=True)
+    manifest = BWRAP_CACHE / "package.json"
+    archive = None
+    if manifest.is_file():
+        try:
+            record = json.loads(manifest.read_text())
+            candidate = BWRAP_CACHE / record["name"]
+            if (record["name"] == candidate.name and
+                    candidate.name.startswith("bubblewrap_") and candidate.suffix == ".deb"
+                    and candidate.is_file() and hashlib.sha256(candidate.read_bytes()).hexdigest() == record["sha256"]):
+                archive = candidate
+        except (OSError, KeyError, ValueError, TypeError):
+            pass
+    if archive is None:
+        subprocess.run(["apt-get", "update", "-qq"], check=True, timeout=180)
+        subprocess.run(["apt-get", "download", "bubblewrap"], cwd=BWRAP_CACHE,
+                       check=True, timeout=180)
+        candidates = sorted(BWRAP_CACHE.glob("bubblewrap_*.deb"), key=lambda p: p.stat().st_mtime)
+        if not candidates:
+            raise RuntimeError("bubblewrap_package_download_missing")
+        archive = candidates[-1]
+        record = {"name": archive.name, "sha256": hashlib.sha256(archive.read_bytes()).hexdigest()}
+        tmp = manifest.with_suffix(".tmp")
+        tmp.write_text(json.dumps(record, sort_keys=True) + "\n")
+        tmp.replace(manifest)
+    subprocess.run(["dpkg", "-i", str(archive)], check=True, timeout=120)
+    if not BWRAP.is_file() or not os.access(BWRAP, os.X_OK):
+        raise RuntimeError("bubblewrap_install_missing_binary")
+
+
+def probe_bubblewrap() -> Path:
+    """Prove the installed Codex sandbox can read the broker's mounted context."""
+    # Codex preflights a fresh procfs mount and falls back to the inherited
+    # read-only procfs in restrictive containers. The readiness probe checks
+    # that same fallback while retaining user, network, and PID isolation.
+    result = subprocess.run([str(BWRAP), "--die-with-parent", "--unshare-user",
+                             "--unshare-net", "--unshare-pid", "--ro-bind", "/", "/",
+                             "--dev-bind", "/dev", "/dev",
+                             "/bin/sh", "-c",
+                             "test -r /runtime/worker && test -r /codex/bin/codex"],
+                            capture_output=True, text=True, timeout=20, check=False)
+    if result.returncode:
+        raise RuntimeError("bubblewrap_sandbox_probe_failed: " + result.stderr.strip()[:180])
+    release = CODEX.resolve(strict=True)
+    source_pin = release.parent.name
+    if len(source_pin) != 40 or any(ch not in "0123456789abcdef" for ch in source_pin):
+        raise RuntimeError("codex_binary_not_pinned_release")
+    if source_pin != target_pin():
+        raise RuntimeError("native_release_behind_synchronized_source")
+    native = subprocess.run([str(CODEX), "sandbox", "--", "/bin/sh", "-c",
+                             "test -r /runtime/worker && test -x /codex/bin/codex"],
+                            capture_output=True, text=True, timeout=30, check=False)
+    if native.returncode:
+        raise RuntimeError("codex_readonly_sandbox_probe_failed: " + native.stderr.strip()[:180])
+    if CODEX.resolve(strict=True) != release:
+        raise RuntimeError("codex_release_changed_during_probe")
+    record = {"schema": "cognilode.codex-broker-sandbox-ready.v2",
+              "bwrap": str(BWRAP),
+              "sha256": hashlib.sha256(BWRAP.read_bytes()).hexdigest(),
+              "source_pin": source_pin,
+              "probe": "codex-readonly-sandbox-exit-0",
+              "verified_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
+    tmp = SANDBOX_READY.with_suffix(".tmp")
+    tmp.write_text(json.dumps(record, sort_keys=True) + "\n")
+    tmp.replace(SANDBOX_READY)
+    return release
+
+
+def target_pin() -> str:
+    try:
+        selected = CODEX_SOURCE.resolve(strict=True).name
+    except OSError:
+        return ""
+    return selected if len(selected) == 40 and all(ch in "0123456789abcdef" for ch in selected) else ""
+
+
+def maintain_observer(child: subprocess.Popen | None, source: Path | None,
+                      retry_at: float):
+    """Keep quota observation independent of the native sandbox release gate."""
+    current = (ROOT / "current/modified-codex-runtime/src/modified_codex/codex_quota_observer.py").resolve()
+    exited = child is not None and child.poll() is not None
+    if child is not None and (exited or source != current):
+        retire(child)
+        child = None
+        if exited:
+            retry_at = time.monotonic() + 60
+    if child is None and time.monotonic() >= retry_at and current.is_file() and CODEX.is_file():
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(ROOT / "current/modified-codex-runtime/src")
+        child = subprocess.Popen([sys.executable, "-m", "modified_codex.codex_quota_observer",
+                                  "--interval", "1800"], env=env)
+        source = current
+        print(f"Codex quota observer source generation {current}", flush=True)
+    return child, source, retry_at
+
+
+def main() -> int:
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    SANDBOX_READY.unlink(missing_ok=True)
+    if os.geteuid() == 0:
+        SOCKET.parent.mkdir(parents=True, exist_ok=True)
+        while not STOP:
+            try:
+                ensure_bubblewrap()
+                break
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                print(f"Codex broker sandbox install pending: {str(exc)[:200]}", flush=True)
+                time.sleep(60)
+        if STOP:
+            return 0
+        uid = int(os.environ["COGNILODE_DROP_UID"])
+        gid = int(os.environ["COGNILODE_DROP_GID"])
+        os.chown(SOCKET.parent, uid, gid)
+        os.chmod(SOCKET.parent, 0o700)
+        os.setgroups([])
+        os.setgid(gid)
+        os.setuid(uid)
+    observer = None
+    observer_source = None
+    observer_retry_at = 0.0
+    try:
+        while not STOP:
+            observer, observer_source, observer_retry_at = maintain_observer(
+                observer, observer_source, observer_retry_at)
+            try:
+                codex_release = probe_bubblewrap()
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                SANDBOX_READY.unlink(missing_ok=True)
+                print(f"Codex broker sandbox unavailable: {str(exc)[:200]}", flush=True)
+                time.sleep(60)
+                continue
+            broker = (CURRENT / "cognilode-codex-exec-broker").resolve()
+            if not broker.is_file():
+                print("Codex broker waiting for synchronized source", flush=True)
+                time.sleep(5)
+                continue
+            print(f"Codex broker source generation {broker}", flush=True)
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(ROOT / "current/modified-codex-runtime/src")
+            worker = subprocess.Popen([sys.executable, str(broker)], env=env)
+            try:
+                while worker.poll() is None:
+                    observer, observer_source, observer_retry_at = maintain_observer(
+                        observer, observer_source, observer_retry_at)
+                    changed = codex_release != CODEX.resolve() or \
+                        codex_release.parent.name != target_pin() or \
+                        broker != (CURRENT / "cognilode-codex-exec-broker").resolve()
+                    if STOP or changed:
+                        DRAIN_FILE.write_text("1")
+                        if active() == 0:
+                            break
+                    time.sleep(5)
+            finally:
+                retire(worker)
+                SANDBOX_READY.unlink(missing_ok=True)
+            if not STOP:
+                time.sleep(2)
+    finally:
+        retire(observer)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

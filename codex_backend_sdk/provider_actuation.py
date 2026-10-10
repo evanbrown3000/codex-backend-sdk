@@ -342,19 +342,17 @@ class ComputerUseXProviderAdapter:
 
     def prompt(self, request: ProviderPromptRequest, custody: Mapping[str, Any]) -> Mapping[str, Any]:
         conversation_id = request.conversation_id
-        if request.mode == "fork" and conversation_id:
+        browser_turn = bool(request.attachments or request.metadata.get("browser_transport"))
+        # Browser-backed providers create/fork as part of the same visible
+        # mutation.  Calling the optional MCP façade first both duplicated the
+        # operation and made the core actuator depend on the `mcp` package.
+        # Keep that façade only for non-browser transports.
+        if not browser_turn and request.mode == "fork" and conversation_id:
             forked = self._call("conversation.fork", {
                 "provider": self.provider, "conversation_id": conversation_id,
                 "request_id": request.operation_id,
             })
             conversation_id = str(forked.get("conversation_id") or "") or None
-        browser_turn = bool(request.attachments or request.metadata.get("browser_transport"))
-        if not conversation_id and browser_turn:
-            opened = self._call("conversation.create", {
-                "provider": self.provider, "request_id": request.operation_id,
-                "transport": "browser",
-            })
-            conversation_id = str(opened.get("conversation_id") or "") or None
         if browser_turn:
             source = Path(os.environ.get(
                 "COMPUTERUSEX_SOURCE", "/runtime/source/current/automation-computeruse-vision/src"
@@ -371,7 +369,16 @@ class ComputerUseXProviderAdapter:
                 timeout_seconds=float(request.metadata.get("timeout_seconds", 900)),
                 stable_seconds=float(request.metadata.get("stable_seconds", 2.5)),
             )
-            result.setdefault("conversation_id", conversation_id)
+            urls = list(result.get("discovered_conversation_urls") or [])
+            observed_url = str(result.get("observed_url") or "")
+            exact_url = next((str(value) for value in reversed(urls) if value), observed_url)
+            result.setdefault("conversation_id", exact_url or conversation_id)
+            # The browser receipt is the exact mutation identity when a
+            # provider does not expose stable message UUIDs in its DOM.
+            result.setdefault("user_message_id", str(result.get("run_id") or request.operation_id))
+            response_sha = str(result.get("response_sha256") or "")
+            if response_sha:
+                result.setdefault("assistant_message_id", f"{exact_url or self.provider}#assistant-{response_sha}")
             result.setdefault("complete_response_read", bool(result.get("ok") and result.get("response")))
             submission = result.get("submission") if isinstance(result.get("submission"), Mapping) else {}
             result.setdefault("provider_acceptance_observed", bool(

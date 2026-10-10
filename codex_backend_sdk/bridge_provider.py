@@ -281,6 +281,7 @@ class ProviderCommandClient:
             prompt_authority=prompt_authority,
             priority=priority,
             decisionx=decisionx,
+            parent_operation=parent_operation,
         )
 
     def send_provider(
@@ -301,6 +302,7 @@ class ProviderCommandClient:
         prompt_authority: str = "interactive_operator",
         priority: int | None = None,
         decisionx: Mapping[str, Any] | None = None,
+        parent_operation: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Admit any supported agent turn through one provider-neutral API.
 

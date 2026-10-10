@@ -459,8 +459,13 @@ def main() -> int:
     # Different providers remain concurrent because each owns its own
     # actuator. A restart therefore cannot fan recovered leases into parallel
     # turns on one account.
+    # Native Chat-mode streams are independently fenced and historically ran
+    # as a real concurrent workforce.  Serializing the account behind one long
+    # turn starves higher-order work and wastes subscription capacity. Browser
+    # adapters retain one protected profile lane unless explicitly expanded.
+    default_concurrency = "10" if args.provider == "chatgpt.com" else "1"
     max_concurrency = max(1, int(os.environ.get(
-        "COGNILODE_PROVIDER_ACCOUNT_CONCURRENCY", "1"
+        "COGNILODE_PROVIDER_ACCOUNT_CONCURRENCY", default_concurrency
     )))
 
     def launch(job: Mapping[str, Any]) -> bool:

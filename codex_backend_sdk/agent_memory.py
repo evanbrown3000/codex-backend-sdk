@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -15,6 +16,7 @@ class AgentMemoryClient:
         *,
         endpoint: str | None = None,
         token: str | None = None,
+        token_file: str | Path | None = None,
         timeout: float = 120,
     ) -> None:
         self.endpoint = (
@@ -22,7 +24,14 @@ class AgentMemoryClient:
             or os.environ.get("AGENT_MEMORY_ENDPOINT")
             or "https://cognilode.com/api/operator/agent-memory"
         ).rstrip("/")
-        self.token = token or os.environ.get("COGNILODE_OPERATOR_TOKEN")
+        configured_file = token_file or os.environ.get("COGNILODE_OPERATOR_TOKEN_FILE")
+        file_token = ""
+        if configured_file:
+            try:
+                file_token = Path(configured_file).expanduser().read_text(encoding="utf-8").strip()
+            except OSError:
+                file_token = ""
+        self.token = (token or os.environ.get("COGNILODE_OPERATOR_TOKEN") or file_token).removeprefix("Bearer ").strip()
         self.timeout = timeout
         self._session = requests.Session()
 
@@ -51,15 +60,36 @@ class AgentMemoryClient:
         response.raise_for_status()
         return response.json()
 
-    def list(self, *, limit: int = 50, **filters: Any) -> Any:
-        return self._request("GET", "v1/conversations", params={"limit": limit, **filters})
+    def list(
+        self,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+        projection: str = "app-server-summary",
+        **filters: Any,
+    ) -> Any:
+        params = {"limit": limit, "projection": projection, **filters}
+        if cursor:
+            params["cursor"] = cursor
+        return self._request("GET", "v1/conversations", params=params)
 
     def recent(self, *, limit: int = 50, **filters: Any) -> Any:
         return self.list(limit=limit, **filters)
 
-    def search(self, query: str, *, limit: int = 20, **filters: Any) -> Any:
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+        cursor: str | None = None,
+        projection: str = "app-server-summary",
+        **filters: Any,
+    ) -> Any:
+        body = {"query": query, "limit": limit, "projection": projection, **filters}
+        if cursor:
+            body["cursor"] = cursor
         return self._request(
-            "POST", "v1/conversations/search", body={"query": query, "limit": limit, **filters}
+            "POST", "v1/conversations/search", body=body
         )
 
     def get(self, conversation_id: str, **options: Any) -> Any:
@@ -67,6 +97,9 @@ class AgentMemoryClient:
 
     def thread(self, conversation_id: str, **options: Any) -> Any:
         return self.get(conversation_id, **options)
+
+    def project_thread(self, conversation_id: str, *, projection: str = "app-server") -> Any:
+        return self.get(conversation_id, projection=projection)
 
     def changes(self, conversation_id: str, *, after: str | None = None, **options: Any) -> Any:
         params = dict(options)

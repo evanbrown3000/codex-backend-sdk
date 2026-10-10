@@ -22,6 +22,11 @@
 - Publish provider observations into the central Agent Memory conversation facade.
 - Add central-conversation Markdown transfer into ChatGPT through attachments.
 - Add a pass-through Codex App Server bridge for B4PT0R Electron.
+- Add actor-persistent remote Codex environment selection through the existing
+  Cognilode remote-shell relay while retaining unchanged native App Server
+  methods and notifications.
+- Project normalized Agent Memory conversations through the App Server and
+  route provider continuations through the credential-owning broker command.
 - Remove queue, TaskFlow, DecisionX, company, deployment, and credential-custody code from the provider SDK domain.
 
 All notable changes to this project will be documented in this file.

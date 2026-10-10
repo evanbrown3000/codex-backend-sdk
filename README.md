@@ -86,7 +86,6 @@ another relay:
 ```bash
 b4pt0r remote list
 b4pt0r remote select ENVIRONMENT_ID
-b4pt0r remote current
 b4pt0r remote exec 'codex exec "continue the assigned work"'
 ```
 
@@ -119,17 +118,26 @@ threads into the first `thread/list` page and projects ChatGPT threads through
 the existing `thread/read`, `thread/resume`, `thread/turns/list`, and
 `turn/start` shapes consumed by Codex Desktop.
 
-The bridge asks the relay for the environment persistently selected for
-`COGNILODE_ACTOR_ID`. When a selection exists, it launches the native Codex App
-Server there through the existing remote-shell process stream and carries its
-JSONL protocol back through the same bridge. With no remote selection it
-launches the local native App Server. `CODEX_REMOTE_WORKDIR` selects the remote
-working directory.
+Set `CODEX_APP_SERVER_EXECUTABLE` in B4PT0R Electron to `b4pt0r-app-server`.
+Set `CODEX_EXECUTABLE` to the real installed Codex binary; it must not point
+back to the bridge. The bridge passes the ordinary App Server arguments and
+every unowned method and notification to that binary unchanged.
 
-Set `CODEX_NATIVE_EXECUTABLE` to the real installed Codex binary on the selected
-environment. This must not point back to the bridge executable. B4PT0R Electron
-can select the bridge with its existing `CODEX_EXECUTABLE` configuration; no
-replacement renderer or frontend provider logic is required.
+The bridge adds two operations beneath the existing interface:
+
+- `cognilode/environment/list` lists selectable execution environments.
+- `cognilode/environment/select` selects one for the actor. The relay retains
+  that selection until the actor selects another environment, and the bridge
+  starts the unchanged Codex App Server through remote shell execution there.
+
+Conversation discovery and reading use the normalized Agent Memory endpoint,
+including ChatGPT and Codex conversations. Provider mutations never load
+provider credentials in the bridge. Set `B4PT0R_PROVIDER_BROKER_COMMAND` to a
+JSON argv array for the singular credential-owning provider broker. The bridge
+sends one JSON operation on stdin and reads one JSON result from stdout. Native
+ChatGPT continuations use `chatgpt_continue`; cross-provider continuations use
+`conversation_continue` with `context_delivery` set to
+`rendered_conversation_attachment`.
 
 ## Choose the right surface
 

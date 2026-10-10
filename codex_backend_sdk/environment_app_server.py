@@ -11,7 +11,7 @@ import json
 from queue import Queue
 import shlex
 import threading
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterator, Mapping, Sequence
 
 from .remote_shell import RemoteShellClient
 
@@ -28,12 +28,14 @@ class SelectedEnvironmentAppServer:
         relay: RemoteShellClient,
         *,
         executable: str = "codex",
+        arguments: Sequence[str] = ("app-server", "--stdio"),
         workdir: str | None = None,
         environment_id: str | None = None,
         poll_ms: int = 9000,
     ) -> None:
         self.relay = relay
         self.executable = executable
+        self.arguments = tuple(arguments)
         self.workdir = workdir
         self.environment_id = environment_id
         self.poll_ms = poll_ms
@@ -52,7 +54,9 @@ class SelectedEnvironmentAppServer:
         if not environment:
             raise RemoteAppServerError("no remote environment is selected")
         self.environment_id = environment
-        command = "exec " + shlex.quote(self.executable) + " app-server --stdio"
+        command = "exec " + " ".join(
+            shlex.quote(value) for value in (self.executable, *self.arguments)
+        )
         result = self.relay.execute(
             command,
             workdir=self.workdir,

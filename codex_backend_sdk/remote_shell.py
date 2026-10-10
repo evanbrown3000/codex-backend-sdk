@@ -28,6 +28,7 @@ class RemoteShellClient:
         self.actor_id = actor_id
         self.timeout = timeout
         self._session = requests.Session()
+        self._selected_environment: str | None = None
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -73,10 +74,27 @@ class RemoteShellClient:
         return self.call("node_list")
 
     def select(self, environment_id: str) -> Any:
-        return self.call(
+        result = self.call(
             "environment_select",
             {"actor_id": self.actor_id, "environment_id": environment_id},
         )
+        self._selected_environment = environment_id
+        return result
+
+    def current(self) -> Any:
+        try:
+            result = self.call("environment_current", {"actor_id": self.actor_id})
+            if isinstance(result, Mapping):
+                selected = result.get("environment_id") or result.get("selected_environment_id")
+                if isinstance(selected, str) and selected:
+                    self._selected_environment = selected
+            return result
+        except RuntimeError:
+            return {
+                "actor_id": self.actor_id,
+                "environment_id": self._selected_environment,
+                "source": "bridge_process_cache",
+            }
 
     def current(self) -> Any:
         """Return the environment persistently selected for this actor."""
@@ -89,6 +107,7 @@ class RemoteShellClient:
         workdir: str | None = None,
         environment_id: str | None = None,
         yield_time_ms: int = 9000,
+        max_output_tokens: int | None = None,
     ) -> Any:
         arguments: dict[str, Any] = {
             "cmd": command,
@@ -98,15 +117,18 @@ class RemoteShellClient:
             arguments["workdir"] = workdir
         if environment_id:
             arguments["environment_id"] = environment_id
+        if max_output_tokens is not None:
+            arguments["max_output_tokens"] = max_output_tokens
         return self.call("exec_command", arguments)
 
     def write(
         self,
-        process_id: str,
+        process_id: str | int,
         *,
         chars: str = "",
         environment_id: str | None = None,
         yield_time_ms: int = 9000,
+        max_output_tokens: int | None = None,
     ) -> Any:
         arguments: dict[str, Any] = {
             "process_id": process_id,
@@ -115,4 +137,22 @@ class RemoteShellClient:
         }
         if environment_id:
             arguments["environment_id"] = environment_id
+        if max_output_tokens is not None:
+            arguments["max_output_tokens"] = max_output_tokens
         return self.call("write_stdin", arguments)
+
+    def terminate(
+        self, process_id: str | int, *, environment_id: str | None = None
+    ) -> Any:
+        arguments: dict[str, Any] = {"process_id": process_id}
+        if environment_id:
+            arguments["environment_id"] = environment_id
+        try:
+            return self.call("terminate", arguments)
+        except RuntimeError:
+            return self.write(
+                process_id,
+                chars="\x03",
+                environment_id=environment_id,
+                yield_time_ms=1000,
+            )

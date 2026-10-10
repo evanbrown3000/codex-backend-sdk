@@ -1,109 +1,29 @@
-"""Pass-through Codex App Server bridge with ChatGPT and Agent Memory threads."""
+"""Transparent Codex App Server multiplexer for native and normalized threads.
+
+All unowned App Server methods and notifications pass through unchanged.  The
+bridge owns only environment selection and normalized external conversation
+projection.  Provider mutations go through the singular provider broker; this
+process never reads provider credentials.
+"""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import os
-import subprocess
 import sys
-import tempfile
 import threading
-import time
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 import uuid
 
-from . import OpenAI
 from .agent_memory import AgentMemoryClient
-from .environment_app_server import SelectedEnvironmentAppServer, _environment_id
+from .app_server_transport import (
+    AppServerTransport,
+    LocalAppServerTransport,
+    RemoteAppServerTransport,
+)
+from .bridge_provider import ProviderCommandClient
 from .remote_shell import RemoteShellClient
-
-
-def _text(message: Mapping[str, Any]) -> str:
-    content = message.get("content") if isinstance(message.get("content"), Mapping) else {}
-    parts = content.get("parts") if isinstance(content.get("parts"), list) else []
-    values: list[str] = []
-    for part in parts:
-        if isinstance(part, str):
-            values.append(part)
-        elif isinstance(part, Mapping):
-            value = part.get("text") or part.get("content")
-            if isinstance(value, str):
-                values.append(value)
-    return "\n".join(values)
-
-
-def _branch(conversation: Mapping[str, Any]) -> list[dict[str, Any]]:
-    mapping = conversation.get("mapping") if isinstance(conversation.get("mapping"), Mapping) else {}
-    current = conversation.get("current_node")
-    messages: list[dict[str, Any]] = []
-    visited: set[str] = set()
-    while isinstance(current, str) and current and current not in visited:
-        visited.add(current)
-        node = mapping.get(current)
-        if not isinstance(node, Mapping):
-            break
-        message = node.get("message")
-        if isinstance(message, dict):
-            messages.append(message)
-        current = node.get("parent")
-    messages.reverse()
-    return messages
-
-
-def _provider_thread(conversation_id: str, conversation: Mapping[str, Any]) -> dict[str, Any]:
-    messages = _branch(conversation)
-    turns: list[dict[str, Any]] = []
-    active_items: list[dict[str, Any]] = []
-    active_id: str | None = None
-    for message in messages:
-        author = message.get("author") if isinstance(message.get("author"), Mapping) else {}
-        role = author.get("role")
-        message_id = str(message.get("id") or uuid.uuid4())
-        if role == "user":
-            if active_items:
-                turns.append({"id": active_id, "status": "completed", "items": active_items})
-            active_id = f"chatgpt-turn:{message_id}"
-            active_items = [
-                {
-                    "id": message_id,
-                    "type": "userMessage",
-                    "content": [{"type": "text", "text": _text(message)}],
-                }
-            ]
-        elif role == "assistant":
-            if not active_items:
-                active_id = f"chatgpt-turn:{message_id}"
-            active_items.append(
-                {"id": message_id, "type": "agentMessage", "text": _text(message)}
-            )
-            if message.get("end_turn") is True or message.get("status") == "finished_successfully":
-                turns.append({"id": active_id, "status": "completed", "items": active_items})
-                active_items = []
-                active_id = None
-    if active_items:
-        turns.append({"id": active_id, "status": "inProgress", "items": active_items})
-    title = conversation.get("title")
-    preview = next(
-        (_text(message) for message in messages if _text(message)),
-        "ChatGPT conversation",
-    )
-    updated = max(
-        (
-            float(message.get("update_time") or message.get("create_time") or 0)
-            for message in messages
-        ),
-        default=0,
-    )
-    return {
-        "id": f"chatgpt:{conversation_id}",
-        "name": str(title or preview[:80]),
-        "preview": preview[:240],
-        "updatedAt": int(updated),
-        "cwd": "chatgpt.com",
-        "status": {"type": "idle"},
-        "section": {"id": "chatgpt", "name": "ChatGPT"},
-        "turns": turns,
-    }
 
 
 def _rows(payload: Any) -> list[Mapping[str, Any]]:
@@ -117,32 +37,11 @@ def _rows(payload: Any) -> list[Mapping[str, Any]]:
     return []
 
 
-def _memory_summary(row: Mapping[str, Any]) -> dict[str, Any] | None:
-    if isinstance(row.get("thread"), Mapping):
-        return dict(row["thread"])
-    raw_id = row.get("conversation_id") or row.get("id") or row.get("thread_id")
-    if not isinstance(raw_id, str) or not raw_id:
+def _cursor(payload: Any) -> str | None:
+    if not isinstance(payload, Mapping):
         return None
-    provider = str(row.get("provider") or row.get("platform") or "memory")
-    provider_conversation_id = row.get("provider_conversation_id")
-    projected_id = (
-        f"chatgpt:{provider_conversation_id}"
-        if provider.lower() in {"chatgpt", "chatgpt.com"}
-        and isinstance(provider_conversation_id, str)
-        and provider_conversation_id
-        else f"memory:{raw_id}"
-    )
-    name = row.get("title") or row.get("name") or row.get("subject") or raw_id
-    preview = row.get("preview") or row.get("snippet") or row.get("text") or ""
-    return {
-        "id": projected_id,
-        "name": str(name),
-        "preview": str(preview)[:240],
-        "updatedAt": row.get("updated_at") or row.get("observed_at") or 0,
-        "cwd": provider,
-        "status": {"type": "idle"},
-        "section": {"id": provider, "name": provider},
-    }
+    value = payload.get("nextCursor") or payload.get("next_cursor") or payload.get("cursor")
+    return str(value) if value else None
 
 
 def _input_text(params: Mapping[str, Any]) -> str:
@@ -152,255 +51,420 @@ def _input_text(params: Mapping[str, Any]) -> str:
         for item in inputs:
             if isinstance(item, Mapping) and item.get("type") == "text" and isinstance(item.get("text"), str):
                 values.append(item["text"])
+    if not values and isinstance(params.get("prompt"), str):
+        values.append(str(params["prompt"]))
     return "\n".join(values).strip()
 
 
-class Bridge:
-    def __init__(self) -> None:
-        self.remote_child: SelectedEnvironmentAppServer | None = None
-        self.child: subprocess.Popen[str] | None = None
-        relay = RemoteShellClient(actor_id=os.environ.get("COGNILODE_ACTOR_ID", "default"))
-        try:
-            selected = _environment_id(relay.current())
-        except Exception:
-            selected = None
-        if selected:
-            self.remote_child = SelectedEnvironmentAppServer(
-                relay,
-                executable=os.environ.get("CODEX_NATIVE_EXECUTABLE", "codex"),
-                workdir=os.environ.get("CODEX_REMOTE_WORKDIR") or None,
-                environment_id=selected,
-            ).start()
-        else:
-            executable = os.environ.get("CODEX_NATIVE_EXECUTABLE", "codex")
-            self.child = subprocess.Popen(
-                [executable, "app-server", "--stdio"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
+def _message_text(message: Mapping[str, Any]) -> str:
+    for key in ("text", "markdown", "content"):
+        value = message.get(key)
+        if isinstance(value, str):
+            return value
+    content = message.get("content")
+    if isinstance(content, Mapping):
+        parts = content.get("parts")
+        if isinstance(parts, list):
+            return "\n".join(
+                part if isinstance(part, str) else str(part.get("text") or "")
+                for part in parts
+                if isinstance(part, (str, Mapping))
             )
-        self._write_lock = threading.Lock()
-        self._pending: dict[str, tuple[Any, str]] = {}
-        self._provider = None
-        self.memory = AgentMemoryClient()
+    return ""
 
-    @property
-    def provider(self):
-        if self._provider is None:
-            self._provider = OpenAI().authenticate()
-        return self._provider
+
+def _event_turns(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    direct = payload.get("turns")
+    if isinstance(direct, list):
+        return [dict(turn) for turn in direct if isinstance(turn, Mapping)]
+    messages = payload.get("messages") or payload.get("events") or payload.get("items") or []
+    if not isinstance(messages, list):
+        return []
+    turns: list[dict[str, Any]] = []
+    active: list[dict[str, Any]] = []
+    active_id: str | None = None
+    for value in messages:
+        if not isinstance(value, Mapping):
+            continue
+        role = str(value.get("role") or value.get("author_role") or value.get("author") or "")
+        event_id = str(value.get("event_id") or value.get("message_id") or value.get("id") or uuid.uuid4())
+        text = _message_text(value)
+        if role == "user":
+            if active:
+                turns.append({"id": active_id, "status": "completed", "items": active})
+            active_id = str(value.get("turn_id") or f"memory-turn:{event_id}")
+            active = [{"id": event_id, "type": "userMessage", "content": [{"type": "text", "text": text}]}]
+        elif role == "assistant":
+            if not active:
+                active_id = str(value.get("turn_id") or f"memory-turn:{event_id}")
+            active.append({"id": event_id, "type": "agentMessage", "text": text})
+            if value.get("terminal") is True or value.get("end_turn") is True:
+                turns.append({"id": active_id, "status": "completed", "items": active})
+                active = []
+                active_id = None
+    if active:
+        turns.append({"id": active_id, "status": "completed", "items": active})
+    return turns
+
+
+def _memory_summary(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    source = row.get("thread") if isinstance(row.get("thread"), Mapping) else row
+    raw_id = source.get("conversation_id") or source.get("id") or source.get("thread_id")
+    if not isinstance(raw_id, str) or not raw_id:
+        return None
+    if raw_id.startswith("memory:"):
+        thread_id = raw_id
+        conversation_id = raw_id.split(":", 1)[1]
+    else:
+        conversation_id = raw_id
+        thread_id = f"memory:{raw_id}"
+    provider = str(source.get("provider") or source.get("platform") or "memory")
+    name = source.get("title") or source.get("name") or source.get("subject") or raw_id
+    preview = source.get("preview") or source.get("snippet") or source.get("text") or ""
+    return {
+        "id": thread_id,
+        "name": str(name),
+        "preview": str(preview)[:240],
+        "updatedAt": source.get("updatedAt") or source.get("updated_at") or source.get("observed_at") or 0,
+        "cwd": str(source.get("cwd") or provider),
+        "status": source.get("status") if isinstance(source.get("status"), Mapping) else {"type": "idle"},
+        "section": source.get("section") if isinstance(source.get("section"), Mapping) else {"id": provider, "name": provider},
+        "source": {
+            "kind": "agent_memory",
+            "conversationId": conversation_id,
+            "provider": provider,
+            "providerConversationId": source.get("provider_conversation_id"),
+            "environmentId": source.get("environment_id"),
+            "resumable": bool(source.get("resumable", True)),
+        },
+    }
+
+
+def _memory_thread(conversation_id: str, payload: Any) -> dict[str, Any]:
+    value: Mapping[str, Any]
+    if isinstance(payload, Mapping) and isinstance(payload.get("thread"), Mapping):
+        value = payload["thread"]
+    elif isinstance(payload, Mapping):
+        value = payload
+    else:
+        value = {"conversation_id": conversation_id}
+    summary = _memory_summary({**dict(value), "conversation_id": conversation_id}) or {
+        "id": f"memory:{conversation_id}", "turns": []
+    }
+    summary["turns"] = _event_turns(value)
+    for key in ("provider", "provider_conversation_id", "parent_message_id", "environment_id", "model", "reasoning_effort"):
+        if value.get(key) is not None:
+            summary.setdefault("source", {})[key] = value[key]
+    return summary
+
+
+@dataclass
+class Pending:
+    original_id: Any
+    operation: str
+    request: dict[str, Any]
+
+
+class Bridge:
+    def __init__(self, native_args: Sequence[str]) -> None:
+        self.native_args = tuple(native_args or ("app-server", "--stdio"))
+        self.native_executable = os.environ.get("CODEX_EXECUTABLE", "codex")
+        self.actor_id = os.environ.get("B4PT0R_ACTOR_ID", f"b4pt0r-bridge:{os.getpid()}")
+        self.memory = AgentMemoryClient()
+        self.provider = ProviderCommandClient()
+        self.remote = RemoteShellClient(actor_id=self.actor_id)
+        self._write_lock = threading.Lock()
+        self._state_lock = threading.RLock()
+        self._pending: dict[str, Pending] = {}
+        self._selected_environment = self._initial_environment()
+        self._transport: AppServerTransport | None = None
+        self._start_transport(self._selected_environment)
+
+    def _initial_environment(self) -> str:
+        configured = os.environ.get("COGNILODE_CODEX_ENVIRONMENT_ID")
+        if configured:
+            return configured
+        try:
+            current = self.remote.current()
+        except Exception:
+            return "local"
+        if isinstance(current, Mapping):
+            for key in ("environment_id", "environmentId", "selected_environment_id", "selectedEnvironmentId"):
+                value = current.get(key)
+                if value:
+                    return str(value)
+            selected = current.get("selected")
+            if isinstance(selected, Mapping):
+                value = selected.get("environment_id") or selected.get("id")
+                if value:
+                    return str(value)
+        return str(current) if isinstance(current, str) and current else "local"
 
     def emit(self, value: Mapping[str, Any]) -> None:
         with self._write_lock:
             sys.stdout.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
             sys.stdout.flush()
 
-    def child_send(self, value: Mapping[str, Any]) -> None:
-        if self.remote_child is not None:
-            self.remote_child.send(value)
-            return
-        if self.child is None:
-            raise RuntimeError("Codex App Server is unavailable.")
-        if self.child.stdin is None:
-            raise RuntimeError("Native Codex App Server stdin is unavailable.")
-        self.child.stdin.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
-        self.child.stdin.flush()
+    @staticmethod
+    def stderr(value: str) -> None:
+        sys.stderr.write(value)
+        sys.stderr.flush()
 
-    def _merge_thread_list(self, response: dict[str, Any]) -> dict[str, Any]:
+    def _start_transport(self, environment_id: str) -> None:
+        command = (self.native_executable, *self.native_args)
+        with self._state_lock:
+            prior = self._transport
+            self._transport = None
+            if prior is not None:
+                prior.close()
+            if environment_id == "local":
+                self._transport = LocalAppServerTransport(
+                    command, handler=self._native_message, stderr_handler=self.stderr
+                )
+            else:
+                self._transport = RemoteAppServerTransport(
+                    self.remote,
+                    environment_id,
+                    command,
+                    handler=self._native_message,
+                    stderr_handler=self.stderr,
+                )
+            self._selected_environment = environment_id
+
+    def native_send(self, value: Mapping[str, Any]) -> None:
+        with self._state_lock:
+            if self._transport is None:
+                raise RuntimeError("native Codex App Server transport is unavailable")
+            self._transport.send(value)
+
+    def _native_message(self, message: dict[str, Any]) -> None:
+        message_id = message.get("id")
+        if isinstance(message_id, str) and message_id in self._pending:
+            pending = self._pending.pop(message_id)
+            message["id"] = pending.original_id
+            if pending.operation == "thread/list":
+                message = self._merge_memory_list(message, pending.request)
+            elif pending.operation == "thread/search":
+                message = self._merge_memory_search(message, pending.request)
+        self.emit(message)
+
+    def _forward_intercept(self, request: dict[str, Any], operation: str) -> None:
+        internal_id = f"bridge:{uuid.uuid4()}"
+        self._pending[internal_id] = Pending(request.get("id"), operation, request)
+        forwarded = dict(request)
+        forwarded["id"] = internal_id
+        self.native_send(forwarded)
+
+    def _merge_memory_list(self, response: dict[str, Any], request: Mapping[str, Any]) -> dict[str, Any]:
         result = response.get("result")
         if not isinstance(result, dict):
             return response
-        native = result.get("data") if isinstance(result.get("data"), list) else []
+        params = request.get("params") if isinstance(request.get("params"), Mapping) else {}
+        # Native pagination remains authoritative. External summaries are added
+        # only to the first page and have their own direct search surface.
+        if params.get("cursor"):
+            return response
+        limit = max(1, min(int(params.get("limit") or 100), 500))
+        filters = {
+            key: params[key]
+            for key in ("provider", "environment_id", "platform", "date_from", "date_to")
+            if params.get(key) is not None
+        }
         external: list[dict[str, Any]] = []
         try:
-            for row in _rows(self.memory.recent(limit=100)):
+            payload = self.memory.list(limit=limit, **filters)
+            for row in _rows(payload):
                 summary = _memory_summary(row)
                 if summary is not None:
                     external.append(summary)
-        except Exception:
-            pass
+        except Exception as exc:
+            self.stderr(f"Agent Memory list unavailable: {type(exc).__name__}\n")
+        native = result.get("data") if isinstance(result.get("data"), list) else []
+        seen: set[str] = set()
+        merged: list[dict[str, Any]] = []
+        for row in [*external, *native]:
+            if not isinstance(row, Mapping):
+                continue
+            identity = str(row.get("id") or "")
+            if identity and identity in seen:
+                continue
+            if identity:
+                seen.add(identity)
+            merged.append(dict(row))
+        result["data"] = merged
+        return response
+
+    def _merge_memory_search(self, response: dict[str, Any], request: Mapping[str, Any]) -> dict[str, Any]:
+        result = response.get("result")
+        if not isinstance(result, dict):
+            return response
+        params = request.get("params") if isinstance(request.get("params"), Mapping) else {}
+        query = str(params.get("query") or params.get("text") or "").strip()
+        if not query:
+            return response
+        limit = max(1, min(int(params.get("limit") or 50), 500))
+        external: list[dict[str, Any]] = []
+        try:
+            payload = self.memory.search(query, limit=limit)
+            for row in _rows(payload):
+                summary = _memory_summary(row)
+                if summary is not None:
+                    external.append(summary)
+        except Exception as exc:
+            self.stderr(f"Agent Memory search unavailable: {type(exc).__name__}\n")
+        native = result.get("data") if isinstance(result.get("data"), list) else []
         result["data"] = [*external, *native]
         return response
 
-    def _child_reader(self) -> None:
-        if self.remote_child is not None:
-            for message in self.remote_child.events():
-                self._receive_child_message(message)
-            return
-        if self.child is None:
-            return
-        if self.child.stdout is None:
-            return
-        for line in self.child.stdout:
-            try:
-                message = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            self._receive_child_message(message)
-
-    def _receive_child_message(self, message: dict[str, Any]) -> None:
-        message_id = message.get("id")
-        if isinstance(message_id, str) and message_id in self._pending:
-            original_id, operation = self._pending.pop(message_id)
-            message["id"] = original_id
-            if operation == "thread/list":
-                message = self._merge_thread_list(message)
-        self.emit(message)
-
-    def _child_stderr(self) -> None:
-        if self.child is None:
-            return
-        if self.child.stderr is None:
-            return
-        for line in self.child.stderr:
-            sys.stderr.write(line)
-            sys.stderr.flush()
-
-    def _forward_with_intercept(self, request: dict[str, Any], operation: str) -> None:
-        internal_id = f"bridge:{uuid.uuid4()}"
-        self._pending[internal_id] = (request.get("id"), operation)
-        forwarded = dict(request)
-        forwarded["id"] = internal_id
-        self.child_send(forwarded)
-
-    def _memory_read(self, conversation_id: str) -> dict[str, Any]:
-        payload = self.memory.thread(conversation_id)
-        if isinstance(payload, Mapping) and isinstance(payload.get("thread"), Mapping):
-            return dict(payload["thread"])
-        rows = _rows(payload)
-        summary = _memory_summary(rows[0]) if rows else _memory_summary(
-            payload if isinstance(payload, Mapping) else {"id": conversation_id}
-        )
-        return summary or {"id": f"memory:{conversation_id}", "turns": []}
-
     def _external_read(self, thread_id: str) -> dict[str, Any]:
-        if thread_id.startswith("chatgpt:"):
-            conversation_id = thread_id.split(":", 1)[1]
-            conversation = self.provider.chatgpt.conversations.retrieve(conversation_id)
-            try:
-                self.memory.ingest_chatgpt_conversation(conversation)
-            except Exception:
-                pass
-            return _provider_thread(conversation_id, conversation)
-        if thread_id.startswith("memory:"):
-            return self._memory_read(thread_id.split(":", 1)[1])
-        raise ValueError("Not an external thread ID.")
+        conversation_id = thread_id.split(":", 1)[1]
+        payload = self.memory.project_thread(conversation_id)
+        return _memory_thread(conversation_id, payload)
 
-    def _turn_worker(self, thread_id: str, turn_id: str, prompt: str) -> None:
+    def _turn_result_items(self, result: Mapping[str, Any]) -> tuple[dict[str, Any], list[Any]]:
+        turn = result.get("turn") if isinstance(result.get("turn"), Mapping) else result
+        assistant = turn.get("assistant_message") if isinstance(turn.get("assistant_message"), Mapping) else {}
+        text = str(
+            turn.get("assistant_text")
+            or assistant.get("text")
+            or result.get("text")
+            or result.get("output")
+            or ""
+        )
+        identity = str(assistant.get("id") or result.get("assistant_message_id") or uuid.uuid4())
+        artifacts = turn.get("artifacts") or result.get("artifacts") or result.get("attachments") or []
+        return {"id": identity, "type": "agentMessage", "text": text}, list(artifacts) if isinstance(artifacts, list) else []
+
+    def _turn_worker(self, thread: Mapping[str, Any], turn_id: str, prompt: str, params: Mapping[str, Any]) -> None:
+        thread_id = str(thread["id"])
         user_id = str(uuid.uuid4())
-        user_item = {
-            "id": user_id,
-            "type": "userMessage",
-            "content": [{"type": "text", "text": prompt}],
-        }
+        user_item = {"id": user_id, "type": "userMessage", "content": [{"type": "text", "text": prompt}]}
         self.emit({"method": "turn/started", "params": {"threadId": thread_id, "turn": {"id": turn_id, "status": "inProgress", "items": []}}})
         self.emit({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id, "item": user_item}})
         try:
-            if thread_id.startswith("chatgpt:"):
-                conversation_id = thread_id.split(":", 1)[1]
-                result = self.provider.chatgpt.operations.send(
-                    prompt,
-                    conversation_id=conversation_id,
-                    user_message_id=user_id,
+            source = thread.get("source") if isinstance(thread.get("source"), Mapping) else {}
+            provider = str(source.get("provider") or "memory").lower()
+            conversation_id = str(source.get("conversationId") or thread_id.split(":", 1)[1])
+            provider_conversation_id = source.get("provider_conversation_id") or source.get("providerConversationId")
+            model = params.get("model") or source.get("model")
+            effort = params.get("effort") or params.get("reasoningEffort") or source.get("reasoning_effort")
+            requested_provider = str(params.get("provider") or provider)
+            if provider == "chatgpt" and provider_conversation_id and requested_provider == "chatgpt":
+                result = self.provider.continue_chatgpt(
+                    conversation_id=str(provider_conversation_id),
+                    prompt=prompt,
+                    parent_message_id=source.get("parent_message_id"),
+                    model=str(model) if model else None,
+                    effort=str(effort) if effort else None,
                 )
-            elif thread_id.startswith("memory:"):
-                source_id = thread_id.split(":", 1)[1]
-                markdown = self.memory.render_markdown(source_id)
-                with tempfile.TemporaryDirectory(prefix="b4pt0r-conversation-") as directory:
-                    source = os.path.join(directory, "conversation.md")
-                    with open(source, "w", encoding="utf-8") as handle:
-                        handle.write(markdown)
-                    imported_prompt = "First, please read the attached conversation.md in full."
-                    if prompt:
-                        imported_prompt = f"{imported_prompt}\n\n{prompt}"
-                    result = self.provider.chatgpt.operations.send(
-                        imported_prompt,
-                        attachment_paths=[source],
-                        user_message_id=user_id,
-                    )
             else:
-                raise RuntimeError("Unsupported external conversation provider.")
-            try:
-                self.memory.ingest_chatgpt_turn(result)
-            except Exception as error:
-                self.emit(
-                    {
-                        "method": "cognilode/memoryIngestFailed",
-                        "params": {
-                            "threadId": thread_id,
-                            "turnId": turn_id,
-                            "message": str(error),
-                        },
-                    }
+                result = self.provider.continue_from_memory(
+                    source_conversation_id=conversation_id,
+                    prompt=prompt,
+                    destination_provider=requested_provider if requested_provider in {"chatgpt", "codex"} else "codex",
+                    destination_conversation_id=str(provider_conversation_id) if provider_conversation_id else None,
+                    environment_id=self._selected_environment,
+                    model=str(model) if model else None,
+                    effort=str(effort) if effort else None,
                 )
-            turn = result.get("turn") if isinstance(result, Mapping) else None
-            assistant = turn.get("assistant_message") if isinstance(turn, Mapping) else None
-            assistant_id = str(assistant.get("id") if isinstance(assistant, Mapping) else uuid.uuid4())
-            assistant_text = str(turn.get("assistant_text") if isinstance(turn, Mapping) else "")
-            item = {"id": assistant_id, "type": "agentMessage", "text": assistant_text}
-            self.emit({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id, "item": item}})
-            self.emit({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn_id, "status": "completed", "items": [user_item, item]}}})
-        except Exception as error:
-            self.emit({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn_id, "status": "failed", "error": {"message": str(error)}, "items": [user_item]}}})
+            assistant_item, artifacts = self._turn_result_items(result)
+            self.emit({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id, "item": assistant_item}})
+            if artifacts:
+                self.emit({"method": "cognilode/artifactsAvailable", "params": {"threadId": thread_id, "turnId": turn_id, "artifacts": artifacts}})
+            self.emit({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn_id, "status": "completed", "items": [user_item, assistant_item]}}})
+        except Exception as exc:
+            self.emit({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {"id": turn_id, "status": "failed", "error": {"message": str(exc)}, "items": [user_item]}}})
+
+    def _environment_list(self, request_id: Any) -> None:
+        value = self.remote.environments()
+        nodes = value.get("nodes") if isinstance(value, Mapping) else value
+        data = [
+            {"environmentId": "local", "name": "Local", "selected": self._selected_environment == "local"},
+            *[
+                {**dict(node), "selected": str(node.get("environment_id") or node.get("id")) == self._selected_environment}
+                for node in (nodes if isinstance(nodes, list) else [])
+                if isinstance(node, Mapping)
+            ],
+        ]
+        self.emit({"id": request_id, "result": {"data": data, "selectedEnvironmentId": self._selected_environment}})
+
+    def _environment_select(self, request_id: Any, params: Mapping[str, Any]) -> None:
+        environment_id = str(params.get("environmentId") or params.get("environment_id") or "").strip()
+        if not environment_id:
+            raise ValueError("environmentId is required")
+        if environment_id != "local":
+            self.remote.select(environment_id)
+        self._start_transport(environment_id)
+        self.emit({"id": request_id, "result": {"environmentId": environment_id, "selected": True}})
 
     def handle(self, request: dict[str, Any]) -> None:
         method = request.get("method")
         params = request.get("params") if isinstance(request.get("params"), Mapping) else {}
-        thread_id = params.get("threadId")
-        if method == "thread/list" and not params.get("cursor"):
-            self._forward_with_intercept(request, "thread/list")
-            return
-        if isinstance(thread_id, str) and thread_id.startswith(("chatgpt:", "memory:")):
-            request_id = request.get("id")
-            if method in {"thread/read", "thread/resume"}:
+        thread_id = params.get("threadId") or params.get("thread_id")
+        request_id = request.get("id")
+        try:
+            if method == "cognilode/environment/list":
+                self._environment_list(request_id)
+                return
+            if method == "cognilode/environment/select":
+                self._environment_select(request_id, params)
+                return
+            if method == "thread/list":
+                self._forward_intercept(request, "thread/list")
+                return
+            if method == "thread/search":
+                self._forward_intercept(request, "thread/search")
+                return
+            if isinstance(thread_id, str) and thread_id.startswith("memory:"):
                 thread = self._external_read(thread_id)
-                result: dict[str, Any] = {"thread": thread}
-                if method == "thread/resume":
-                    result.update({"cwd": thread.get("cwd", ""), "model": "gpt-5-6-thinking"})
-                self.emit({"id": request_id, "result": result})
-                return
-            if method == "thread/turns/list":
-                thread = self._external_read(thread_id)
-                self.emit({"id": request_id, "result": {"data": list(reversed(thread.get("turns") or [])), "nextCursor": None}})
-                return
-            if method == "turn/start":
-                prompt = _input_text(params)
-                turn_id = str(uuid.uuid4())
-                self.emit({"id": request_id, "result": {"turn": {"id": turn_id, "status": "inProgress", "items": []}}})
-                threading.Thread(
-                    target=self._turn_worker,
-                    args=(thread_id, turn_id, prompt),
-                    daemon=True,
-                ).start()
-                return
-        self.child_send(request)
+                if method in {"thread/read", "thread/resume"}:
+                    result: dict[str, Any] = {"thread": thread}
+                    if method == "thread/resume":
+                        result.update({"cwd": thread.get("cwd", ""), "model": thread.get("source", {}).get("model")})
+                    self.emit({"id": request_id, "result": result})
+                    return
+                if method == "thread/turns/list":
+                    turns = list(reversed(thread.get("turns") or []))
+                    limit = max(1, min(int(params.get("limit") or len(turns) or 1), 500))
+                    offset = int(params.get("cursor") or 0)
+                    page = turns[offset : offset + limit]
+                    next_cursor = str(offset + limit) if offset + limit < len(turns) else None
+                    self.emit({"id": request_id, "result": {"data": page, "nextCursor": next_cursor}})
+                    return
+                if method == "turn/start":
+                    prompt = _input_text(params)
+                    if not prompt:
+                        raise ValueError("turn input contains no text")
+                    turn_id = str(uuid.uuid4())
+                    self.emit({"id": request_id, "result": {"turn": {"id": turn_id, "status": "inProgress", "items": []}}})
+                    threading.Thread(target=self._turn_worker, args=(thread, turn_id, prompt, params), daemon=True).start()
+                    return
+            self.native_send(request)
+        except Exception as exc:
+            if request_id is not None:
+                self.emit({"id": request_id, "error": {"code": -32000, "message": str(exc)}})
+            else:
+                self.stderr(f"bridge request {method}: {type(exc).__name__}\n")
 
     def run(self) -> int:
-        threading.Thread(target=self._child_reader, daemon=True).start()
-        if self.child is not None:
-            threading.Thread(target=self._child_stderr, daemon=True).start()
-        for line in sys.stdin:
-            try:
-                request = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(request, dict):
-                self.handle(request)
-        if self.remote_child is not None:
-            self.remote_child.close()
+        try:
+            for line in sys.stdin:
+                try:
+                    request = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(request, dict):
+                    self.handle(request)
             return 0
-        if self.child is None:
-            return 1
-        if self.child.stdin is not None:
-            self.child.stdin.close()
-        return self.child.wait()
+        finally:
+            with self._state_lock:
+                if self._transport is not None:
+                    self._transport.close()
 
 
 def main(argv: Iterable[str] | None = None) -> int:
-    del argv
-    return Bridge().run()
+    values = list(sys.argv[1:] if argv is None else argv)
+    return Bridge(values or ["app-server", "--stdio"]).run()
 
 
 if __name__ == "__main__":

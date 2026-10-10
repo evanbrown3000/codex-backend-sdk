@@ -42,6 +42,34 @@ def provider_queue(value: str) -> str:
     return selected
 
 
+def _admission_application_intent(
+    application_intent: Mapping[str, Any] | None,
+    required_downstream_operation: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Normalize intent at the unified admission boundary.
+
+    Some callers historically put the readback contract only in
+    ``required_downstream_operation``. Preserve that contract in the durable
+    intent ledger rather than making the returned-product actuator infer it
+    from provider output.
+    """
+    if application_intent is None and required_downstream_operation is None:
+        return None
+    intent = dict(application_intent or {})
+    downstream = dict(required_downstream_operation or {})
+    if not intent.get("required_readback"):
+        readback = downstream.get("required_readback")
+        if not isinstance(readback, Mapping):
+            readback = downstream
+        if readback:
+            intent["required_readback"] = dict(readback)
+    if not isinstance(intent.get("objective"), str) or not intent["objective"].strip():
+        raise ValueError("application_intent_objective_required")
+    if not isinstance(intent.get("required_readback"), Mapping) or not intent["required_readback"]:
+        raise ValueError("application_intent_required_readback_required")
+    return intent
+
+
 class ProviderCommandClient:
     def __init__(
         self,
@@ -333,6 +361,9 @@ class ProviderCommandClient:
         identically from every environment.
         """
         selected = provider_queue(provider)
+        normalized_intent = _admission_application_intent(
+            application_intent, required_downstream_operation
+        )
         return self._enqueue({
             "provider": selected,
             "conversation_id": conversation_id,
@@ -350,7 +381,7 @@ class ProviderCommandClient:
             "priority": priority,
             "decisionx": dict(decisionx) if decisionx is not None else None,
             "parent_operation": dict(parent_operation) if parent_operation is not None else None,
-            "application_intent": dict(application_intent) if application_intent is not None else None,
+            "application_intent": normalized_intent,
             "required_downstream_operation": (dict(required_downstream_operation)
                 if required_downstream_operation is not None else None),
             "collect_artifacts": bool(collect_artifacts),

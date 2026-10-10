@@ -121,7 +121,7 @@ services:
           --remote-allow-origins='*' \
           --disable-dev-shm-usage --no-first-run --no-default-browser-check \
           --no-sandbox --ozone-platform=x11 --disable-gpu-compositing \
-          --disable-features=UsePortalFilePicker \
+          --disable-features=UsePortalFilePicker,EnableBoundSessionCredentials,DeviceBoundSessionCredentials,BoundSessionCredentials \
           --window-size=1600,1000 https://gemini.google.com/app &
         child=$$!
         persist() {

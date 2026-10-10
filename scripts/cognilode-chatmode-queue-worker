@@ -1584,6 +1584,36 @@ def recover(job: dict, device_id: str = DEVICE_ID) -> None:
         return
     if value and validated_result(value, job):
         return  # Central/effect admission can retry without more provider reads.
+    if (value and str(job.get("id") or "").startswith("rpe-req-")
+            and value.get("assistant_terminal") is True
+            and (value.get("central_conversation_store") or {}).get("central_readback_verified") is True):
+        # The exact terminal turn already exists locally and centrally. A
+        # metadata mismatch is a held custody issue, not a reason to hydrate
+        # ChatGPT again. Record one bounded structural diagnosis per change.
+        central = value.get("central_conversation_store") or {}
+        proof = job.get("rpe_run_receipt") or {}
+        answer = value.get("terminal_assistant_text") or ""
+        checks = {
+            "rpe_authority": job.get("prompt_author") == "rpe_run",
+            "rpe_receipt": proof.get("schema") == "cognilode.rpe.model_request.v1"
+                           and job.get("id") == f"rpe-{proof.get('request_id')}",
+            "queue_identity": value.get("queue_job_id") == job.get("id"),
+            "prompt_hash": central.get("central_prompt_sha256") == job.get("prompt_sha256"),
+            "response_hash": isinstance(answer, str) and bool(answer.strip())
+                             and hashlib.sha256(answer.encode("utf-8")).hexdigest()
+                                 == central.get("central_response_sha256"),
+            "conversation_identity": central.get("conversation_id") == value.get("conversation_id"),
+        }
+        state_path = job_state_path(job["id"])
+        try:
+            previous = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
+        except (OSError, ValueError):
+            previous = {}
+        if previous.get("rpe_validation_checks") != checks:
+            atomic_json(state_path, {**previous, "state": "terminal_rpe_validation_hold",
+                                     "job_id": job["id"], "rpe_validation_checks": checks})
+            event("terminal_rpe_validation_hold", job_id=job["id"], checks=checks)
+        return
     state_path = job_state_path(job["id"])
     try:
         prior_state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}

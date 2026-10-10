@@ -9,6 +9,7 @@ foreground operator to ferry a prompt or file.
 from __future__ import annotations
 
 from datetime import datetime
+import fcntl
 import hashlib
 import json
 import os
@@ -277,6 +278,14 @@ def main() -> int:
     root = Path(os.environ.get("COGNILODE_PROVIDER_ACCEPTANCE_ROOT", "/runtime/area1-acceptance"))
     seed = root / "area1-provider-source.zip"
     root.mkdir(parents=True, exist_ok=True)
+    # This sequence owns one shared onboarding frontier across every source
+    # generation.  A generation-scoped supervisor may overlap while an
+    # accepted mutation drains, but its acceptance composer must not.
+    singleton = (root / ".four-provider-acceptance.lock").open("a+")
+    try:
+        fcntl.flock(singleton.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return 0
     # Discovery and source publication are independent daemons. Remain
     # resident when discovery starts first so a late seed activates the
     # sequence without manual intervention.

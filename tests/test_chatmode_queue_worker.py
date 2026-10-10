@@ -135,6 +135,18 @@ def test_completion_requires_terminal_central_readback_and_exact_zip(tmp_path):
         archive.writestr("report.txt", "incomplete handoff")
     assert module.validated_result({**value, "downloaded_files": [{"path": str(missing),
         "sha256": hashlib.sha256(missing.read_bytes()).hexdigest(), "name": missing.name}]}) is None
+    wrapped = tmp_path / "wrapped-work.zip"
+    with zipfile.ZipFile(wrapped, "w") as archive:
+        archive.writestr("returned_work/EXTERNAL_EFFECT_INSTRUCTIONS.md", "Apply and read back")
+    wrapped_file = {"path": str(wrapped), "sha256": hashlib.sha256(wrapped.read_bytes()).hexdigest(),
+                    "name": wrapped.name}
+    assert module.validated_result({**value, "downloaded_files": [wrapped_file]})[0] == "conv-1"
+    ambiguous = tmp_path / "ambiguous-work.zip"
+    with zipfile.ZipFile(ambiguous, "w") as archive:
+        archive.writestr("EXTERNAL_EFFECT_INSTRUCTIONS.md", "One")
+        archive.writestr("returned_work/EXTERNAL_EFFECT_INSTRUCTIONS.md", "Two")
+    assert module.validated_result({**value, "downloaded_files": [{"path": str(ambiguous),
+        "sha256": hashlib.sha256(ambiguous.read_bytes()).hexdigest(), "name": ambiguous.name}]}) is None
 
 
 def test_stable_send_identity_is_device_independent():

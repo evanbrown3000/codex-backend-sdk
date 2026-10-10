@@ -10,9 +10,7 @@ from __future__ import annotations
 
 import os
 import json
-import hashlib
 from pathlib import Path
-import shutil
 import subprocess
 import time
 from typing import Any, Mapping, Sequence
@@ -20,18 +18,11 @@ import uuid
 
 import requests
 
+from .attachment_custody import commit_bytes, commit_path
 from .operator_auth import operator_token
 
 
 TERMINAL_STATES = {"completed", "failed", "cancelled", "held", "dead_letter"}
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for block in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 class ProviderCommandClient:
@@ -111,12 +102,15 @@ class ProviderCommandClient:
         return value
 
     def _enqueue(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        authority = str(payload.get("prompt_authority") or "interactive_operator")
+        source = str(payload.get("source") or "b4pt0r-unified-app-server")
+        request_id = str(payload.get("request_id") or "interactive-" + uuid.uuid4().hex)
         request = {
             "operation": "enqueue_job",
-            "prompt_authority": "interactive_operator",
-            "source": "b4pt0r-unified-app-server",
-            "request_id": "interactive-" + uuid.uuid4().hex,
             **dict(payload),
+            "prompt_authority": authority,
+            "source": source,
+            "request_id": request_id,
         }
         value = self._queue_call(request)
         job = value.get("job") if isinstance(value.get("job"), Mapping) else {}
@@ -124,47 +118,10 @@ class ProviderCommandClient:
         return {**value, "job_id": job_id, "queued": True}
 
     def stage_file(self, source: str | Path) -> dict[str, Any]:
-        path = Path(source).expanduser().resolve()
-        if not path.is_file():
-            raise RuntimeError(f"provider input attachment is unavailable: {path}")
-        digest = _sha256_file(path)
-        host_root = Path(os.environ.get(
-            "COGNILODE_QUEUE_ATTACHMENT_ROOT",
-            str(Path.home() / ".local/share/cognilode/company-runtime/shared/queue-inputs"),
-        )).expanduser()
-        runtime_root = os.environ.get(
-            "COGNILODE_QUEUE_ATTACHMENT_RUNTIME_ROOT", "/runtime/queue-inputs"
-        ).rstrip("/")
-        target_dir = host_root / digest
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / path.name
-        if not target.is_file() or _sha256_file(target) != digest:
-            temporary = target.with_suffix(target.suffix + ".part")
-            shutil.copyfile(path, temporary)
-            os.replace(temporary, target)
-        return {
-            "ref": f"file:{runtime_root}/{digest}/{path.name}",
-            "sha256": digest,
-            "name": path.name,
-        }
+        return commit_path(source)
 
     def stage_text(self, text: str, name: str = "conversation.md") -> dict[str, Any]:
-        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        host_root = Path(os.environ.get(
-            "COGNILODE_QUEUE_ATTACHMENT_ROOT",
-            str(Path.home() / ".local/share/cognilode/company-runtime/shared/queue-inputs"),
-        )).expanduser()
-        runtime_root = os.environ.get(
-            "COGNILODE_QUEUE_ATTACHMENT_RUNTIME_ROOT", "/runtime/queue-inputs"
-        ).rstrip("/")
-        target_dir = host_root / digest
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / name
-        if not target.is_file() or target.read_text(encoding="utf-8") != text:
-            temporary = target.with_suffix(target.suffix + ".part")
-            temporary.write_text(text, encoding="utf-8")
-            os.replace(temporary, target)
-        return {"ref": f"file:{runtime_root}/{digest}/{name}", "sha256": digest, "name": name}
+        return commit_bytes(name, text.encode("utf-8"))
 
     def wait(self, job_id: str) -> dict[str, Any]:
         deadline = time.monotonic() + self.timeout
@@ -236,6 +193,13 @@ class ProviderCommandClient:
         model: str | None = None,
         effort: str | None = None,
         attachments: Sequence[str] = (),
+        request_id: str | None = None,
+        project: str = "unified-b4pt0r",
+        role: str = "interactive-operator",
+        source: str = "b4pt0r-unified-cli",
+        prompt_authority: str = "interactive_operator",
+        priority: int | None = None,
+        decisionx: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self._enqueue({
             "provider": "chatgpt.com",
@@ -245,7 +209,17 @@ class ProviderCommandClient:
             "model": model,
             "reasoning_effort": effort,
             "attachment_refs": [self.stage_file(path) for path in attachments],
+            "request_id": request_id,
+            "project": project,
+            "role": role,
+            "source": source,
+            "prompt_authority": prompt_authority,
+            "priority": priority,
+            "decisionx": dict(decisionx) if decisionx is not None else None,
         })
+
+    def queue_status(self, provider: str = "chatgpt.com") -> dict[str, Any]:
+        return self._queue_call({"operation": "rhythm_read", "provider": provider})
 
     def continue_from_memory(
         self,

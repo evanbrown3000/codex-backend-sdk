@@ -20,6 +20,7 @@ class AgentMemoryClient:
         endpoint: str | None = None,
         token: str | None = None,
         timeout: float = 120,
+        use_broker: bool = True,
     ) -> None:
         self.endpoint = (
             endpoint
@@ -33,7 +34,7 @@ class AgentMemoryClient:
         self.token = operator_token(token)
         self.timeout = timeout
         self._session = requests.Session()
-        self._broker = ProviderCommandClient(timeout=max(120, int(timeout)))
+        self._broker = ProviderCommandClient(timeout=max(120, int(timeout))) if use_broker else None
 
     def _headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json"}
@@ -49,7 +50,7 @@ class AgentMemoryClient:
         params: Mapping[str, Any] | None = None,
         body: Mapping[str, Any] | None = None,
     ) -> Any:
-        if self._broker.available() and not self.token:
+        if self._broker is not None and self._broker.available() and not self.token:
             return self._broker.call(
                 "agent_memory_request",
                 {
@@ -152,9 +153,9 @@ class AgentMemoryClient:
         ]
         observation = {
             "schema": "memory_stock.conversation_observation.v1",
-            "provider": "chatgpt",
+            "provider": "chatgpt.com",
             "provider_conversation_id": result.get("conversation_id"),
-            "conversation_id": f"chatgpt:{result.get('conversation_id')}",
+            "conversation_id": result.get("conversation_id"),
             "provider_user_message_id": result.get("user_message_id"),
             "environment_id": environment_id or os.environ.get("COGNILODE_REMOTE_ENVIRONMENT_ID"),
             "provider_account_id": account_id or os.environ.get("B4PT0R_CHATGPT_ACCOUNT_ID"),
@@ -195,9 +196,9 @@ class AgentMemoryClient:
         return self.ingest(
             {
                 "schema": "memory_stock.conversation_observation.v1",
-                "provider": "chatgpt",
+                "provider": "chatgpt.com",
                 "provider_conversation_id": provider_id,
-                "conversation_id": f"chatgpt:{provider_id}",
+                "conversation_id": provider_id,
                 "environment_id": environment_id or os.environ.get("COGNILODE_REMOTE_ENVIRONMENT_ID"),
                 "provider_account_id": account_id or os.environ.get("B4PT0R_CHATGPT_ACCOUNT_ID"),
                 "observed_at": datetime.now(timezone.utc).isoformat(),

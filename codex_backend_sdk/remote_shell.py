@@ -117,6 +117,7 @@ class RemoteShellClient:
         arguments: dict[str, Any] = {
             "cmd": command,
             "yield_time_ms": yield_time_ms,
+            "actor_id": self.actor_id,
         }
         if workdir:
             arguments["workdir"] = workdir
@@ -139,6 +140,7 @@ class RemoteShellClient:
             "process_id": process_id,
             "chars": chars,
             "yield_time_ms": yield_time_ms,
+            "actor_id": self.actor_id,
         }
         if environment_id:
             arguments["environment_id"] = environment_id
@@ -149,7 +151,7 @@ class RemoteShellClient:
     def terminate(
         self, process_id: str | int, *, environment_id: str | None = None
     ) -> Any:
-        arguments: dict[str, Any] = {"process_id": process_id}
+        arguments: dict[str, Any] = {"process_id": process_id, "actor_id": self.actor_id}
         if environment_id:
             arguments["environment_id"] = environment_id
         try:

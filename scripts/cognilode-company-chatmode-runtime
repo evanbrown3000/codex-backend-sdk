@@ -162,6 +162,12 @@ def launch_prepared(runner: Path, cli: Path) -> subprocess.Popen:
     environment = os.environ.copy()
     environment["B4PT0R_CLI"] = str(cli)
     environment["COMPUTERUSEX_SKIP_IMPORT_GUARDS"] = "1"
+    # A self-exec inherits the retiring generation's fence identity. Reusing
+    # it makes the successor batch exit on the predecessor's generation lock
+    # precisely while that predecessor is draining a long provider turn.
+    environment["COGNILODE_GENERATION_FENCE_IDENTITY"] = hashlib.sha256(
+        (str(runner.resolve()) + "|" + str(cli.resolve())).encode()
+    ).hexdigest()
     environment.setdefault(
         "COMPUTERUSEX_RUNTIME_ROOT",
         "/home/worker/.local/share/cognilode/computerusex",

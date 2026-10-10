@@ -147,7 +147,12 @@ def main() -> int:
                 "Do not submit the terminal answer until at least 300 seconds have elapsed since provider-side "
                 "work began; use all remaining time for substantive source work."
             )
-            request_id = f"area1-sequential-{provider.split('.')[0]}-attempt-{attempt}"
+            packet_identity = hashlib.sha256()
+            packet_identity.update(authored.encode())
+            for inherited_path in inherited:
+                packet_identity.update(hashlib.sha256(Path(inherited_path).read_bytes()).digest())
+            request_id = (f"area1-sequential-{provider.split('.')[0]}-attempt-{attempt}-"
+                          + packet_identity.hexdigest()[:12])
             queued = client.send_provider(
                 provider=provider, prompt=authored, attachments=tuple(inherited), request_id=request_id,
                 project="unified-provider-actuation", role="provider-implementation-worker",

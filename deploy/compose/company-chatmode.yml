@@ -137,6 +137,7 @@ services:
       COGNILODE_PROVIDER_SCHEDULER_SOCKET: /runtime/provider-scheduler.sock
       COGNILODE_PROVIDER_SCHEDULER_DB: /runtime/provider-scheduler/scheduler.sqlite3
       COGNILODE_PROVIDER_SCHEDULER_LEDGER: /runtime/provider-events/outbox.jsonl
+      COGNILODE_PROVIDER_RHYTHM_TAPE: /runtime/source/current/control-execution-runtime/data/provider_scheduler/historical_rhythm.uleb128
     volumes:
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
     depends_on:

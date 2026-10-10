@@ -287,7 +287,7 @@ def recover_terminal(job: Mapping[str, Any]) -> bool:
                 row = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
-            if (str(row.get("provider") or "") != provider
+            if (str(row.get("provider") or "") not in {provider, profile}
                     or str(row.get("prompt_sha256") or "") != prompt_sha
                     or row.get("ok") is not True
                     or str(row.get("status") or "") != "response_collected"

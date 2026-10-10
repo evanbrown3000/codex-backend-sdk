@@ -27,7 +27,9 @@ def _purpose(method: str, url: str) -> tuple[str, str, str]:
             or "/conversation" in path or "/uploads" in path
         ):
             return "chatmode_prompt_or_upload", host, path
-        if "/interpreter/download" in path or "/files/" in path:
+        if "/interpreter/download" in path or "/files/" in path or (
+            method == "GET" and path == "/backend-api/estuary/content"
+        ):
             return "artifact_download", host, path
         return "observability", host, path
     if host == "cognilode.com" and path.startswith("/api/operator/http-gate"):

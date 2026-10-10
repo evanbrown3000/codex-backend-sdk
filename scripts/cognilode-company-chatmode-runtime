@@ -177,11 +177,12 @@ def launch_prepared(runner: Path, cli: Path) -> subprocess.Popen:
     )
 
 
-def launch_clock(source: Path) -> subprocess.Popen:
+def launch_clock(source: Path, cli: Path) -> subprocess.Popen:
     """Run the one Area-2 clock caller outside actuator generations."""
     watcher = source / "scripts" / "cognilode-chatmode-floor-watcher"
+    interpreter = cli.parent / "python"
     return subprocess.Popen(
-        [sys.executable, str(watcher)], env=os.environ.copy(), start_new_session=True
+        [str(interpreter), str(watcher)], env=os.environ.copy(), start_new_session=True
     )
 
 
@@ -332,11 +333,6 @@ def main() -> int:
     reap_inherited_drains()
     source = active_source()
     active_revision = source_revision(source)
-    # The clock belongs to the stable Area-2 queue boundary, not to an
-    # actuator generation.  Keeping it here lets accepted provider capability
-    # heartbeats drive independent clocks while old provider effects drain.
-    # The watcher's durable lock also fences any predecessor during handoff.
-    clock = launch_clock(source)
     bootstrap_cli = latest_complete_cli()
     target_cli = Path(os.environ.get(
         "COGNILODE_B4PT0R_RELEASE_ROOT", "/runtime/b4pt0r-releases/locked-v2"
@@ -350,6 +346,11 @@ def main() -> int:
     else:
         source, runner, cli = prepare_frontier()
         process = launch_prepared(runner, cli)
+    # The clock belongs to the stable Area-2 queue boundary, not to an
+    # actuator generation.  Keeping it here lets accepted provider capability
+    # heartbeats drive independent clocks while old provider effects drain.
+    # The watcher's durable lock also fences any predecessor during handoff.
+    clock = launch_clock(source, cli)
     pending_generation: tuple[Path, str] | None = None
     pending_since = 0.0
     pending_frontier_since = 0.0
@@ -361,7 +362,7 @@ def main() -> int:
     ))
     while not STOP:
         if clock.poll() is not None:
-            clock = launch_clock(source)
+            clock = launch_clock(source, cli)
         if process.poll() is not None:
             source, runner, cli = prepare_frontier()
             process = launch_prepared(runner, cli)

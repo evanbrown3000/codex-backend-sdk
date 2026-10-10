@@ -465,6 +465,7 @@ services:
       CODEX_HOME: /home/worker/.codex
       COGNILODE_CODEX_BIN: /codex/bin/codex
       COGNILODE_CODEX_EXEC_SOCKET: /codex-exec/broker.sock
+      COGNILODE_CODEX_BROKER_SANDBOX_GENERATION: bwrap-container-v1
       COGNILODE_DROP_UID: ${COMPANY_UID:-1000}
       COGNILODE_DROP_GID: ${COMPANY_GID:-1000}
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source

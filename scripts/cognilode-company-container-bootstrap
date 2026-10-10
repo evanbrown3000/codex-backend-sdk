@@ -165,14 +165,15 @@ def compose_service_hashes(project: str, compose: Path, env: dict[str, str]) -> 
             if not value.get("profiles") or active_profiles.intersection(value["profiles"])}
 
 
-def provider_mutations_active(runtime: Path) -> int | None:
-    """Read local provider custody state without observing the provider."""
+def provider_mutations_active(runtime: Path, *, drain: bool = False) -> int | None:
+    """Read or fence local provider custody without observing the provider."""
     path = runtime / "shared/provider.sock"
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
             channel.settimeout(5)
             channel.connect(str(path))
-            channel.sendall(b'{"operation":"active"}\n')
+            operation = b'drain' if drain else b'active'
+            channel.sendall(b'{"operation":"' + operation + b'"}\n')
             channel.shutdown(socket.SHUT_WR)
             data = bytearray()
             while b"\n" not in data and len(data) < 4096:
@@ -425,6 +426,16 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
                             notify_service("WATCHDOG=1")
                             time.sleep(2)
                             continue
+                        if mutation_services:
+                            # Close admission after observing zero so a rhythm
+                            # tick cannot start another turn between the check
+                            # and Docker replacement. The scheduler will retain
+                            # any rejected claim for the successor transport.
+                            fenced = provider_mutations_active(runtime, drain=True)
+                            if fenced != 0:
+                                print("company Compose provider custody fence pending", flush=True)
+                                time.sleep(2)
+                                continue
                         if changed:
                             if "provider-transport" in changed:
                                 ensure_chatmode_node(

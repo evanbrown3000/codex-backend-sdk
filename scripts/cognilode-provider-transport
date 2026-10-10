@@ -71,9 +71,13 @@ def b4pt0r_send(args: list[str], send_fence: dict) -> dict:
     )
     attachments = [args[index + 1] for index, value in enumerate(args[:-1]) if value == "--attach"]
     attempt_identity = str(send_fence.get("provider_attempt") or provider_attempt or "0")
+    lease_generation = str(send_fence.get("lease_generation") or "0")
     operation_id = str(
         send_fence.get("operation_id")
-        or f"{job_id}:provider-attempt:{attempt_identity}"
+        # A scheduler-authorized retry is a new capability-scoped operation.
+        # Reusing the old operation identity leaves the single-use custody
+        # lease correctly redeemed and makes every later queue lease fail.
+        or f"{job_id}:queue-lease:{lease_generation}:provider-attempt:{attempt_identity}"
     )
     account_id = option(args, "--provider-account-id", "primary")
     lease_code, lease_result, lease_stderr = _broker_call({

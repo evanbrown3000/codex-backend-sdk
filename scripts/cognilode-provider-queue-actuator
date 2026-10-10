@@ -216,6 +216,24 @@ def main() -> int:
                     [sys.executable, "-m", "codex_backend_sdk.provider_broker"], timeout=2400
                 )
                 process(job, client)
+            except Exception as exc:
+                # A crashed thread must never strand a claimed lease.  The
+                # scheduler remains the sole retry authority and preserves the
+                # same fenced job identity for the next permitted attempt.
+                try:
+                    scheduler_call({
+                        "operation": "release_job", **fence(job),
+                        "provider_state": "provider_error",
+                        "reason": "actuator_exception:" + type(exc).__name__,
+                        "retry_after_seconds": 60,
+                    })
+                except Exception as release_exc:
+                    print(json.dumps({
+                        "kind": "provider_actuator_release_failed",
+                        "provider": args.provider,
+                        "job_id": job_id,
+                        "error": type(release_exc).__name__ + ":" + str(release_exc)[:300],
+                    }), flush=True)
             finally:
                 with lock:
                     active.discard(job_id)

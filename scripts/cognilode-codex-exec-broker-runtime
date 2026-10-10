@@ -22,6 +22,7 @@ SANDBOX_READY = SOCKET.with_suffix(".sandbox-ready.json")
 BWRAP = Path("/usr/bin/bwrap")
 BWRAP_CACHE = Path("/var/cache/cognilode-bwrap")
 CODEX = Path(os.getenv("COGNILODE_CODEX_BIN", "/codex/bin/codex"))
+CODEX_SOURCE = ROOT / "current/cognilode-codex"
 STOP = False
 
 
@@ -107,6 +108,8 @@ def probe_bubblewrap() -> Path:
     source_pin = release.parent.name
     if len(source_pin) != 40 or any(ch not in "0123456789abcdef" for ch in source_pin):
         raise RuntimeError("codex_binary_not_pinned_release")
+    if source_pin != target_pin():
+        raise RuntimeError("native_release_behind_synchronized_source")
     native = subprocess.run([str(CODEX), "sandbox", "--", "/bin/sh", "-c",
                              "test -r /runtime/worker && test -x /codex/bin/codex"],
                             capture_output=True, text=True, timeout=30, check=False)
@@ -124,6 +127,14 @@ def probe_bubblewrap() -> Path:
     tmp.write_text(json.dumps(record, sort_keys=True) + "\n")
     tmp.replace(SANDBOX_READY)
     return release
+
+
+def target_pin() -> str:
+    try:
+        selected = CODEX_SOURCE.resolve(strict=True).name
+    except OSError:
+        return ""
+    return selected if len(selected) == 40 and all(ch in "0123456789abcdef" for ch in selected) else ""
 
 
 def main() -> int:
@@ -171,6 +182,7 @@ def main() -> int:
         try:
             while worker.poll() is None:
                 changed = codex_release != CODEX.resolve() or \
+                    codex_release.parent.name != target_pin() or \
                     broker != (CURRENT / "cognilode-codex-exec-broker").resolve() or \
                     quota != (ROOT / "current/modified-codex-runtime/src/modified_codex/codex_quota_observer.py").resolve()
                 if STOP or changed or observer.poll() is not None:

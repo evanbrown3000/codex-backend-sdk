@@ -9,7 +9,6 @@ import shutil
 import subprocess
 import sys
 import time
-import venv
 
 HERE = Path(__file__).resolve().parent
 STOP = False
@@ -48,7 +47,11 @@ def release_for(source: Path) -> tuple[Path, Path]:
     temporary = release_root / (source.name + ".building")
     if temporary.exists():
         shutil.rmtree(temporary)
-    venv.EnvBuilder(with_pip=True, clear=True).create(temporary)
+    builder = Path(os.environ.get("COGNILODE_VENV_PYTHON", "/usr/local/bin/python3"))
+    if not builder.is_file():
+        builder = Path(sys.executable)
+    subprocess.run([str(builder), "-m", "venv", "--clear", str(temporary)],
+                   check=True, timeout=300)
     install = [str(temporary / "bin" / "python"), "-m", "pip", "install", "--no-cache-dir", str(source)]
     universe = Path(os.environ.get(
         "COGNILODE_UNIVERSE_STORAGE_ROOT", "/runtime/source/current/universe-storage"

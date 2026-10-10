@@ -131,6 +131,7 @@ def collect(receipt_path: Path, *, allow_provider_read: bool = False) -> dict:
     stem = receipt_path.name.removesuffix(".sse.receipt.json")
     collected_path = receipt_path.with_name(stem + ".collected.json")
     prior_terminal_at = None
+    prior_central = {}
     if collected_path.is_file():
         existing = json.loads(collected_path.read_text())
         if existing.get("complete") is True:
@@ -213,10 +214,18 @@ def collect(receipt_path: Path, *, allow_provider_read: bool = False) -> dict:
         if local_prompt and local_text and local_result.get("assistant_terminal") and files_complete and (has_collected_zip(local_result) or not allow_provider_read):
             central = local_result.get("central_conversation_store") or {}
             if not central.get("ok") or (files and not central.get("central_artifacts")):
-                central = sender.admit_central_conversation(
-                    result_id=stem, prompt=local_prompt, result=local_result,
-                    attachments=list(receipt.get("attached_context_files") or []),
-                )
+                if (os.environ.get("COGNILODE_AWS_PURPOSE") != "artifact-write"
+                        or not os.environ.get("COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET")):
+                    return {"state": "artifact_custody_delegated", "receipt": str(receipt_path),
+                            "artifact_count": len(files)}
+                if files and prior_central.get("central_readback_verified") is True:
+                    central = sender.admit_central_artifacts_only(
+                        prompt=local_prompt, result=local_result, prior_central=prior_central)
+                else:
+                    central = sender.admit_central_conversation(
+                        result_id=stem, prompt=local_prompt, result=local_result,
+                        attachments=list(receipt.get("attached_context_files") or []),
+                    )
                 local_result["central_conversation_store"] = central
             complete = bool(central.get("ok"))
             atomic_json(collected_path, {**local_record, "result": local_result, "complete": complete})
@@ -350,7 +359,11 @@ def main() -> int:
                  or "central HTTP gate denied observability" in prior_reason
                  or "central HTTP gate denied artifact_download" in prior_reason)
         )
-        if float(state.get("next_poll_epoch") or 0) > time.time() and not repaired_local_blocker:
+        custody_blocker = (state.get("state") == "retryable_collection_error"
+                           and state.get("collector_source_generation") != source_generation
+                           and "private provider SSE source bucket is unavailable" in
+                           str(prior_result.get("error") or ""))
+        if float(state.get("next_poll_epoch") or 0) > time.time() and not (repaired_local_blocker or custody_blocker):
             continue
         allow_provider_read = (observability_enabled and not active_mutation
                                and provider_reads == 0 and time.time() >= global_cooldown_until)
@@ -370,7 +383,7 @@ def main() -> int:
         if allow_provider_read and status not in ("collected_from_local_terminal", "already_collected",
                                                   "provider_rejected", "awaiting_conversation_id"):
             provider_reads += 1
-        if status in ("provider_read_deferred", "artifact_recovery_delegated"):
+        if status in ("provider_read_deferred", "artifact_recovery_delegated", "artifact_custody_delegated"):
             continue
         attempts = 0 if status in ("collected", "already_collected") else int(state.get("attempts") or 0) + 1
         delay = 0 if status in ("collected", "already_collected") else min(1800, 60 * 2 ** min(attempts - 1, 5))

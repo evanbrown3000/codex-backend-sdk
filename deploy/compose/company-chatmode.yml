@@ -100,9 +100,10 @@ services:
       COGNILODE_HTTP_GATE_POLICY_FILE: /runtime/http-gate/policy.json
       COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
       COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
-      PATH: /usr/bin:/usr/local/bin:/bin
+      PATH: /node-runtime:/usr/bin:/usr/local/bin:/bin
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
+      - company_node_runtime:/node-runtime:ro
       - company_auth:/home/worker/.codex
       - company_browser:/custody/browser:ro
       - company_operator:/home/worker/.config/cognilode:ro
@@ -147,10 +148,9 @@ services:
       COGNILODE_TASKFLOW_ATTACHMENT_S3_READ_BUCKETS: cognilode-conversation-visibility-362928919715-us-west-2
       COGNILODE_AWS_CLI: /usr/bin/aws
       COGNILODE_AWS_PURPOSE: artifact-write
-      PATH: /node-runtime:/usr/bin:/usr/local/bin:/bin
+      PATH: /usr/bin:/usr/local/bin:/bin
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
-      - company_node_runtime:/node-runtime:ro
       - company_operator:/home/worker/.config/cognilode:ro
       - ${COMPANY_RUNTIME_ROOT}/worker:/home/worker/.local/share/cognilode
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime

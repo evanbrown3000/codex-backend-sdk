@@ -28,7 +28,22 @@ BASE = "https://chatgpt.com/backend-api/"
 SESSION = "https://chatgpt.com/api/auth/session"
 DEFAULT_PROFILE = Path.home() / ".config/google-chrome/Default"
 DEFAULT_OUTPUT_ROOT = Path.home() / ".local/share/cognilode/b4pt0r-chatmode"
-DEFAULT_RUNTIME = DEFAULT_OUTPUT_ROOT / f"venv-python{sys.version_info.major}.{sys.version_info.minor}"
+def _runtime_root() -> Path:
+    """Reuse any complete custody runtime before attempting a new venv.
+
+    Company images can expose a different `/usr/bin/python3` than the Python
+    that built the persistent provider runtime.  A runtime is portable here
+    when its own executable and required site package are present.
+    """
+    for candidate in sorted(DEFAULT_OUTPUT_ROOT.glob("venv-python*")):
+        if (candidate / "bin/python").exists() and any(
+            candidate.glob("lib/python*/site-packages/curl_cffi")
+        ):
+            return candidate
+    return DEFAULT_OUTPUT_ROOT / f"venv-python{sys.version_info.major}.{sys.version_info.minor}"
+
+
+DEFAULT_RUNTIME = _runtime_root()
 DEFAULT_IMPERSONATE = "chrome136"
 SENTINEL_VM = Path(__file__).resolve().with_name("chatgpt_sentinel_vm.mjs")
 TASKFLOW_DIR = Path.home() / ".local/share/cognilode/taskflow-leaf-executor/b4pt0r-chatmode"

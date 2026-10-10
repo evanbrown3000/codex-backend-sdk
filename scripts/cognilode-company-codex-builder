@@ -7,16 +7,15 @@ import fcntl
 import json
 from pathlib import Path
 import platform
+import re
 import subprocess
 import time
 
 
-PIN = os.environ["COGNILODE_CODEX_SOURCE_COMMIT"]
-SOURCE = Path(os.environ.get("COGNILODE_COMPANY_SOURCE_ROOT", "/runtime/source")) / "current/cognilode-codex"
+SOURCE_ROOT = Path(os.environ.get("COGNILODE_COMPANY_SOURCE_ROOT", "/runtime/source"))
+SOURCE_LINK = SOURCE_ROOT / "current/cognilode-codex"
 RELEASE = Path(os.environ.get("COGNILODE_CODEX_INSTALL_ROOT", "/codex"))
 TARGET = f"{platform.system().lower()}-{platform.machine().lower()}"
-LOOKUP = RELEASE / "metadata" / f"lookup-{PIN}-{TARGET}.json"
-LOCK = RELEASE / "metadata" / f"release-{PIN}-{TARGET}.lock"
 
 
 def build_capacity_bytes() -> int:
@@ -38,54 +37,71 @@ def build_capacity_bytes() -> int:
     return min(values) if values else 0
 
 
-def run_once_unlocked() -> None:
-    if not (SOURCE / ".git").is_dir():
-        return
-    real_source = SOURCE.resolve()
-    actual = subprocess.run(["git", "-c", f"safe.directory={real_source}", "-C", str(SOURCE),
+def selected_source() -> tuple[Path, str] | None:
+    """Snapshot one immutable, fully synchronized checkout for this build."""
+    try:
+        source = SOURCE_LINK.resolve(strict=True)
+    except OSError:
+        return None
+    pin = source.name
+    if (not re.fullmatch(r"[0-9a-f]{40}", pin) or
+            source.parent != SOURCE_ROOT / "checkouts/cognilode-codex" or
+            not (source / ".git").is_dir()):
+        return None
+    actual = subprocess.run(["git", "-c", f"safe.directory={source}", "-C", str(source),
                              "rev-parse", "HEAD"], capture_output=True, text=True, timeout=30)
-    if actual.returncode or actual.stdout.strip() != PIN:
-        return
-    installed = RELEASE / "releases" / PIN / "codex"
+    if actual.returncode or actual.stdout.strip() != pin:
+        return None
+    return source, pin
+
+
+def run_once_unlocked(source: Path, pin: str) -> None:
+    lookup_file = RELEASE / "metadata" / f"lookup-{pin}-{TARGET}.json"
+    installed = RELEASE / "releases" / pin / "codex"
     if (installed.is_file() and os.access(installed, os.X_OK) and
-            (RELEASE / "releases" / PIN / "codex-code-mode-host").is_file() and
-            (RELEASE / "releases" / PIN / "code-mode-host-ready.json").is_file() and
+            (RELEASE / "releases" / pin / "codex-code-mode-host").is_file() and
+            (RELEASE / "releases" / pin / "code-mode-host-ready.json").is_file() and
             (RELEASE / "bin/codex").is_file() and
             (RELEASE / "bin/codex-code-mode-host").is_file() and
             (RELEASE / "bin/central-rollouts").is_file()):
         return
     # Shared custody gets first chance to install the exact pinned release.
     # An inaccessible bucket must not trigger an independent low-memory build.
-    if not LOOKUP.is_file():
+    if not lookup_file.is_file():
         return
     try:
-        lookup = json.loads(LOOKUP.read_text())
+        lookup = json.loads(lookup_file.read_text())
     except (OSError, ValueError):
         return
-    if lookup.get("pin") != PIN or lookup.get("target") != TARGET or lookup.get("state") != "missing":
+    if lookup.get("pin") != pin or lookup.get("target") != TARGET or lookup.get("state") != "missing":
         return
     minimum = int(os.environ.get("COGNILODE_CODEX_MIN_BUILD_MEMORY_BYTES", str(5 * 1024 ** 3)))
     if build_capacity_bytes() < minimum:
         return
     env = os.environ.copy()
-    env["COGNILODE_CODEX_SOURCE"] = str(SOURCE)
+    env["COGNILODE_CODEX_SOURCE"] = str(source)
     env["COGNILODE_CODEX_INSTALL_ROOT"] = str(RELEASE)
     # The source-sync checkout belongs to the non-root company UID while this
     # isolated builder runs as root. Git canonicalizes the symlink before its
     # ownership check; grant only the resolved pinned checkout as safe.
     env["GIT_CONFIG_COUNT"] = "1"
     env["GIT_CONFIG_KEY_0"] = "safe.directory"
-    env["GIT_CONFIG_VALUE_0"] = str(real_source)
-    subprocess.run([str(SOURCE / "cognilode/host-client/build-install-container-codex")],
+    env["GIT_CONFIG_VALUE_0"] = str(source)
+    subprocess.run([str(source / "cognilode/host-client/build-install-container-codex")],
                    env=env, check=True, timeout=7200)
-    print(f"Codex release ready {PIN}", flush=True)
+    print(f"Codex release ready {pin}", flush=True)
 
 
 def run_once() -> None:
-    LOCK.parent.mkdir(parents=True, exist_ok=True)
-    with LOCK.open("a+") as lock:
+    selected = selected_source()
+    if selected is None:
+        return
+    source, pin = selected
+    lock_file = RELEASE / "metadata" / f"release-{pin}-{TARGET}.lock"
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    with lock_file.open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        run_once_unlocked()
+        run_once_unlocked(source, pin)
 
 
 if __name__ == "__main__":

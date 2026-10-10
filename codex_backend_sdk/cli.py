@@ -108,6 +108,12 @@ def _prompting(args: argparse.Namespace) -> Any:
         return provider.wait(args.job_id)
     if args.prompting_command == "queue":
         return provider.queue_status(args.destination)
+    if args.prompting_command == "ledger":
+        return provider.queue_ledger(after_sequence=args.after_sequence, limit=args.limit)
+    if args.prompting_command == "codex-admit":
+        return provider.codex_admit(estimated_cost=args.estimated_cost, priority=args.priority,
+                                    suitable_com_route=args.suitable_com_route,
+                                    parent_operation=_json_object(args.parent_operation) or {})
     memory = AgentMemoryClient()
     if args.prompting_command == "list":
         filters = {"provider": args.destination} if args.destination else {}
@@ -264,6 +270,14 @@ def parser() -> argparse.ArgumentParser:
     unified_collect.add_argument("job_id")
     unified_queue = prompt_ops.add_parser("queue")
     unified_queue.add_argument("--provider", dest="destination", required=True)
+    unified_ledger = prompt_ops.add_parser("ledger")
+    unified_ledger.add_argument("--after-sequence", type=int, default=0)
+    unified_ledger.add_argument("--limit", type=int, default=200)
+    unified_codex_admit = prompt_ops.add_parser("codex-admit")
+    unified_codex_admit.add_argument("--estimated-cost", type=float, required=True)
+    unified_codex_admit.add_argument("--priority", type=int, required=True)
+    unified_codex_admit.add_argument("--suitable-com-route", action="store_true")
+    unified_codex_admit.add_argument("--parent-operation", required=True)
     unified_list = prompt_ops.add_parser("list")
     unified_list.add_argument("--provider", dest="destination")
     unified_list.add_argument("--limit", type=int, default=50)

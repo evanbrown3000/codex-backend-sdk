@@ -104,6 +104,7 @@ class ProviderCommandClient:
         if str(payload.get("operation") or "") in {
             "enqueue_job", "begin_effect", "complete_job", "list_jobs",
             "rhythm_read", "rhythm_tick", "rhythm_device_heartbeat",
+            "queue_ledger", "codex_admit", "codex_budget_update", "provider_cooldown",
         }:
             raise RuntimeError("central provider scheduler is unavailable")
         if not self.token and self.command:
@@ -332,6 +333,15 @@ class ProviderCommandClient:
 
     def queue_status(self, provider: str = "chatgpt.com") -> dict[str, Any]:
         return self._queue_call({"operation": "rhythm_read", "provider": provider})
+
+    def queue_ledger(self, *, after_sequence: int = 0, limit: int = 200) -> dict[str, Any]:
+        return self._queue_call({"operation": "queue_ledger", "after_sequence": after_sequence, "limit": limit})
+
+    def codex_admit(self, *, estimated_cost: float, priority: int,
+                    suitable_com_route: bool, parent_operation: Mapping[str, Any]) -> dict[str, Any]:
+        return self._queue_call({"operation": "codex_admit", "estimated_cost": estimated_cost,
+                                 "priority": priority, "suitable_com_route": suitable_com_route,
+                                 "parent_operation": dict(parent_operation)})
 
     def continue_from_memory(
         self,

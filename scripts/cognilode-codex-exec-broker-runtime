@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
 from pathlib import Path
 import signal
 import subprocess
@@ -15,6 +17,9 @@ CURRENT = ROOT / "current/codex-backend-sdk/scripts"
 SOCKET = Path(os.getenv("COGNILODE_CODEX_EXEC_SOCKET", "/codex-exec/broker.sock"))
 ACTIVE_FILE = SOCKET.with_suffix(".active")
 DRAIN_FILE = SOCKET.with_suffix(".draining")
+SANDBOX_READY = SOCKET.with_suffix(".sandbox-ready.json")
+BWRAP = Path("/usr/bin/bwrap")
+BWRAP_CACHE = Path("/runtime/tools/codex-bubblewrap")
 STOP = False
 
 
@@ -41,11 +46,80 @@ def active() -> int:
         return 1
 
 
+def ensure_bubblewrap() -> None:
+    """Install signed Debian bubblewrap into this container, caching its package.
+
+    The workspace image is intentionally immutable and has no bwrap. The
+    package archive lives in the company runtime volume so a container
+    recreation does not redownload it. No host package or image is changed.
+    """
+    if BWRAP.is_file() and os.access(BWRAP, os.X_OK):
+        return
+    if os.geteuid() != 0:
+        raise RuntimeError("bubblewrap_missing_without_container_root")
+    BWRAP_CACHE.mkdir(parents=True, exist_ok=True)
+    manifest = BWRAP_CACHE / "package.json"
+    archive = None
+    if manifest.is_file():
+        try:
+            record = json.loads(manifest.read_text())
+            candidate = BWRAP_CACHE / record["name"]
+            if (candidate.name.startswith("bubblewrap_") and candidate.suffix == ".deb"
+                    and candidate.is_file() and hashlib.sha256(candidate.read_bytes()).hexdigest() == record["sha256"]):
+                archive = candidate
+        except (OSError, KeyError, ValueError, TypeError):
+            pass
+    if archive is None:
+        subprocess.run(["apt-get", "update", "-qq"], check=True, timeout=180)
+        subprocess.run(["apt-get", "download", "bubblewrap"], cwd=BWRAP_CACHE,
+                       check=True, timeout=180)
+        candidates = sorted(BWRAP_CACHE.glob("bubblewrap_*.deb"), key=lambda p: p.stat().st_mtime)
+        if not candidates:
+            raise RuntimeError("bubblewrap_package_download_missing")
+        archive = candidates[-1]
+        record = {"name": archive.name, "sha256": hashlib.sha256(archive.read_bytes()).hexdigest()}
+        tmp = manifest.with_suffix(".tmp")
+        tmp.write_text(json.dumps(record, sort_keys=True) + "\n")
+        tmp.replace(manifest)
+    subprocess.run(["dpkg", "-i", str(archive)], check=True, timeout=120)
+    if not BWRAP.is_file() or not os.access(BWRAP, os.X_OK):
+        raise RuntimeError("bubblewrap_install_missing_binary")
+
+
+def probe_bubblewrap() -> None:
+    """Prove the actual unprivileged broker can read its mounted work context."""
+    result = subprocess.run([str(BWRAP), "--die-with-parent", "--unshare-user",
+                             "--unshare-net", "--unshare-pid", "--ro-bind", "/", "/",
+                             "--proc", "/proc", "--dev-bind", "/dev", "/dev",
+                             "/bin/sh", "-c",
+                             "test -r /runtime/worker && test -r /codex/bin/codex"],
+                            capture_output=True, text=True, timeout=20, check=False)
+    if result.returncode:
+        raise RuntimeError("bubblewrap_sandbox_probe_failed: " + result.stderr.strip()[:180])
+    record = {"schema": "cognilode.codex-broker-sandbox-ready.v1",
+              "bwrap": str(BWRAP),
+              "sha256": hashlib.sha256(BWRAP.read_bytes()).hexdigest(),
+              "probe": "unprivileged-readonly-context-exit-0"}
+    tmp = SANDBOX_READY.with_suffix(".tmp")
+    tmp.write_text(json.dumps(record, sort_keys=True) + "\n")
+    tmp.replace(SANDBOX_READY)
+
+
 def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+    SANDBOX_READY.unlink(missing_ok=True)
     if os.geteuid() == 0:
         SOCKET.parent.mkdir(parents=True, exist_ok=True)
+        while not STOP:
+            try:
+                ensure_bubblewrap()
+                break
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                print(f"Codex broker sandbox install pending: {str(exc)[:200]}", flush=True)
+                time.sleep(60)
+        if STOP:
+            return 0
         uid = int(os.environ["COGNILODE_DROP_UID"])
         gid = int(os.environ["COGNILODE_DROP_GID"])
         os.chown(SOCKET.parent, uid, gid)
@@ -54,6 +128,13 @@ def main() -> int:
         os.setgid(gid)
         os.setuid(uid)
     while not STOP:
+        try:
+            probe_bubblewrap()
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            SANDBOX_READY.unlink(missing_ok=True)
+            print(f"Codex broker sandbox unavailable: {str(exc)[:200]}", flush=True)
+            time.sleep(60)
+            continue
         broker = (CURRENT / "cognilode-codex-exec-broker").resolve()
         quota = (ROOT / "current/modified-codex-runtime/src/modified_codex/codex_quota_observer.py").resolve()
         if not broker.is_file() or not quota.is_file():
@@ -78,6 +159,7 @@ def main() -> int:
         finally:
             retire(worker)
             retire(observer)
+            SANDBOX_READY.unlink(missing_ok=True)
         if not STOP:
             time.sleep(2)
     return 0

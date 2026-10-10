@@ -64,7 +64,13 @@ def test_saved_terminal_tmp_zip_is_downloaded_without_conversation_poll(monkeypa
     (tmp_path / f"{stem}.json").write_text(json.dumps(record))
     (tmp_path / f"{stem}.collected.json").write_text(json.dumps({**record, "complete": True}))
     assert collector.sender.sandbox_artifact_paths(text) == ["/tmp/result.zip"]
+    fake_home = tmp_path / "provider-home"
+    (fake_home / ".codex").mkdir(parents=True)
+    (fake_home / ".codex/auth.json").write_text("{}")
+    monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.setattr(collector, "get_conversation", lambda *_args: pytest.fail("conversation poll"))
+    runtime_calls = []
+    monkeypatch.setattr(collector.sender, "ensure_runtime", lambda: runtime_calls.append(True))
     monkeypatch.setattr(collector.sender, "codex_identity", lambda: (object(), {}, "device"))
     def download(*_args, **kwargs):
         path = kwargs["output_dir"] / "result.zip"
@@ -79,7 +85,28 @@ def test_saved_terminal_tmp_zip_is_downloaded_without_conversation_poll(monkeypa
     outcome = collector.collect(receipt, allow_provider_read=False)
     assert outcome["state"] == "collected_from_local_terminal"
     assert outcome["artifact_count"] == 1
+    assert runtime_calls == [True]
     assert json.loads((tmp_path / f"{stem}.collected.json").read_text())["result"]["downloaded_files"][0]["sandbox_path"] == "/tmp/result.zip"
+
+
+def test_saved_terminal_artifact_waits_for_credential_holder(monkeypatch, tmp_path):
+    stem = "b4pt0r-chatmode-artifact-delegation"
+    receipt = tmp_path / f"{stem}.sse.receipt.json"
+    receipt.write_text(json.dumps({"user_message_id": "user-id", "conversation_id": "conv-1"}))
+    record = {"prompt": "Produce a ZIP", "result": {
+        "conversation_id": "conv-1", "assistant_terminal": True,
+        "terminal_assistant_message_id": "assistant-1",
+        "terminal_assistant_text": "[ZIP](sandbox:/tmp/result.zip)",
+        "downloaded_files": [], "central_conversation_store": {"ok": True,
+            "central_tool_event_count": 0,
+            "central_raw_sse_source": {"readback_verified": True}}}}
+    (tmp_path / f"{stem}.json").write_text(json.dumps(record))
+    (tmp_path / f"{stem}.collected.json").write_text(json.dumps({**record, "complete": True}))
+    monkeypatch.setenv("HOME", str(tmp_path / "without-auth"))
+    monkeypatch.setattr(collector.sender, "ensure_runtime", lambda: pytest.fail("runtime installed in queue"))
+    monkeypatch.setattr(collector.sender, "codex_identity", lambda: pytest.fail("provider credentials read in queue"))
+    monkeypatch.setattr(collector, "get_conversation", lambda *_args: pytest.fail("conversation polled"))
+    assert collector.collect(receipt, allow_provider_read=False)["state"] == "artifact_recovery_delegated"
 
 
 def test_local_terminal_with_central_readback_needs_no_provider_read(tmp_path, monkeypatch):

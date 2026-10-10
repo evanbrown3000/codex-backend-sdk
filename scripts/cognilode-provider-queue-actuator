@@ -70,7 +70,7 @@ def evidence(result: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [row for row in rows if row["ref"]]
 
 
-def chatgpt_transport(job: Mapping[str, Any]) -> dict[str, Any]:
+def chatgpt_transport(job: Mapping[str, Any], attachments: tuple[str, ...]) -> dict[str, Any]:
     job_id = str(job["id"])
     prompt_root = Path("/runtime/provider-inputs")
     prompt_root.mkdir(parents=True, exist_ok=True)
@@ -94,8 +94,8 @@ def chatgpt_transport(job: Mapping[str, Any]) -> dict[str, Any]:
         args.extend(["--conversation-id", str(job["conversation_id"])])
     if job.get("parent_message_id"):
         args.extend(["--parent-message-id", str(job["parent_message_id"])])
-    for row in job.get("attachment_refs") or ():
-        args.extend(["--attach", local_attachment(row)])
+    for attachment in attachments:
+        args.extend(["--attach", attachment])
     parent = job.get("parent_operation") if isinstance(job.get("parent_operation"), Mapping) else {}
     request = {"operation": "transport", "args": args, "send_fence": {
         **fence(job), "provider_attempt": int(job.get("lease_generation") or 1),
@@ -139,20 +139,20 @@ def chatgpt_transport(job: Mapping[str, Any]) -> dict[str, Any]:
 def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
     try:
         attachments = tuple(local_attachment(row) for row in job.get("attachment_refs") or ())
-    except RuntimeError:
+    except Exception as exc:
         # Missing staged input is a pre-effect admission problem. Release the
         # scheduler lease without crossing the mutation boundary or consuming
         # a provider turn; source/artifact custody can materialize it and retry.
         scheduler_call({"operation": "release_job", **fence(job),
                         "provider_state": "input_unavailable",
-                        "reason": "scheduled_attachment_unavailable",
+                        "reason": "scheduled_attachment_unavailable:" + type(exc).__name__,
                         "retry_after_seconds": 60})
         return
     boundary = scheduler_call({"operation": "begin_effect", **fence(job)})
     if boundary.get("send_authorized") is not True:
         return
     parent = job.get("parent_operation") if isinstance(job.get("parent_operation"), Mapping) else {}
-    result = chatgpt_transport(job) if job["provider"] == "chatgpt.com" else client.prompt(
+    result = chatgpt_transport(job, attachments) if job["provider"] == "chatgpt.com" else client.prompt(
         str(job["provider"]),
         str(job.get("conversation_id") or "") or None,
         str(job.get("prompt") or ""),

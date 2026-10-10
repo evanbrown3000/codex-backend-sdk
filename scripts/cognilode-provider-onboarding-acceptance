@@ -17,7 +17,6 @@ import time
 from typing import Any, Mapping
 import zipfile
 
-from codex_backend_sdk.agent_memory import AgentMemoryClient
 from codex_backend_sdk.bridge_provider import ProviderCommandClient
 from codex_backend_sdk.provider_scheduler_client import scheduler_call
 
@@ -78,8 +77,26 @@ def physical_outputs(job: Mapping[str, Any]) -> list[str]:
     return list(dict.fromkeys(found))
 
 
-def response(memory: AgentMemoryClient, conversation_id: str) -> str:
-    return memory.render_markdown(conversation_id)
+def memory_admitted(result: Mapping[str, Any]) -> bool:
+    """Use the send-path admission receipt; never issue a provider read here."""
+    pending: list[Mapping[str, Any]] = [result]
+    seen: set[int] = set()
+    while pending:
+        row = pending.pop(0)
+        if id(row) in seen:
+            continue
+        seen.add(id(row))
+        central = row.get("central_conversation_store")
+        if isinstance(central, Mapping) and central.get("stored") is True and central.get("central_readback_verified") is True:
+            return True
+        publication = row.get("agent_memory_publication")
+        if isinstance(publication, Mapping) and publication.get("ingested") is True:
+            return True
+        for key in ("provider_receipt", "provider_model_receipt", "model_receipt"):
+            child = row.get(key)
+            if isinstance(child, Mapping):
+                pending.append(child)
+    return False
 
 
 def source_packet(root: Path) -> Path:
@@ -157,7 +174,6 @@ def main() -> int:
     for row in proof["providers"]:
         inherited.extend(path for path in row.get("artifacts") or [] if Path(path).is_file())
     client = ProviderCommandClient(timeout=24 * 3600, poll_interval=10)
-    memory = AgentMemoryClient()
     for index, provider in enumerate(PROVIDERS):
         if provider in completed:
             continue
@@ -213,12 +229,15 @@ def main() -> int:
                 reasons.append("missing_exact_provider_identity")
             if len(assistant_text.strip()) < MIN_RESPONSE_CHARS:
                 reasons.append("superficial_provider_response")
-            try:
-                rendered = response(memory, conversation_id) if conversation_id else ""
-            except Exception:
-                rendered = ""
+            # The normalized envelope contains the exact terminal provider
+            # text.  A synchronous memory read here would be an observability
+            # request and can deadlock behind the mutation broker; admission is
+            # instead proven by the receipt produced during the send itself.
+            rendered = assistant_text
             if len(rendered.strip()) < MIN_RESPONSE_CHARS:
                 reasons.append("superficial_or_unavailable_response")
+            if not memory_admitted(normalized):
+                reasons.append("agent_memory_admission_unconfirmed")
             artifacts = physical_outputs(job)
             if not artifacts:
                 reasons.append("no_collected_physical_work_product")

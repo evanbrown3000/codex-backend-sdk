@@ -123,6 +123,25 @@ def source_pin() -> str:
     return pin
 
 
+def committed_codex_write() -> tuple[str, str]:
+    """Use the recurring publisher's accepted PUT receipt, without a new read."""
+    try:
+        entries = json.loads((AUTH_HOME / 'central-rollouts-state.json').read_text())
+    except (OSError, ValueError) as error:
+        raise RuntimeError('no committed Codex central write receipt') from error
+    if not isinstance(entries, dict):
+        raise RuntimeError('no committed Codex central write receipt')
+    for entry in entries.values():
+        if not isinstance(entry, dict):
+            continue
+        thread_id = str(entry.get('thread_id') or '')
+        revision = str(entry.get('revision') or '')
+        if UUID.fullmatch(thread_id) and re.fullmatch(r'[0-9a-f]{64}', revision) and \
+                isinstance(entry.get('signature'), list):
+            return thread_id, revision
+    raise RuntimeError('no committed Codex central write receipt')
+
+
 def run() -> dict:
     pin = source_pin()
     marker = MARKER_ROOT / f'central-rollout-{pin}.json'
@@ -192,10 +211,13 @@ def run() -> dict:
     if len(files) != 1:
         raise RuntimeError('central reduced rollout was not materialized exactly once')
     digest = hashlib.sha256(files[0].read_bytes()).hexdigest()
+    written_thread, written_revision = committed_codex_write()
     result = {'ok': True, 'source_pin': pin, 'conversation_id': conversation_id,
         'stock_thread_id': stock_thread_id, 'rollout_sha256': digest,
         'native_read_turns': len(turns),
-        'native_resume': True, 'provider_http_requests': 0}
+        'native_resume': True, 'central_codex_write_thread': written_thread,
+        'central_codex_write_revision': written_revision,
+        'provider_http_requests': 0}
     MARKER_ROOT.mkdir(parents=True, exist_ok=True)
     temporary = marker.with_name(marker.name + f'.{os.getpid()}.tmp')
     temporary.write_text(json.dumps(result, separators=(',', ':')) + '\n')

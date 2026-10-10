@@ -515,7 +515,7 @@ def main() -> int:
                     scheduler_call({
                         "operation": "release_job", **fence(job),
                         "provider_state": "provider_error",
-                        "reason": "actuator_exception:" + type(exc).__name__,
+                        "reason": ("actuator_exception:" + type(exc).__name__ + ":" + str(exc))[:700],
                         "retry_after_seconds": 60,
                     })
                 except Exception as release_exc:

@@ -460,8 +460,20 @@ class ComputerUseXProviderAdapter:
                 conversation_url=(conversation_id or "") if request.mode in {"continue", "resume"} else "",
                 )
             except Exception as exc:
+                if os.environ.get("COGNILODE_PROVIDER_CODEX_RECOVERY", "0").strip().casefold() not in {
+                    "1", "true", "yes", "on",
+                }:
+                    return {
+                        "ok": False, "state": "native_provider_failure",
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "provider_acceptance_observed": False,
+                    }
                 return self._modified_codex_recovery(request, exc)
             if result.get("ok") is False:
+                if os.environ.get("COGNILODE_PROVIDER_CODEX_RECOVERY", "0").strip().casefold() not in {
+                    "1", "true", "yes", "on",
+                }:
+                    return result
                 return self._modified_codex_recovery(
                     request,
                     RuntimeError(str(result.get("status") or result.get("error") or "native provider failure")),

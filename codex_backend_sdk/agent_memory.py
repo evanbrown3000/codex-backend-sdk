@@ -178,6 +178,25 @@ class AgentMemoryClient:
     def ingest(self, observation: Mapping[str, Any]) -> Any:
         return self._request("POST", self.legacy_endpoint, body={"operation": "ingest_conversation", **dict(observation)})
 
+    def admit_summary_result(
+        self,
+        *,
+        job_id: str,
+        summary: str,
+        worker_conversation_url: str,
+        source_ref: str = "b4pt0r-provider-terminal",
+    ) -> Any:
+        """Bind one terminal provider report to its exact queued Memory job."""
+        return self._request("POST", self.legacy_endpoint, body={
+            "operation": "memory_stock.chatgpt_summary_admit",
+            "job_id": job_id,
+            "summary": summary,
+            "worker_conversation_url": worker_conversation_url,
+            "manual_read_attestation": "read_every_source_fragment_in_full_without_skipping",
+            "worker_persona_id": "memory_stock",
+            "source_ref": source_ref,
+        })
+
     def expand(self, request: Mapping[str, Any]) -> Any:
         return self._request("POST", self.legacy_endpoint, body={"operation": "conversation_expand", **dict(request)})
 

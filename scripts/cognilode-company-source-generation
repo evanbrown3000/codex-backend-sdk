@@ -91,6 +91,14 @@ def content_generation(current: Path) -> tuple[Path, str] | None:
     # SDK module changes would create needless admission-socket outages.
     if selected.name == "cognilode-provider-transport" and package.is_dir():
         sources.extend(sorted(package.rglob("*.py")))
+        # The transport launches these sibling programs by immutable HERE path;
+        # they are part of its executable closure even though they are not
+        # imported Python modules.  Omitting them left provider custody on an
+        # older sender after a source-converged transport fix.
+        for sibling in ("cognilode-b4pt0r-chatmode", "chatgpt_sentinel_vm.mjs"):
+            dependency = selected.with_name(sibling)
+            if dependency.is_file():
+                sources.append(dependency)
     for source in sources:
         digest.update(str(source.relative_to(selected.parent.parent)).encode())
         digest.update(source.read_bytes())

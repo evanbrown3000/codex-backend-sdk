@@ -159,6 +159,16 @@ cross-provider continuation automatically renders and stages
 attachment. `B4PT0R_PROVIDER_BROKER_COMMAND` remains available for relay and
 memory access from credential-free container clients.
 
+The company batch daemon also supervises the historical ComputerUseX Gemini
+worker when `gemini.com` is enabled and that domain repository is present at
+the synchronized source frontier. Gemini keeps its own biological-rhythm queue
+and native web transport; it neither consumes a ChatGPT slot nor reimplements
+Gemini inside this SDK. The worker claims the fenced Gemini job, performs the
+zero-cost native web turn, admits the exact prompt/response to Agent Memory,
+reads the normalized conversation back centrally, and only then completes the
+queue item. Claude/Anthropic remain independent queues; their authenticated
+ComputerUseX workers start only where leased browser custody is present.
+
 ## Choose the right surface
 
 ### Direct client: inference and reusable primitives

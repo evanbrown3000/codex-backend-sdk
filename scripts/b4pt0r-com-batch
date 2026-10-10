@@ -24,11 +24,17 @@ def run(cli: str, root: Path, item: dict) -> dict:
     prompt_text = str(item["prompt"])
     prompt.write_text(prompt_text, encoding="utf-8")
     prompt_identity = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+    attempt_file = job / "provider-attempt.json"
+    try:
+        attempt = max(0, int(json.loads(attempt_file.read_text(encoding="utf-8"))["attempt"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        attempt = 0
     command = [cli, "chatgpt", "send", "--prompt-file", str(prompt),
                "--model", str(item.get("model") or "gpt-5-6-thinking"),
                "--effort", str(item.get("effort") or "xhigh"),
                "--user-message-id", str(uuid.uuid5(
-                   uuid.NAMESPACE_URL, "b4pt0r-batch:" + job_id + ":" + prompt_identity
+                   uuid.NAMESPACE_URL,
+                   "b4pt0r-batch:" + job_id + ":" + prompt_identity + f":attempt:{attempt}"
                )),
                "--project", str(item.get("project") or "unified-b4pt0r"),
                "--role", str(item.get("role") or "automated-provider-worker"),
@@ -53,6 +59,14 @@ def run(cli: str, root: Path, item: dict) -> dict:
     completed = subprocess.run(command, env=environment, text=True, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, check=False)
     (job / "provider-result.json").write_text(completed.stdout, encoding="utf-8")
+    try:
+        result = json.loads(completed.stdout)
+    except (ValueError, TypeError):
+        result = {}
+    if result.get("error") == "RuntimeError" and result.get("message") == "idempotency_conflict":
+        temporary = attempt_file.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"attempt": attempt + 1}) + "\n", encoding="utf-8")
+        os.replace(temporary, attempt_file)
     return {"id": job_id, "returncode": completed.returncode}
 
 

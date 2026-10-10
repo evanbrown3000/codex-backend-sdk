@@ -124,6 +124,25 @@ def evidence(result: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [row for row in rows if row["ref"]]
 
 
+def provider_execution_seconds(result: Mapping[str, Any]) -> float | None:
+    receipt = result.get("provider_receipt")
+    candidates = [result]
+    if isinstance(receipt, Mapping):
+        candidates.append(receipt)
+        nested = receipt.get("provider_receipt")
+        if isinstance(nested, Mapping):
+            candidates.append(nested)
+    for candidate in candidates:
+        elapsed = candidate.get("elapsed_seconds")
+        if isinstance(elapsed, (int, float)):
+            return max(0.0, float(elapsed))
+        started = candidate.get("provider_started_at") or candidate.get("started_at")
+        completed = candidate.get("provider_completed_at") or candidate.get("completed_at")
+        if isinstance(started, (int, float)) and isinstance(completed, (int, float)):
+            return max(0.0, float(completed) - float(started))
+    return None
+
+
 def recover_terminal(job: Mapping[str, Any]) -> bool:
     """Finish a fenced job from its durable local stream receipt after cutover.
 
@@ -302,6 +321,16 @@ def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
             "retry_after_seconds": 60,
         })
         return
+    if str(job.get("provider") or "") == "chatgpt.com":
+        elapsed = provider_execution_seconds(result)
+        if elapsed is None or elapsed < 300.0:
+            scheduler_call({
+                "operation": "release_job", **fence(job),
+                "provider_state": "provider_execution_shorter_than_five_minutes",
+                "reason": "provider_execution_shorter_than_five_minutes",
+                "retry_after_seconds": 60,
+            })
+            return
     # Carry only scheduler identity, not inferred intent, into the terminal
     # record so the returned-product worker can perform the durable join.
     result = {**dict(result), "queue_job_id": str(job["id"]),

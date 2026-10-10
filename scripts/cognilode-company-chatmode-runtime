@@ -43,7 +43,13 @@ def release_for(source: Path) -> tuple[Path, Path]:
         # old supervisor remove a newly completed environment.
         "COGNILODE_B4PT0R_RELEASE_ROOT", "/runtime/b4pt0r-releases/locked-v3-computerusex"
     ))
-    release = release_root / source.name
+    try:
+        revision = subprocess.check_output(
+            ["git", "-C", str(source), "rev-parse", "HEAD"], text=True, timeout=15
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        revision = source.name
+    release = release_root / revision
     cli = release / "bin" / "b4pt0r"
     marker = release / ".complete"
     release_root.mkdir(parents=True, exist_ok=True)
@@ -86,7 +92,7 @@ def release_for(source: Path) -> tuple[Path, Path]:
                 str(release / "bin" / "python"), "-m", "pip", "install",
                 "--no-cache-dir", "--no-deps", str(computerusex),
             ], check=True, timeout=300)
-        (release / ".complete").write_text(source.name + "\n", encoding="utf-8")
+        (release / ".complete").write_text(revision + "\n", encoding="utf-8")
     return source / "scripts" / "b4pt0r-com-batch-daemon", release / "bin" / "b4pt0r"
 
 

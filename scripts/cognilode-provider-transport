@@ -27,7 +27,10 @@ def runtime_python() -> Path:
     # Provider mutations admitted to this generation must finish with that
     # same generation; chasing the mutable `current` source link creates a
     # send outage during every release build and violates drain semantics.
-    incumbent = Path(sys.executable).resolve()
+    # A venv interpreter is commonly a symlink to the base interpreter.
+    # Resolving it discards the immutable release directory and makes every
+    # source-frontier change look as if no incumbent release exists.
+    incumbent = Path(sys.executable)
     incumbent_root = incumbent.parent.parent
     if incumbent.is_file() and (incumbent_root / ".complete").is_file():
         return incumbent

@@ -377,7 +377,19 @@ def run_once_unlocked() -> None:
             marker("publish-pending")
             print(f"Codex release locally installed; optional publication pending: {type(error).__name__}", flush=True)
         return
-    manifest = remote_manifest()
+    try:
+        manifest = remote_manifest()
+    except RuntimeError as error:
+        # S3 is replication/distribution, not a prerequisite for the local
+        # immutable release. A bounded remote lookup failure must open the
+        # source-pinned local builder path instead of starving it indefinitely.
+        message = str(error)
+        if "aws_cli_timeout" not in message and "endpoint_unreachable" not in message:
+            raise
+        marker("missing")
+        print(f"Codex remote manifest unavailable; local build/install may proceed: {message}",
+              flush=True)
+        return
     if manifest:
         install_remote(manifest)
         marker("downloaded")

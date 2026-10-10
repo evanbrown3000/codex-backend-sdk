@@ -69,6 +69,12 @@ def release_for(source: Path) -> tuple[Path, Path]:
         )).resolve()
         if universe.is_dir():
             install.append(str(universe))
+        computerusex = Path(os.environ.get(
+            "COGNILODE_COMPUTERUSEX_PROJECT_ROOT",
+            "/runtime/source/current/automation-computeruse-vision",
+        )).resolve()
+        if computerusex.is_dir():
+            install.append(str(computerusex))
         subprocess.run(install, check=True, timeout=900)
         (release / ".complete").write_text(source.name + "\n", encoding="utf-8")
     return source / "scripts" / "b4pt0r-com-batch-daemon", release / "bin" / "b4pt0r"

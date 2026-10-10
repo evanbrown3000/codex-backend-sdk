@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -33,9 +34,13 @@ LOOKUP = ROOT / "metadata" / f"lookup-{PIN}-{TARGET}.json"
 LOCK = ROOT / "metadata" / f"release-{PIN}-{TARGET}.lock"
 RELEASE_FILES = ("codex", "codex-code-mode-host", "central-rollouts", "managed-codex")
 HOST_READY = "code-mode-host-ready.json"
+PUBLISH_RECEIPT = ROOT / "metadata" / f"publication-{PIN}-{TARGET}.json"
+AWS_CONNECT_TIMEOUT = 8
+AWS_READ_TIMEOUT = 25
+AWS_OVERALL_TIMEOUT = 90
 
 
-def aws(*args: str, timeout: int = 120) -> subprocess.CompletedProcess:
+def aws(*args: str, timeout: int = AWS_OVERALL_TIMEOUT) -> subprocess.CompletedProcess:
     # The standard workspace puts a brokered shim ahead of the real CLI on
     # PATH. This credential-custody container has its own mounted AWS profile.
     binary = os.environ.get("COGNILODE_AWS_CLI", "/usr/bin/aws")
@@ -43,8 +48,27 @@ def aws(*args: str, timeout: int = 120) -> subprocess.CompletedProcess:
         binary = shutil.which("aws")
     if not binary:
         raise RuntimeError("AWS CLI is unavailable in company container")
-    return subprocess.run([binary, "s3api", *args], capture_output=True,
-                          text=True, timeout=timeout, check=False)
+    command = [binary, "--cli-connect-timeout", str(AWS_CONNECT_TIMEOUT),
+               "--cli-read-timeout", str(AWS_READ_TIMEOUT), "s3api", *args]
+    child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True, start_new_session=True)
+    try:
+        stdout, stderr = child.communicate(timeout=min(timeout, AWS_OVERALL_TIMEOUT))
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = child.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = child.communicate()
+        return subprocess.CompletedProcess(command, 124, stdout, stderr or "aws_cli_timeout")
+    return subprocess.CompletedProcess(command, child.returncode, stdout, stderr)
 
 
 def digest(path: Path) -> str:
@@ -234,25 +258,69 @@ def publish_local() -> None:
         if existing != manifest:
             raise RuntimeError("immutable private Codex release differs from local build")
         return
+    PUBLISH_RECEIPT.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        receipt = json.loads(PUBLISH_RECEIPT.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        receipt = {"schema": "cognilode.codex_release_publication.v1",
+                   "pin": PIN, "target": TARGET, "artifacts": {}}
     for name, path in files.items():
         hexdigest = manifest["files"][name]["sha256"]
+        prior = receipt["artifacts"].get(name, {})
+        if prior.get("sha256") == hexdigest and prior.get("state") == "published":
+            continue
+        if (prior.get("sha256") == hexdigest and prior.get("state") in ("failed", "uploading") and
+                time.time() - float(prior.get("attempted_at") or 0) < 900):
+            raise RuntimeError("private Codex release publication cooldown")
+        prior = {"sha256": hexdigest, "state": "uploading", "attempted_at": time.time()}
+        receipt["artifacts"][name] = prior
+        _write_publication_receipt(receipt)
         result = aws("put-object", "--bucket", BUCKET, "--key", PREFIX + "/" + name,
                      "--body", str(path), "--server-side-encryption", "AES256",
                      "--checksum-sha256", checksum(hexdigest), "--metadata", "sha256=" + hexdigest,
-                     timeout=1800)
+                     timeout=AWS_OVERALL_TIMEOUT)
         if result.returncode:
+            prior.update(state="failed", error=aws_failure(result))
+            _write_publication_receipt(receipt)
             raise RuntimeError("private Codex release binary publication failed")
+        prior.update(state="published", published_at=time.time())
+        _write_publication_receipt(receipt)
     with tempfile.TemporaryDirectory(prefix="codex-release-publish-") as temporary:
         path = Path(temporary) / "manifest.json"
         path.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
-        result = aws("put-object", "--bucket", BUCKET, "--key", PREFIX + "/manifest.json",
-                     "--body", str(path), "--server-side-encryption", "AES256",
-                     "--content-type", "application/json")
-        if result.returncode:
-            raise RuntimeError("private Codex release manifest publication failed")
+        manifest_hash = digest(path)
+        prior = receipt["artifacts"].get("manifest.json", {})
+        if prior.get("sha256") == manifest_hash and prior.get("state") == "published":
+            result = None
+        else:
+            result = True
+        if (prior.get("sha256") == manifest_hash and prior.get("state") in ("failed", "uploading") and
+                time.time() - float(prior.get("attempted_at") or 0) < 900):
+            raise RuntimeError("private Codex manifest publication cooldown")
+        if result:
+            prior = {"sha256": manifest_hash, "state": "uploading", "attempted_at": time.time()}
+            receipt["artifacts"]["manifest.json"] = prior
+            _write_publication_receipt(receipt)
+            uploaded = aws("put-object", "--bucket", BUCKET, "--key", PREFIX + "/manifest.json",
+                           "--body", str(path), "--server-side-encryption", "AES256",
+                           "--content-type", "application/json", timeout=AWS_OVERALL_TIMEOUT)
+            if uploaded.returncode:
+                prior.update(state="failed", error=aws_failure(uploaded))
+                _write_publication_receipt(receipt)
+                raise RuntimeError("private Codex release manifest publication failed")
+            prior.update(state="published", published_at=time.time())
+            _write_publication_receipt(receipt)
     if remote_manifest() != manifest:
         raise RuntimeError("private Codex release manifest readback mismatch")
     print(f"Codex release published to private custody {PIN}", flush=True)
+
+
+def _write_publication_receipt(value: dict) -> None:
+    temporary = PUBLISH_RECEIPT.with_name(PUBLISH_RECEIPT.name + f".{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+    with temporary.open("rb") as stream:
+        os.fsync(stream.fileno())
+    temporary.replace(PUBLISH_RECEIPT)
 
 
 def run_once_unlocked() -> None:
@@ -268,9 +336,14 @@ def run_once_unlocked() -> None:
         except (OSError, ValueError, TypeError):
             pass
     if all(RELEASE.joinpath(name).is_file() for name in RELEASE_FILES) and RELEASE.joinpath(HOST_READY).is_file():
-        publish_local()
+        # S3 replication is optional; never hold installation hostage to it.
         link_release()
-        marker("local-ready")
+        try:
+            publish_local()
+            marker("local-ready")
+        except Exception as error:
+            marker("publish-pending")
+            print(f"Codex release locally installed; optional publication pending: {type(error).__name__}", flush=True)
         return
     manifest = remote_manifest()
     if manifest:

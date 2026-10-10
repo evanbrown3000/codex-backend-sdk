@@ -16,6 +16,8 @@ SCRIPTS = Path(os.environ.get('COGNILODE_COMPANY_SOURCE_ROOT', '/runtime/source'
 CODEX_SOURCE = Path(os.environ.get('COGNILODE_COMPANY_SOURCE_ROOT', '/runtime/source')) / 'current/cognilode-codex'
 BOOT_WRAPPER = Path(__file__).resolve()
 STOP = False
+BUCKET = os.environ.get('COGNILODE_CODEX_RELEASE_BUCKET',
+                       'cognilode-ephemeral-artifacts-362928919715-us-west-2')
 
 
 def stop(_signum, _frame):
@@ -38,10 +40,47 @@ def selected_pin() -> str:
     return pin if observed.returncode == 0 and observed.stdout.strip() == pin else ""
 
 
+def reap_orphaned_publications() -> None:
+    """Reap only legacy aws put-object children orphaned by prior generations.
+
+    Older custody versions spawned AWS in PID 1's process group and then
+    terminated only the Python parent. Restrict matching to orphaned AWS
+    processes publishing this product's immutable codex-releases keys.
+    """
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdigit() or entry.name == '1':
+            continue
+        try:
+            fields = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+            state, ppid, pgid = fields[0], int(fields[1]), int(fields[2])
+            argv = (entry / 'cmdline').read_bytes().decode(errors='replace').split('\0')
+        except (OSError, ValueError, IndexError):
+            continue
+        if (ppid != 1 or pgid != 1 or state == 'Z' or len(argv) < 4 or
+                not any(arg.endswith('/aws') for arg in argv[:3]) or 's3api' not in argv or
+                'put-object' not in argv or BUCKET not in argv or
+                not any(arg.startswith('codex-releases/') for arg in argv)):
+            continue
+        pid = int(entry.name)
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and Path(f'/proc/{pid}').exists():
+            time.sleep(0.05)
+        if Path(f'/proc/{pid}').exists():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 def main() -> None:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     Path(os.environ['HOME']).mkdir(parents=True, exist_ok=True)
+    reap_orphaned_publications()
     while not STOP:
         selected = (SCRIPTS / 'cognilode-company-codex-release-custody').resolve()
         pin = selected_pin()

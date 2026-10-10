@@ -80,6 +80,7 @@ def run_once_unlocked(source: Path, pin: str) -> None:
         return
     env = os.environ.copy()
     env["COGNILODE_CODEX_SOURCE"] = str(source)
+    env["COGNILODE_CODEX_SOURCE_COMMIT"] = pin
     env["COGNILODE_CODEX_INSTALL_ROOT"] = str(RELEASE)
     # The source-sync checkout belongs to the non-root company UID while this
     # isolated builder runs as root. Git canonicalizes the symlink before its

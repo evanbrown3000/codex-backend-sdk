@@ -51,7 +51,9 @@ class ProviderActuationClient:
         if not isinstance(result, dict):
             raise RuntimeError("credential custody broker returned a non-object result")
         if completed.returncode and result.get("state") != "provider_error":
-            raise RuntimeError(str(result.get("error") or result.get("message") or "provider actuation failed"))
+            error = str(result.get("error") or "provider actuation failed")
+            message = str(result.get("message") or "").strip()
+            raise RuntimeError(error + ((":" + message) if message else ""))
         return result
 
     def capabilities(self) -> dict[str, Any]:

@@ -122,7 +122,10 @@ def _prompting(args: argparse.Namespace) -> Any:
         return memory.list(limit=args.limit, cursor=args.cursor, **filters)
     if args.prompting_command == "search":
         filters = {"provider": args.destination} if args.destination else {}
-        return memory.search(args.query, limit=args.limit, cursor=args.cursor, **filters)
+        query = args.query_option or args.query
+        if not query:
+            raise ValueError("search requires QUERY or --query QUERY")
+        return memory.search(query, limit=args.limit, cursor=args.cursor, **filters)
     if args.prompting_command == "read":
         return memory.read(
             args.conversation_id,
@@ -287,7 +290,8 @@ def parser() -> argparse.ArgumentParser:
     unified_list.add_argument("--limit", type=int, default=50)
     unified_list.add_argument("--cursor")
     unified_search = prompt_ops.add_parser("search")
-    unified_search.add_argument("query")
+    unified_search.add_argument("query", nargs="?")
+    unified_search.add_argument("--query", dest="query_option")
     unified_search.add_argument("--provider", dest="destination")
     unified_search.add_argument("--limit", type=int, default=50)
     unified_search.add_argument("--cursor")

@@ -36,11 +36,18 @@ def active_source() -> Path:
 
 
 def release_revision(source: Path) -> str:
-    """Identify the SDK plus synchronized provider-domain dependencies."""
+    """Identify the provider-custody SDK release.
+
+    ComputerUseX is intentionally not part of this outer generation.  Its
+    provider workers already load the moving domain source through PYTHONPATH
+    and the inner batch supervisor rotates only the affected actuator.  Making
+    every browser-adapter publication restart this outer population coupled
+    otherwise independent provider clocks and let a long ChatGPT turn withhold
+    Gemini/Claude capacity during a safe adapter update.
+    """
     identities = [source.name]
     for variable, fallback in (
         ("COGNILODE_UNIVERSE_STORAGE_ROOT", "/runtime/source/current/universe-storage"),
-        ("COGNILODE_COMPUTERUSEX_PROJECT_ROOT", "/runtime/source/current/automation-computeruse-vision"),
     ):
         dependency = Path(os.environ.get(variable, fallback)).resolve()
         identities.append(dependency.name if dependency.exists() else "missing")

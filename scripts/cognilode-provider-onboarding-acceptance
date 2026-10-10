@@ -85,6 +85,7 @@ def main() -> int:
     proof: dict[str, Any] = json.loads(state_path.read_text()) if state_path.is_file() else {
         "schema": "cognilode.four_provider_acceptance.v1", "providers": []
     }
+    proof.setdefault("rejected_attempts", [])
     completed = {row["provider"]: row for row in proof["providers"]}
     inherited = [str(seed)]
     for row in proof["providers"]:
@@ -95,63 +96,69 @@ def main() -> int:
         if provider in completed:
             continue
         following = PROVIDERS[index + 1] if index + 1 < len(PROVIDERS) else None
-        authored = prompt_for(provider, following)
-        request_id = "area1-sequential-proof-" + provider.split(".")[0] + "-v1"
-        # Preserve the first already-admitted ChatGPT operation rather than
-        # accepting its known-short result.  The v2 identity requires the
-        # requested model/effort and gives the native worker an unambiguous
-        # five-minute execution contract.
-        model = None
-        effort = None
-        if provider == "chatgpt.com":
-            request_id = "area1-onboard-chatgpt-v2"
-            model = "gpt-5.6-sol"
-            effort = "max"
+        while provider not in completed:
+            prior = [row for row in proof["rejected_attempts"] if row.get("provider") == provider]
+            attempt = len(prior) + 1
             authored = prompt_for(provider, following) + (
-                " Perform no fewer than three implementation passes: source and interface audit, "
-                "complete implementation, then integration hardening and artifact verification. "
-                "Do not submit the terminal answer until at least 300 seconds have elapsed since "
-                "provider-side work began; use all remaining time for substantive source work."
+                " Perform no fewer than three implementation passes: source and interface analysis, "
+                "complete implementation, then integration hardening and physical artifact verification. "
+                "Do not submit the terminal answer until at least 300 seconds have elapsed since provider-side "
+                "work began; use all remaining time for substantive source work."
             )
-        parent_id = request_id if provider == "chatgpt.com" else "area1-four-provider-acceptance"
-        queued = client.send_provider(
-            provider=provider, prompt=authored, attachments=tuple(inherited),
-            model=model, effort=effort,
-            request_id=request_id, project="unified-provider-actuation",
-            role="provider-implementation-worker", source="area1-sequential-onboarding",
-            prompt_authority="taskflow_plan", priority=100000, collect_artifacts=True,
-            parent_operation={"operation_id": parent_id, "automation_order": 3,
-                              "kind": "taskflow_plan"},
-        )
-        result = client.wait(str(queued.get("job_id") or queued.get("job", {}).get("id") or request_id))
-        job = result.get("job") if isinstance(result.get("job"), Mapping) else {}
-        if result.get("ok") is not True:
-            raise RuntimeError(provider + " did not reach queue-recorded terminal completion")
-        duration = iso(job.get("completed_at")) - iso(job.get("effect_started_at"))
-        if duration < MIN_PROVIDER_SECONDS:
-            raise RuntimeError(provider + " provider execution was shorter than five minutes")
-        conversation_id = str(result.get("conversation_id") or "")
-        rendered = response(memory, conversation_id)
-        if len(rendered.strip()) < MIN_RESPONSE_CHARS:
-            raise RuntimeError(provider + " returned a superficial response")
-        artifacts = physical_outputs(job)
-        if not artifacts:
-            raise RuntimeError(provider + " returned no collected physical work product")
-        upload_proof = [row for row in job.get("effect_evidence") or []
-                        if isinstance(row, Mapping) and row.get("kind") in
-                        {"provider_uploaded_attachment", "provider_structured_upload", "provider_tool_evidence"}]
-        if not upload_proof:
-            raise RuntimeError(provider + " has no provider-side physical upload evidence")
-        record = {
-            "provider": provider, "job_id": job.get("id"), "conversation_id": conversation_id,
-            "prompt_sha256": hashlib.sha256(authored.encode()).hexdigest(),
-            "response_sha256": hashlib.sha256(rendered.encode()).hexdigest(),
-            "response": rendered, "provider_seconds": duration,
-            "uploaded_attachments": upload_proof, "artifacts": artifacts,
-        }
-        proof["providers"].append(record)
-        state_path.write_text(json.dumps(proof, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
-        inherited.extend(artifacts)
+            request_id = f"area1-sequential-{provider.split('.')[0]}-attempt-{attempt}"
+            queued = client.send_provider(
+                provider=provider, prompt=authored, attachments=tuple(inherited), request_id=request_id,
+                project="unified-provider-actuation", role="provider-implementation-worker",
+                source="area1-sequential-onboarding", prompt_authority="taskflow_plan", priority=100_000,
+                model="gpt-5.6-sol" if provider == "chatgpt.com" else None,
+                effort="max" if provider == "chatgpt.com" else None, collect_artifacts=True,
+                parent_operation={"operation_id": "area1-four-provider-acceptance",
+                                  "automation_order": 3, "kind": "taskflow_plan"},
+            )
+            result = client.wait(str(queued.get("job_id") or queued.get("job", {}).get("id") or request_id))
+            job = result.get("job") if isinstance(result.get("job"), Mapping) else {}
+            reasons: list[str] = []
+            if result.get("ok") is not True:
+                reasons.append("no_queue_recorded_terminal_completion")
+            try:
+                duration = iso(job.get("completed_at")) - iso(job.get("effect_started_at"))
+            except (TypeError, ValueError):
+                duration = 0.0
+            if duration < MIN_PROVIDER_SECONDS:
+                reasons.append("provider_execution_shorter_than_five_minutes")
+            conversation_id = str(result.get("conversation_id") or "")
+            try:
+                rendered = response(memory, conversation_id) if conversation_id else ""
+            except Exception:
+                rendered = ""
+            if len(rendered.strip()) < MIN_RESPONSE_CHARS:
+                reasons.append("superficial_or_unavailable_response")
+            artifacts = physical_outputs(job)
+            if not artifacts:
+                reasons.append("no_collected_physical_work_product")
+            upload_proof = [row for row in job.get("effect_evidence") or []
+                            if isinstance(row, Mapping) and row.get("kind") in
+                            {"provider_uploaded_attachment", "provider_structured_upload", "provider_tool_evidence"}]
+            if not upload_proof:
+                reasons.append("no_provider_upload_evidence")
+            if reasons:
+                proof["rejected_attempts"].append({"provider": provider, "attempt": attempt,
+                    "job_id": job.get("id") or result.get("job_id"), "conversation_id": conversation_id,
+                    "provider_seconds": duration, "reasons": reasons})
+                state_path.write_text(json.dumps(proof, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+                time.sleep(10)
+                continue
+            record = {
+                "provider": provider, "job_id": job.get("id"), "conversation_id": conversation_id,
+                "prompt_sha256": hashlib.sha256(authored.encode()).hexdigest(),
+                "response_sha256": hashlib.sha256(rendered.encode()).hexdigest(),
+                "response": rendered, "provider_seconds": duration,
+                "uploaded_attachments": upload_proof, "artifacts": artifacts,
+            }
+            proof["providers"].append(record)
+            completed[provider] = record
+            state_path.write_text(json.dumps(proof, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+            inherited.extend(artifacts)
     proof["complete"] = len(proof["providers"]) == len(PROVIDERS)
     proof["completed_at"] = time.time()
     state_path.write_text(json.dumps(proof, ensure_ascii=False, indent=2, sort_keys=True) + "\n")

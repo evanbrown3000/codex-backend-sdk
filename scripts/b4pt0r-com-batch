@@ -16,11 +16,11 @@ import sys
 import uuid
 import os
 
-from codex_backend_sdk.bridge_provider import ProviderCommandClient
-
-
 SDK_ROOT = Path(__file__).resolve().parent.parent
+if str(SDK_ROOT) not in sys.path:
+    sys.path.insert(0, str(SDK_ROOT))
 
+from codex_backend_sdk.bridge_provider import ProviderCommandClient
 
 def run(_cli: str, root: Path, item: dict) -> dict:
     job_id = str(item.get("id") or uuid.uuid4())

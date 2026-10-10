@@ -68,7 +68,13 @@ def release_for(source: Path) -> tuple[Path, Path]:
             builder = Path(sys.executable)
         subprocess.run([str(builder), "-m", "venv", "--clear", str(release)],
                        check=True, timeout=300)
-        install = [str(release / "bin" / "python"), "-m", "pip", "install", "--no-cache-dir", str(source)]
+        # The runtime builder image already carries the packaging backend.  A
+        # fresh isolated build environment redownloaded that backend for every
+        # source generation, leaving provider custody pinned behind minutes of
+        # redundant network work.  Reuse the immutable venv's build tooling;
+        # dependency resolution and installation remain owned by pip.
+        install = [str(release / "bin" / "python"), "-m", "pip", "install",
+                   "--no-cache-dir", "--no-build-isolation", str(source)]
         universe = Path(os.environ.get(
             "COGNILODE_UNIVERSE_STORAGE_ROOT", "/runtime/source/current/universe-storage"
         )).resolve()

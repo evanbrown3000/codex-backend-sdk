@@ -99,14 +99,13 @@ class ProviderCommandClient:
     def _queue_call(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         # The Python second-order scheduler is the exclusive mutation and
         # queue-state route.  Agent Memory remains the conversation authority.
-        if scheduler_available():
-            return scheduler_call(payload, timeout=min(self.timeout, 240))
-        if str(payload.get("operation") or "") in {
+        scheduler_operations = {
             "enqueue_job", "begin_effect", "complete_job", "list_jobs",
             "rhythm_read", "rhythm_tick", "rhythm_device_heartbeat",
             "queue_ledger", "codex_admit", "codex_budget_update", "provider_cooldown",
-        }:
-            raise RuntimeError("central provider scheduler is unavailable")
+        }
+        if scheduler_available() or str(payload.get("operation") or "") in scheduler_operations:
+            return scheduler_call(payload, timeout=min(self.timeout, 240))
         if not self.token and self.command:
             value = self.call("agent_memory_request", {
                 "method": "POST", "url": self.endpoint, "body": dict(payload), "params": {}

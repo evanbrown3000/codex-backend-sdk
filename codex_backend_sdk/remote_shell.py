@@ -10,6 +10,7 @@ import uuid
 import requests
 
 from .bridge_provider import ProviderCommandClient
+from .operator_auth import operator_token
 
 
 class RemoteShellClient:
@@ -26,7 +27,7 @@ class RemoteShellClient:
             or os.environ.get("COGNILODE_REMOTE_SHELL_ENDPOINT")
             or "https://cognilode.com/api/operator/remote-shell/mcp"
         )
-        self.token = token or os.environ.get("COGNILODE_OPERATOR_TOKEN")
+        self.token = operator_token(token)
         self.actor_id = actor_id
         self.timeout = timeout
         self._session = requests.Session()
@@ -40,7 +41,7 @@ class RemoteShellClient:
         return headers
 
     def call(self, name: str, arguments: Mapping[str, Any] | None = None) -> Any:
-        if self._broker.available():
+        if self._broker.available() and not self.token:
             return self._broker.call(
                 "remote_shell_request",
                 {"name": name, "arguments": dict(arguments or {}), "actor_id": self.actor_id},
@@ -103,10 +104,6 @@ class RemoteShellClient:
                 "environment_id": self._selected_environment,
                 "source": "bridge_process_cache",
             }
-
-    def current(self) -> Any:
-        """Return the environment persistently selected for this actor."""
-        return self.call("environment_current", {"actor_id": self.actor_id})
 
     def execute(
         self,

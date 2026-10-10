@@ -94,11 +94,12 @@ def _send(payload: Mapping[str, Any]) -> dict[str, Any]:
 def execute(payload: Mapping[str, Any]) -> Any:
     operation = str(payload.get("operation") or "")
     if operation == "agent_memory_request":
+        explicit_url = str(payload.get("url") or "").strip()
         base = os.environ.get(
             "AGENT_MEMORY_ENDPOINT", "https://cognilode.com/api/operator/agent-memory"
         ).rstrip("/")
         return _relay_request(
-            base + "/" + str(payload.get("path") or "").lstrip("/"),
+            explicit_url or (base + "/" + str(payload.get("path") or "").lstrip("/")),
             str(payload.get("method") or "GET"),
             payload.get("body"),
             payload.get("params"),

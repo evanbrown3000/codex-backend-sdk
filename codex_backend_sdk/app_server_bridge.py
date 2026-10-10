@@ -119,6 +119,9 @@ def _memory_summary(row: Mapping[str, Any]) -> dict[str, Any] | None:
         conversation_id = raw_id
         thread_id = f"memory:{raw_id}"
     provider = str(source.get("provider") or source.get("platform") or "memory")
+    provider_conversation_id = source.get("provider_conversation_id")
+    if not provider_conversation_id and provider.rstrip("/") in {"chatgpt", "chatgpt.com"}:
+        provider_conversation_id = conversation_id
     name = source.get("title") or source.get("name") or source.get("subject") or raw_id
     preview = source.get("preview") or source.get("snippet") or source.get("text") or ""
     return {
@@ -133,7 +136,7 @@ def _memory_summary(row: Mapping[str, Any]) -> dict[str, Any] | None:
             "kind": "agent_memory",
             "conversationId": conversation_id,
             "provider": provider,
-            "providerConversationId": source.get("provider_conversation_id"),
+            "providerConversationId": provider_conversation_id,
             "environmentId": source.get("environment_id"),
             "resumable": bool(source.get("resumable", True)),
         },
@@ -168,7 +171,15 @@ class Pending:
 class Bridge:
     def __init__(self, native_args: Sequence[str]) -> None:
         self.native_args = tuple(native_args or ("app-server", "--stdio"))
-        self.native_executable = os.environ.get("CODEX_EXECUTABLE", "codex")
+        # Installed B4PT0R releases originally used CODEX_EXECUTABLE for the
+        # bridge and CODEX_NATIVE_EXECUTABLE for the delegate.  New releases
+        # select the bridge separately, but the delegate lookup must remain
+        # backward compatible or an older desktop recursively launches itself.
+        self.native_executable = (
+            os.environ.get("CODEX_NATIVE_EXECUTABLE")
+            or os.environ.get("CODEX_EXECUTABLE")
+            or "codex"
+        )
         self.actor_id = (
             os.environ.get("B4PT0R_ACTOR_ID")
             or os.environ.get("COGNILODE_ACTOR_ID")
@@ -215,7 +226,16 @@ class Bridge:
         sys.stderr.flush()
 
     def _start_transport(self, environment_id: str) -> None:
-        command = (self.native_executable, *self.native_args)
+        # The outer B4PT0R bridge is the single unified conversation surface.
+        # Disable the older Modified-Codex Python prompter inside the delegate;
+        # otherwise two independent bridges compete and the inner one calls a
+        # retired operator route before native Codex can answer.
+        command = (
+            "env",
+            "CODEX_UNIFIED_PROMPTER=0",
+            self.native_executable,
+            *self.native_args,
+        )
         with self._state_lock:
             prior = self._transport
             self._transport = None
@@ -339,6 +359,39 @@ class Bridge:
         artifacts = turn.get("artifacts") or result.get("artifacts") or result.get("attachments") or []
         return {"id": identity, "type": "agentMessage", "text": text}, list(artifacts) if isinstance(artifacts, list) else []
 
+    def _collected_turn(self, queued: Mapping[str, Any]) -> dict[str, Any]:
+        job_id = str(queued.get("job_id") or "")
+        if not job_id:
+            raise RuntimeError("prompt queue omitted job identity")
+        self.emit({"method": "cognilode/promptQueued", "params": {
+            "jobId": job_id, "state": str(queued.get("state") or "queued")
+        }})
+        completed = self.provider.wait(job_id)
+        if not completed.get("ok"):
+            if completed.get("pending"):
+                raise RuntimeError(f"provider operation remains queued: {job_id}")
+            raise RuntimeError(f"provider operation ended in {completed.get('state')}: {job_id}")
+        conversation_id = str(completed.get("conversation_id") or "")
+        if not conversation_id:
+            raise RuntimeError(f"completed provider operation omitted conversation identity: {job_id}")
+        payload = self.memory.get(conversation_id)
+        events = payload.get("events") if isinstance(payload, Mapping) else []
+        assistant = {}
+        if isinstance(events, list):
+            for event in reversed(events):
+                if isinstance(event, Mapping) and str(event.get("role") or "").lower() in {"assistant", "agent"}:
+                    assistant = event
+                    break
+        text = str(assistant.get("content") or payload.get("response_excerpt") or "") if isinstance(payload, Mapping) else ""
+        artifacts = payload.get("downloadable_files") if isinstance(payload, Mapping) else []
+        return {
+            "assistant_message_id": str(assistant.get("id") or assistant.get("provider_message_id") or uuid.uuid4()),
+            "text": text,
+            "artifacts": artifacts if isinstance(artifacts, list) else [],
+            "conversation_id": conversation_id,
+            "job_id": job_id,
+        }
+
     def _turn_worker(self, thread: Mapping[str, Any], turn_id: str, prompt: str, params: Mapping[str, Any]) -> None:
         thread_id = str(thread["id"])
         user_id = str(uuid.uuid4())
@@ -353,7 +406,9 @@ class Bridge:
             model = params.get("model") or source.get("model")
             effort = params.get("effort") or params.get("reasoningEffort") or source.get("reasoning_effort")
             requested_provider = str(params.get("provider") or provider)
-            if provider == "chatgpt" and provider_conversation_id and requested_provider == "chatgpt":
+            provider_kind = provider.rstrip("/").removesuffix(".com")
+            requested_provider_kind = requested_provider.rstrip("/").removesuffix(".com")
+            if provider_kind == "chatgpt" and provider_conversation_id and requested_provider_kind == "chatgpt":
                 result = self.provider.continue_chatgpt(
                     conversation_id=str(provider_conversation_id),
                     prompt=prompt,
@@ -371,7 +426,8 @@ class Bridge:
                     model=str(model) if model else None,
                     effort=str(effort) if effort else None,
                 )
-            assistant_item, artifacts = self._turn_result_items(result)
+            collected = self._collected_turn(result) if result.get("queued") else dict(result)
+            assistant_item, artifacts = self._turn_result_items(collected)
             self.emit({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id, "item": assistant_item}})
             if artifacts:
                 self.emit({"method": "cognilode/artifactsAvailable", "params": {"threadId": thread_id, "turnId": turn_id, "artifacts": artifacts}})
@@ -396,7 +452,8 @@ class Bridge:
         environment_id = str(params.get("environmentId") or params.get("environment_id") or "").strip()
         if not environment_id:
             raise ValueError("environmentId is required")
-        self.remote.select(environment_id)
+        if environment_id != "local":
+            self.remote.select(environment_id)
         self._start_transport(environment_id)
         self.emit({"id": request_id, "result": {"environmentId": environment_id, "selected": True}})
 

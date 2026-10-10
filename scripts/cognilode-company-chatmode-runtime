@@ -5,9 +5,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import time
+import venv
 
 HERE = Path(__file__).resolve().parent
 STOP = False
@@ -18,7 +20,7 @@ def stop(_signal, _frame):
     STOP = True
 
 
-def active_runner() -> Path:
+def active_source() -> Path:
     """Resolve the runner from the synchronized source frontier.
 
     The container is intentionally long lived because it owns provider state.
@@ -29,30 +31,65 @@ def active_runner() -> Path:
     """
     configured = os.environ.get("COGNILODE_B4PT0R_SDK_ROOT")
     root = Path(configured) if configured else HERE.parent
-    return (root / "scripts" / "b4pt0r-com-batch-daemon").resolve()
+    return root.resolve()
+
+
+def release_for(source: Path) -> tuple[Path, Path]:
+    """Build one immutable CLI environment for a synchronized SDK revision."""
+    release_root = Path(os.environ.get(
+        "COGNILODE_B4PT0R_RELEASE_ROOT", "/runtime/b4pt0r-releases"
+    ))
+    release = release_root / source.name
+    cli = release / "bin" / "b4pt0r"
+    marker = release / ".complete"
+    if cli.is_file() and marker.is_file():
+        return source / "scripts" / "b4pt0r-com-batch-daemon", cli
+    release_root.mkdir(parents=True, exist_ok=True)
+    temporary = release_root / (source.name + ".building")
+    if temporary.exists():
+        shutil.rmtree(temporary)
+    venv.EnvBuilder(with_pip=True, clear=True).create(temporary)
+    install = [str(temporary / "bin" / "python"), "-m", "pip", "install", "--no-cache-dir", str(source)]
+    universe = Path(os.environ.get(
+        "COGNILODE_UNIVERSE_STORAGE_ROOT", "/runtime/source/current/universe-storage"
+    )).resolve()
+    if universe.is_dir():
+        install.append(str(universe))
+    subprocess.run(install, check=True, timeout=900)
+    (temporary / ".complete").write_text(source.name + "\n", encoding="utf-8")
+    if release.exists():
+        shutil.rmtree(release)
+    temporary.replace(release)
+    return source / "scripts" / "b4pt0r-com-batch-daemon", release / "bin" / "b4pt0r"
+
+
+def launch(source: Path) -> subprocess.Popen:
+    runner, cli = release_for(source)
+    environment = os.environ.copy()
+    environment["B4PT0R_CLI"] = str(cli)
+    return subprocess.Popen(
+        [sys.executable, str(runner)], env=environment, start_new_session=True
+    )
 
 
 def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    runner = active_runner()
-    command = [sys.executable, str(runner)]
-    process = subprocess.Popen(command, start_new_session=True)
+    source = active_source()
+    process = launch(source)
     while not STOP:
         if process.poll() is not None:
-            runner = active_runner()
-            command = [sys.executable, str(runner)]
-            process = subprocess.Popen(command, start_new_session=True)
+            source = active_source()
+            process = launch(source)
         else:
-            candidate = active_runner()
-            if candidate != runner:
+            candidate = active_source()
+            if candidate != source:
                 # SIGTERM asks the daemon to finish its active batch and then
                 # exit.  No provider turn is killed during a source cutover.
                 process.terminate()
                 process.wait()
-                runner = candidate
-                command = [sys.executable, str(runner)]
-                process = subprocess.Popen(command, start_new_session=True)
+                source = candidate
+                process = launch(source)
         time.sleep(2)
     if process.poll() is None:
         process.terminate()

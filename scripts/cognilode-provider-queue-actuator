@@ -60,6 +60,32 @@ def fence(job: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def complete_job(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Confirm an idempotent completion when its reply framing is lost.
+
+    The scheduler can durably commit ``complete_job`` before the local Unix
+    socket reader receives a parseable response.  Treating that ambiguous
+    reply as an actuator failure causes the exception handler to release and
+    replay an already-complete provider effect.  Resolve ambiguity through the
+    scheduler read model; do not issue a second provider effect or mutate queue
+    timing.
+    """
+    try:
+        return scheduler_call(payload)
+    except json.JSONDecodeError:
+        job_id = str(payload.get("job_id") or "")
+        for attempt in range(20):
+            try:
+                observed = scheduler_call({"operation": "get_job", "job_id": job_id})
+                job = observed.get("job") if isinstance(observed.get("job"), Mapping) else {}
+                if str(job.get("state") or "") in {"complete", "rejected"}:
+                    return observed
+            except (json.JSONDecodeError, RuntimeError, OSError):
+                pass
+            time.sleep(min(0.25 * (attempt + 1), 2.0))
+        raise
+
+
 def lease_remaining_seconds(job: Mapping[str, Any], *, fallback: int = 3600) -> int:
     """Use the scheduler's persisted effect lease, not a generation timeout."""
     lease = job.get("lease") if isinstance(job.get("lease"), Mapping) else {}
@@ -167,7 +193,7 @@ def complete_insufficient_chatgpt(job: Mapping[str, Any], result: Mapping[str, A
                 "provider_execution_seconds": elapsed,
                 "rejection_reason": "provider_execution_below_300_seconds",
                 "taskflow_completion": False}
-    scheduler_call({
+    complete_job({
         "operation": "complete_job", **fence(job),
         "conversation_id": rejected.get("conversation_id"),
         "effect_evidence": evidence(rejected),
@@ -260,7 +286,7 @@ def recover_terminal(job: Mapping[str, Any]) -> bool:
         if elapsed is None or elapsed < 300.0:
             complete_insufficient_chatgpt(job, result, elapsed)
             return True
-    scheduler_call({
+    complete_job({
         "operation": "complete_job", **fence(job),
         "conversation_id": result.get("conversation_id"),
         "effect_evidence": evidence(result),
@@ -457,7 +483,7 @@ def reject_prohibited_elapsed_time_padding(job: Mapping[str, Any]) -> bool:
     )
     if not prohibited:
         return False
-    scheduler_call({
+    complete_job({
         "operation": "complete_job", **fence(job),
         "conversation_id": None,
         # Scheduler completion always requires durable evidence.  A policy
@@ -548,7 +574,7 @@ def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
     # record so the returned-product worker can perform the durable join.
     result = {**dict(result), "queue_job_id": str(job["id"]),
               "parent_operation": {"operation_id": operation_id}}
-    scheduler_call({
+    complete_job({
         "operation": "complete_job", **fence(job),
         "conversation_id": result.get("conversation_id"),
         "effect_evidence": evidence(result),

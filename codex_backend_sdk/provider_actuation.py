@@ -637,10 +637,19 @@ class UnifiedProviderActuator:
             state = "artifacts_collected" if artifacts else "terminal" if terminal else "accepted"
             if not accepted:
                 state = "provider_error"
-                error = {
-                    "code": str(raw.get("state") or "provider_not_accepted"),
-                    "message": str(raw.get("error") or raw.get("error_preview") or "provider did not accept turn"),
-                }
+                status = str(raw.get("state") or raw.get("status") or "provider_not_accepted")
+                diagnostic = raw.get("error") or raw.get("error_preview")
+                if not diagnostic:
+                    diagnostic = status
+                    markers = raw.get("auth_markers_observed")
+                    observed_url = raw.get("observed_url")
+                    if markers or observed_url:
+                        diagnostic = json.dumps({
+                            "status": status,
+                            "auth_markers_observed": markers or [],
+                            "observed_url": observed_url or "",
+                        }, separators=(",", ":"))
+                error = {"code": status, "message": str(diagnostic)}
                 event_ids.append(self.publisher.emit(
                     request=request, state="provider_error", payload=error,
                     conversation_id=conversation_id,

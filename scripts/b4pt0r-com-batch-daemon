@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Continuously execute durable B4PT0R batches without provider polling."""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import subprocess
+import time
+
+
+ROOT = Path(os.environ.get(
+    "B4PT0R_BATCH_ROOT",
+    str(Path.home() / ".local/share/cognilode/b4pt0r-batches"),
+))
+HERE = Path(__file__).resolve().parent
+CLI = os.environ.get(
+    "B4PT0R_CLI",
+    str(Path.home() / ".local/share/cognilode/b4pt0r-chatmode/venv-python3.12/bin/b4pt0r"),
+)
+
+
+def complete(state: Path) -> bool:
+    try:
+        rows = json.loads((state / "batch-result.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return bool(rows) and all(row.get("returncode") == 0 for row in rows)
+
+
+def main() -> int:
+    ROOT.mkdir(parents=True, exist_ok=True)
+    retry: dict[str, tuple[int, float]] = {}
+    while True:
+        now = time.time()
+        for batch in ROOT.glob("*/batch.json"):
+            state = batch.parent / "state"
+            if complete(state):
+                retry.pop(str(batch), None)
+                continue
+            failures, due = retry.get(str(batch), (0, 0.0))
+            if now < due:
+                continue
+            result = subprocess.run([
+                str(HERE / "b4pt0r-com-batch"), str(batch),
+                "--state-root", str(state), "--cli", CLI,
+            ], check=False)
+            failures = 0 if result.returncode == 0 else failures + 1
+            retry[str(batch)] = (failures, time.time() + min(900, 15 * (2 ** min(failures, 6))))
+        time.sleep(5)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

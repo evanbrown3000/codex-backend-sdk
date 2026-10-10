@@ -22,6 +22,7 @@ CLI = os.environ.get(
     str(Path.home() / ".local/share/cognilode/b4pt0r-chatmode/venv-python3.12/bin/b4pt0r"),
 )
 STOP = False
+SUPERVISORS: list[threading.Thread] = []
 
 
 def stop(_signal, _frame):
@@ -45,9 +46,12 @@ def supervise(program: list[str]) -> None:
         if process.poll() is None:
             process.terminate()
             try:
-                process.wait(timeout=30)
+                process.wait(timeout=max(300, float(os.environ.get(
+                    "COGNILODE_PROVIDER_GENERATION_DRAIN_SECONDS", "2700"
+                ))))
             except subprocess.TimeoutExpired:
                 process.kill()
+                process.wait()
         if not STOP:
             time.sleep(5)
 
@@ -72,7 +76,9 @@ def main() -> int:
         "--device-id", os.environ.get("COGNILODE_ENVIRONMENT_ID", "company-container"),
         "--interval", "60",
     ]
-    threading.Thread(target=supervise, args=(actuator,), daemon=True).start()
+    thread = threading.Thread(target=supervise, args=(actuator,), daemon=False)
+    SUPERVISORS.append(thread)
+    thread.start()
     retry: dict[str, tuple[int, float]] = {}
     while not STOP:
         now = time.time()
@@ -103,6 +109,10 @@ def main() -> int:
                 break
         if not STOP:
             time.sleep(5)
+    for thread in SUPERVISORS:
+        thread.join(timeout=max(300, float(os.environ.get(
+            "COGNILODE_PROVIDER_GENERATION_DRAIN_SECONDS", "2700"
+        ))) + 60)
     return 0
 
 

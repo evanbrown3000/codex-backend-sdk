@@ -186,6 +186,44 @@ def transport(args: list[str], send_fence: dict | None = None) -> dict:
                 ACTIVE_JOB_IDS.discard(str((send_fence or {}).get("job_id") or ""))
 
 
+def provider_prompt(request: dict) -> dict:
+    """Execute every non-ChatGPT mutation inside the same fenced custody runtime."""
+    global ACTIVE_SENDS
+    fence = request.get("send_fence") if isinstance(request.get("send_fence"), dict) else {}
+    job_id = str(fence.get("job_id") or request.get("operation_id") or "")
+    provider = str(request.get("provider") or "")
+    operation_id = str(request.get("operation_id") or (
+        f"{job_id}:queue-lease:{fence.get('lease_generation') or 0}"
+    ))
+    timeout = max(60, int(request.get("timeout_seconds") or 1800))
+    with COUNTER_LOCK:
+        if DRAINING:
+            return {"exit_code": 75, "stderr": "provider generation draining"}
+        ACTIVE_SENDS += 1
+        if job_id:
+            ACTIVE_JOB_IDS.add(job_id)
+    try:
+        lease_code, lease_result, lease_stderr = _broker_call({
+            "operation": "provider_lease_issue", "provider": provider,
+            "account_id": str(request.get("account_id") or "primary"),
+            "operation_id": operation_id, "ttl_seconds": 180,
+        }, timeout=60)
+        lease = lease_result.get("lease") if isinstance(lease_result.get("lease"), dict) else {}
+        if lease_code or not lease.get("capability"):
+            return {"exit_code": lease_code or 70, "provider_result": lease_result,
+                    "stderr": lease_stderr[-1000:]}
+        payload = dict(request)
+        payload.update({"operation": "provider_prompt", "operation_id": operation_id,
+                        "capability_lease": lease["capability"]})
+        payload.pop("send_fence", None)
+        code, result, stderr = _broker_call(payload, timeout=timeout + 120)
+        return {"exit_code": code, "provider_result": result, "stderr": stderr[-4000:]}
+    finally:
+        with COUNTER_LOCK:
+            ACTIVE_SENDS -= 1
+            ACTIVE_JOB_IDS.discard(job_id)
+
+
 class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         global DRAINING
@@ -201,6 +239,8 @@ class Handler(socketserver.StreamRequestHandler):
                     response = {"active": ACTIVE_SENDS, "draining": True}
             elif request.get("operation") == "transport":
                 response = transport(request.get("args"), request.get("send_fence"))
+            elif request.get("operation") == "provider_prompt":
+                response = provider_prompt(dict(request))
             elif request.get("operation") == "embedding":
                 code, result, stderr = _broker_call(dict(request), timeout=180)
                 response = result if not code else {

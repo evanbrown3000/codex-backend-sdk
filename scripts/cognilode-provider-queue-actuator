@@ -343,6 +343,47 @@ def chatgpt_transport(job: Mapping[str, Any], attachments: tuple[str, ...]) -> d
     }
 
 
+def provider_transport(job: Mapping[str, Any], attachments: tuple[str, ...]) -> dict[str, Any]:
+    """Use the singular immutable provider runtime for every .com mutation."""
+    parent = job.get("parent_operation") if isinstance(job.get("parent_operation"), Mapping) else {}
+    turn_timeout = max(60, lease_remaining_seconds(job))
+    request = {
+        "operation": "provider_prompt", "provider": str(job["provider"]),
+        "operation_id": str(job["id"]) + ":lease:" + str(job.get("lease_generation") or 0),
+        "account_id": str(job.get("assigned_account") or "primary"),
+        "conversation_id": str(job.get("conversation_id") or "") or None,
+        "parent_message_id": str(job.get("parent_message_id") or "") or None,
+        "mode": "continue" if job.get("conversation_id") else "create",
+        "prompt": str(job.get("prompt") or ""), "attachments": list(attachments),
+        "model": str(job.get("model") or "") or None,
+        "reasoning_effort": str(job.get("reasoning_effort") or "") or None,
+        "timeout_seconds": turn_timeout,
+        "metadata": {"timeout_seconds": turn_timeout, "queue_job_id": str(job["id"])},
+        "parent_operation": {
+            "operation_id": str(parent.get("operation_id") or job.get("parent_operation_id") or job["id"]),
+            "automation_order": int(parent.get("automation_order") or job.get("parent_automation_order") or 2),
+            "origin": str(parent.get("kind") or job.get("parent_kind") or "provider_queue"),
+            "taskflow_node": parent.get("taskflow_node"),
+        },
+        "send_fence": {**fence(job), "job_id": str(job["id"])},
+    }
+    path = os.environ.get("COGNILODE_PROVIDER_SOCKET", "/runtime/provider.sock")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(turn_timeout + 180); connection.connect(path)
+        connection.sendall((json.dumps(request, separators=(",", ":")) + "\n").encode())
+        connection.shutdown(socket.SHUT_WR)
+        chunks = []
+        while True:
+            chunk = connection.recv(65536)
+            if not chunk: break
+            chunks.append(chunk)
+    outer = json.loads(b"".join(chunks).decode())
+    result = outer.get("provider_result") if isinstance(outer.get("provider_result"), Mapping) else {}
+    if int(outer.get("exit_code") or 0) and not result:
+        raise RuntimeError(str(outer.get("stderr") or "provider transport failed"))
+    return dict(result)
+
+
 def chatgpt_transport_has_job(job_id: str) -> bool | None:
     """Inspect local custody only; never query provider conversation history."""
     path = os.environ.get("COGNILODE_PROVIDER_SOCKET", "/runtime/provider.sock")
@@ -389,24 +430,8 @@ def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
         job = dict(boundary["job"])
     parent = job.get("parent_operation") if isinstance(job.get("parent_operation"), Mapping) else {}
     operation_id = str(parent.get("operation_id") or job.get("parent_operation_id") or job["id"])
-    result = chatgpt_transport(job, attachments) if job["provider"] == "chatgpt.com" else client.prompt(
-        str(job["provider"]),
-        str(job.get("conversation_id") or "") or None,
-        str(job.get("prompt") or ""),
-        attachments,
-        operation_id=str(job["id"]) + ":lease:" + str(job.get("lease_generation") or 0),
-        account_id=str(job.get("assigned_account") or "primary"),
-        parent_operation={
-            "operation_id": operation_id,
-            "automation_order": int(parent.get("automation_order") or job.get("parent_automation_order") or 2),
-            "origin": str(parent.get("kind") or job.get("parent_kind") or "provider_queue"),
-            "taskflow_node": parent.get("taskflow_node"),
-        },
-        parent_message_id=str(job.get("parent_message_id") or "") or None,
-        model=str(job.get("model") or "") or None,
-        reasoning_effort=str(job.get("reasoning_effort") or "") or None,
-        metadata={"timeout_seconds": 1800, "queue_job_id": job["id"]},
-    )
+    result = (chatgpt_transport(job, attachments) if job["provider"] == "chatgpt.com"
+              else provider_transport(job, attachments))
     if result.get("accepted") is not True or result.get("terminal") is not True:
         if result.get("accepted") is True:
             # Acceptance has crossed the external-effect boundary. A missing

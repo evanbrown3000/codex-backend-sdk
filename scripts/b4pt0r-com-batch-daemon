@@ -95,7 +95,7 @@ def _onboarding_ready(program: list[str]) -> bool:
     if "--provider" not in program:
         return True
     provider = program[program.index("--provider") + 1]
-    order = ("chatgpt.com", "gemini.com", "claude.com", "anthropic.com")
+    order = ("chatgpt.com", "gemini.com", "anthropic.com", "claude.com")
     if provider not in order or provider == order[0]:
         return True
     proof = Path(os.environ.get(

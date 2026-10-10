@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import time
 from typing import Any, Mapping
 import zipfile
@@ -152,6 +153,43 @@ def physical_outputs(job: Mapping[str, Any]) -> list[str]:
 
     visit(job)
     return found
+
+
+def attachment_packet(paths: list[str], root: Path) -> tuple[str, ...]:
+    """Preserve distinct prior products under provider-unique filenames.
+
+    Different provider turns intentionally return the same required package
+    name. Browser upload controls collapse equal basenames, so passing both
+    paths makes physical readback impossible even when both files entered the
+    page. Exact duplicate bytes are sent once; distinct bytes receive a stable
+    content-addressed alias and remain separate physical attachments.
+    """
+    aliases = root / "attachment-aliases"
+    aliases.mkdir(parents=True, exist_ok=True)
+    emitted: list[str] = []
+    names: dict[str, str] = {}
+    digests: set[str] = set()
+    for raw in paths:
+        source = Path(raw).resolve()
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        if digest in digests:
+            continue
+        name = source.name
+        if name.casefold() in names:
+            target = aliases / f"{digest[:12]}-{name}"
+            if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+                temporary = target.with_suffix(target.suffix + ".tmp")
+                try:
+                    os.link(source, temporary)
+                except OSError:
+                    shutil.copy2(source, temporary)
+                os.replace(temporary, target)
+            source = target
+            name = source.name
+        names[name.casefold()] = digest
+        digests.add(digest)
+        emitted.append(str(source))
+    return tuple(emitted)
 
 
 def memory_admitted(result: Mapping[str, Any]) -> bool:
@@ -373,9 +411,10 @@ def main() -> int:
                 for path in prior[-1].get("artifacts") or []:
                     if Path(str(path)).is_file() and str(path) not in inherited:
                         inherited.append(str(path))
+            attachments = attachment_packet(inherited, root)
             packet_identity = hashlib.sha256()
             packet_identity.update(authored.encode())
-            for inherited_path in inherited:
+            for inherited_path in attachments:
                 packet_identity.update(hashlib.sha256(Path(inherited_path).read_bytes()).digest())
             request_id = (f"area1-sequential-{provider.split('.')[0]}-attempt-{attempt}-"
                           + packet_identity.hexdigest()[:12])
@@ -401,7 +440,7 @@ def main() -> int:
                         )
                         continuation_parent = str(prior_normalized.get("assistant_message_id") or "")
                 queued = client.send_provider(
-                    provider=provider, prompt=authored, attachments=tuple(inherited), request_id=request_id,
+                    provider=provider, prompt=authored, attachments=attachments, request_id=request_id,
                     conversation_id=continuation_conversation or None,
                     parent_message_id=continuation_parent or None,
                     project="unified-provider-actuation", role="provider-implementation-worker",

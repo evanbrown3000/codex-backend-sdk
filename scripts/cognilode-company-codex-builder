@@ -66,7 +66,8 @@ def run_once_unlocked(source: Path, pin: str) -> None:
             (RELEASE / "releases" / pin / "code-mode-host-ready.json").is_file() and
             (RELEASE / "bin/codex").is_file() and
             (RELEASE / "bin/codex-code-mode-host").is_file() and
-            (RELEASE / "bin/central-rollouts").is_file()):
+            (RELEASE / "bin/central-rollouts").is_file() and
+            (RELEASE / "bin/managed-codex").is_file()):
         return
     # Shared custody gets first chance to install the exact pinned release.
     # An inaccessible bucket must not trigger an independent low-memory build.

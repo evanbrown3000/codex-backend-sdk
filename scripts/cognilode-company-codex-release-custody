@@ -31,7 +31,7 @@ PREFIX = f"codex-releases/{PIN}/{TARGET}"
 RELEASE = ROOT / "releases" / PIN
 LOOKUP = ROOT / "metadata" / f"lookup-{PIN}-{TARGET}.json"
 LOCK = ROOT / "metadata" / f"release-{PIN}-{TARGET}.lock"
-RELEASE_FILES = ("codex", "codex-code-mode-host", "central-rollouts")
+RELEASE_FILES = ("codex", "codex-code-mode-host", "central-rollouts", "managed-codex")
 HOST_READY = "code-mode-host-ready.json"
 
 

@@ -9,6 +9,8 @@ from pathlib import Path
 import signal
 import time
 
+import requests
+
 from codex_backend_sdk.agent_memory import AgentMemoryClient
 
 STOP = False
@@ -51,6 +53,26 @@ def cycle(outbox: Path, cursor_path: Path, memory: AgentMemoryClient) -> int:
                 if not isinstance(event, dict):
                     raise ValueError("event is not an object")
                 memory.ingest(event)
+            except requests.HTTPError as exc:
+                status = int(exc.response.status_code) if exc.response is not None else 0
+                if status not in {400, 404, 409, 422}:
+                    stream.seek(start)
+                    break
+                dead = cursor_path.with_name("agent-memory.dead-letter.jsonl")
+                with dead.open("ab") as output:
+                    output.write(line)
+                    output.flush()
+                    os.fsync(output.fileno())
+                atomic_cursor(cursor_path, stream.tell())
+                continue
+            except (OSError, ValueError, json.JSONDecodeError):
+                dead = cursor_path.with_name("agent-memory.dead-letter.jsonl")
+                with dead.open("ab") as output:
+                    output.write(line)
+                    output.flush()
+                    os.fsync(output.fileno())
+                atomic_cursor(cursor_path, stream.tell())
+                continue
             except Exception:
                 stream.seek(start)
                 break

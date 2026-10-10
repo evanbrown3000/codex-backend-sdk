@@ -293,8 +293,15 @@ def main() -> int:
                 "context from the attached source rather than returning an audit or asking questions. "
                 " Perform no fewer than three implementation passes: source and interface analysis, "
                 "complete implementation, then integration hardening and physical artifact verification. "
-                "Do not submit the terminal answer until at least 300 seconds have elapsed since provider-side "
-                "work began; use all remaining time for substantive source work."
+                "At the beginning of the turn, use the native sandbox to record a monotonic start marker. "
+                "Keep the sandbox work session active for at least 330 seconds while you extract the archives, "
+                "read the implementations, edit production files, inspect integration call sites, and package "
+                "the result. Before answering, use the sandbox to calculate elapsed time; if it is below 330 "
+                "seconds, continue substantive source review and integration hardening rather than answering. "
+                "The returned ZIP must exceed 32 KiB of genuine repository-relative implementation and the "
+                "terminal explanation must exceed 2,000 characters, describing exact files and behavior. "
+                "A small illustrative adapter, prose-only answer, artificial padding, or an early terminal "
+                "answer is automatically rejected and cannot advance onboarding."
             )
             if prior:
                 authored += (

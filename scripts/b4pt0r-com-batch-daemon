@@ -225,17 +225,17 @@ def supervise(program: list[str], extra_environment: dict[str, str] | None = Non
                 break
             time.sleep(1)
         if process.poll() is None:
-            process.terminate()
             mutation_worker = worker_name in {
                 "cognilode-provider-queue-actuator", "cognilode-chatmode-queue-worker",
             }
-            if mutation_worker:
+            if mutation_worker and _provider_effect_in_flight(program):
                 # Accepted/in-turn provider effects outlive source generations.
                 # Keep this supervisor alive until the worker has recorded a
                 # terminal receipt; a fixed drain timeout would kill daemon
                 # threads and lose that accepted turn.
                 process.wait()
             else:
+                process.terminate()
                 try:
                     process.wait(timeout=30.0)
                 except subprocess.TimeoutExpired:

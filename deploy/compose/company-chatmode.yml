@@ -453,7 +453,12 @@ services:
     network_mode: bridge
     user: "0:0"
     working_dir: /runtime/source/current
-    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-codex-exec-broker-runtime]
+    entrypoint: [sh, -c]
+    command:
+      - >-
+        while [ ! -f /runtime/source/current/codex-backend-sdk/scripts/cognilode-codex-exec-broker-runtime ];
+        do sleep 5; done;
+        exec python3 /runtime/source/current/codex-backend-sdk/scripts/cognilode-codex-exec-broker-runtime
     environment:
       HOME: /home/worker
       CODEX_HOME: /home/worker/.codex

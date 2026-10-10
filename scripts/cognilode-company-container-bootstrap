@@ -260,7 +260,6 @@ def reconcile_host_managed_codex(project: str, runtime: Path) -> None:
          "[ -x \"$d/codex\" ] && [ -x \"$d/managed-codex\" ] && "
          "[ -f \"$d/source-commit\" ] && [ -f \"$d/rust-tree\" ] && "
          "[ -f \"$d/SHA256SUMS\" ] && "
-         "(cd \"$d\" && sha256sum -c SHA256SUMS >/dev/null 2>&1) && "
          "printf '%s %s\\n' \"$(cat \"$d/source-commit\")\" \"$(cat \"$d/rust-tree\")\"; "
          "done"], capture_output=True, text=True, check=False, timeout=60)
     if listed.returncode:

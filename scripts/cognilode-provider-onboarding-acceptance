@@ -144,7 +144,11 @@ def main() -> int:
     proof["completed_at"] = time.time()
     state_path.write_text(json.dumps(proof, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     print(json.dumps(proof, ensure_ascii=False))
-    return 0
+    # Remain the live acceptance owner.  The source-generation supervisor
+    # replaces this process on code changes; ordinary completion does not turn
+    # a permanent safety gate back into a foreground one-shot command.
+    while True:
+        time.sleep(3600)
 
 
 if __name__ == "__main__":

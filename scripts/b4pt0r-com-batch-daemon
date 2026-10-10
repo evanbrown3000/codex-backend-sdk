@@ -124,6 +124,12 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
     event_publisher = HERE / "cognilode-provider-event-publisher"
     if event_publisher.is_file():
         workers.append(([str(CLI.rsplit("/", 1)[0] + "/python"), str(event_publisher)], {}))
+    acceptance = HERE / "cognilode-provider-onboarding-acceptance"
+    acceptance_seed = Path(os.environ.get(
+        "COGNILODE_PROVIDER_ACCEPTANCE_ROOT", "/runtime/area1-acceptance"
+    )) / "area1-provider-source.zip"
+    if acceptance.is_file() and acceptance_seed.is_file():
+        workers.append(([str(CLI.rsplit("/", 1)[0] + "/python"), str(acceptance)], {}))
     # Area 2 is a separate domain implementation.  B4PT0R only supervises its
     # durable process beside the Area 1 actuators; it neither owns nor embeds
     # scheduling policy.

@@ -24,6 +24,7 @@ PROVIDERS = ("chatgpt.com", "gemini.com", "claude.com", "anthropic.com")
 MIN_PROVIDER_SECONDS = 300.0
 MIN_RESPONSE_CHARS = 1200
 MIN_ARTIFACT_BYTES = 4096
+ACCEPTANCE_PRIORITY = 9_000_000_000_000_000
 
 
 def iso(value: object) -> float:
@@ -159,6 +160,13 @@ def wait_bootstrap_job(client: ProviderCommandClient, provider: str, job_id: str
         value = scheduler_call({"operation": "get_job", "job_id": job_id})
         job = value.get("job") if isinstance(value.get("job"), Mapping) else {}
         state = str(job.get("state") or "")
+        if state == "queued" and int(job.get("priority") or 0) < ACCEPTANCE_PRIORITY:
+            scheduler_call({
+                "operation": "promote_job", "job_id": job_id,
+                "priority": ACCEPTANCE_PRIORITY,
+                "parent_operation_id": str(job.get("parent_operation_id") or
+                                             "area1-four-provider-acceptance"),
+            })
         if state == "queued" and state != last_state:
             scheduler_call({"operation": "rhythm_fast_forward", "provider": provider, "slots": 1})
         # Provider collection and downstream application are separate effects.
@@ -306,7 +314,7 @@ def main() -> int:
                     provider=provider, prompt=authored, attachments=tuple(inherited), request_id=request_id,
                     project="unified-provider-actuation", role="provider-implementation-worker",
                     source="area1-sequential-onboarding", prompt_authority="taskflow_plan",
-                    priority=2_000_000_000 + int(time.time()),
+                    priority=ACCEPTANCE_PRIORITY,
                     model="gpt-5.6-sol" if provider == "chatgpt.com" else None,
                     effort="max" if provider == "chatgpt.com" else None, collect_artifacts=True,
                     parent_operation={"operation_id": "area1-four-provider-acceptance",

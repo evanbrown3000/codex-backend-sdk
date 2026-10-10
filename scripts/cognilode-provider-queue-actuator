@@ -67,7 +67,6 @@ def persist_admission_intent(job: Mapping[str, Any]) -> None:
         return
     job_id = str(job.get("id") or "").strip()
     parent = job.get("parent_operation") if isinstance(job.get("parent_operation"), Mapping) else {}
-    operation_id = str(parent.get("operation_id") or job.get("parent_operation_id") or job["id"])
     operation_id = str(parent.get("operation_id") or job.get("parent_operation_id") or job_id)
     root = Path(os.environ.get("COGNILODE_RETURNED_PRODUCT_ADMISSIONS",
                                "/runtime/worker/returned-products/admission-intents"))
@@ -212,6 +211,7 @@ def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
     if boundary.get("send_authorized") is not True:
         return
     parent = job.get("parent_operation") if isinstance(job.get("parent_operation"), Mapping) else {}
+    operation_id = str(parent.get("operation_id") or job.get("parent_operation_id") or job["id"])
     result = chatgpt_transport(job, attachments) if job["provider"] == "chatgpt.com" else client.prompt(
         str(job["provider"]),
         str(job.get("conversation_id") or "") or None,

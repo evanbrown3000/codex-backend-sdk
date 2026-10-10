@@ -102,6 +102,16 @@ def collect_forever():
         time.sleep(120)
 
 
+def supervise(command: list[str]) -> None:
+    """Keep a modular queue/rhythm child alive without embedding its logic."""
+    while True:
+        child = subprocess.Popen(command, start_new_session=True)
+        code = child.wait()
+        print(json.dumps({"kind": "provider_runtime_child_restart",
+                          "program": Path(command[1]).name, "exit_code": code}), flush=True)
+        time.sleep(5)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--socket", type=Path, required=True)
@@ -110,19 +120,15 @@ def main() -> int:
     args.socket.unlink(missing_ok=True)
     server = Server(str(args.socket), Handler)
     os.chmod(args.socket, 0o660)
-    children = [
-        subprocess.Popen([sys.executable, str(Path(__file__).with_name("cognilode-chatmode-queue-worker")),
-                          "--device-id", os.environ.get("COGNILODE_ENVIRONMENT_ID", "company-container"),
-                          "--interval", "60"], start_new_session=True),
-        subprocess.Popen([sys.executable, str(Path(__file__).with_name("cognilode-chatmode-floor-watcher"))],
-                         start_new_session=True),
+    programs = [
+        [sys.executable, str(Path(__file__).with_name("cognilode-chatmode-queue-worker")),
+         "--device-id", os.environ.get("COGNILODE_ENVIRONMENT_ID", "company-container"),
+         "--interval", "60"],
+        [sys.executable, str(Path(__file__).with_name("cognilode-chatmode-floor-watcher"))],
     ]
-    try:
-        server.serve_forever()
-    finally:
-        for child in children:
-            if child.poll() is None:
-                child.terminate()
+    for program in programs:
+        threading.Thread(target=supervise, args=(program,), daemon=True).start()
+    server.serve_forever()
     return 0
 
 

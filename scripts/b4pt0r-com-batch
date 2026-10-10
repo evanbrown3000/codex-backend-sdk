@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -20,11 +21,15 @@ def run(cli: str, root: Path, item: dict) -> dict:
     job = root / job_id
     job.mkdir(parents=True, exist_ok=True)
     prompt = job / "prompt.txt"
-    prompt.write_text(str(item["prompt"]), encoding="utf-8")
+    prompt_text = str(item["prompt"])
+    prompt.write_text(prompt_text, encoding="utf-8")
+    prompt_identity = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
     command = [cli, "chatgpt", "send", "--prompt-file", str(prompt),
                "--model", str(item.get("model") or "gpt-5-6-thinking"),
                "--effort", str(item.get("effort") or "xhigh"),
-               "--user-message-id", str(uuid.uuid5(uuid.NAMESPACE_URL, "b4pt0r-batch:" + job_id)),
+               "--user-message-id", str(uuid.uuid5(
+                   uuid.NAMESPACE_URL, "b4pt0r-batch:" + job_id + ":" + prompt_identity
+               )),
                "--project", str(item.get("project") or "unified-b4pt0r"),
                "--role", str(item.get("role") or "automated-provider-worker"),
                "--source", str(item.get("source") or "b4pt0r-batch"),

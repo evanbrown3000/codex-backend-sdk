@@ -347,7 +347,8 @@ def main() -> int:
             and state.get("state") == "artifact_download_pending"
             and state.get("collector_source_generation") != source_generation
             and ("No module named 'curl_cffi'" in prior_reason
-                 or "central HTTP gate denied observability" in prior_reason)
+                 or "central HTTP gate denied observability" in prior_reason
+                 or "central HTTP gate denied artifact_download" in prior_reason)
         )
         if float(state.get("next_poll_epoch") or 0) > time.time() and not repaired_local_blocker:
             continue
@@ -373,6 +374,13 @@ def main() -> int:
             continue
         attempts = 0 if status in ("collected", "already_collected") else int(state.get("attempts") or 0) + 1
         delay = 0 if status in ("collected", "already_collected") else min(1800, 60 * 2 ** min(attempts - 1, 5))
+        # The local admission socket may briefly refuse connections while its
+        # source generation changes. No provider request passed that gate, so
+        # retry this saved-terminal file on the next collector cadence rather
+        # than inheriting an unrelated exponential provider backoff.
+        reason = str(outcome.get("reason") or "")
+        if status == "artifact_download_pending" and "central HTTP gate unavailable for artifact_download" in reason:
+            delay = 120
         atomic_json(state_path, {"state": status, "attempts": attempts,
                                  "next_poll_epoch": time.time() + delay,
                                  "collector_source_generation": source_generation,

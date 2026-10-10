@@ -92,4 +92,6 @@ def decide(method: str, url: str) -> dict:
 def require(method: str, url: str) -> None:
     decision = decide(method, url)
     if not decision.get("allowed"):
+        if decision.get("fallback") is True:
+            raise PermissionError("central HTTP gate unavailable for " + str(decision.get("purpose")))
         raise PermissionError("central HTTP gate denied " + str(decision.get("purpose")))

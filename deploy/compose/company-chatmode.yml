@@ -117,6 +117,7 @@ services:
     depends_on:
       - http-gate
       - credential-sync
+      - memory
 
   provider-scheduler:
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}

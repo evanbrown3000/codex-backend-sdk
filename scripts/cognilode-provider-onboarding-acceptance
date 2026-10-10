@@ -18,6 +18,7 @@ from typing import Any, Mapping
 
 from codex_backend_sdk.agent_memory import AgentMemoryClient
 from codex_backend_sdk.bridge_provider import ProviderCommandClient
+from codex_backend_sdk.provider_scheduler_client import scheduler_call
 
 PROVIDERS = ("chatgpt.com", "gemini.com", "claude.com", "anthropic.com")
 MIN_PROVIDER_SECONDS = 300.0
@@ -163,6 +164,15 @@ def main() -> int:
     proof["completed_at"] = time.time()
     state_path.write_text(json.dumps(proof, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     print(json.dumps(proof, ensure_ascii=False))
+    # Acceptance may temporarily accelerate a clock, but production pacing is
+    # always restored automatically.  Each provider keeps its own biological
+    # tape and an independently scaled fifteen-minute daily-average gap.
+    for provider in PROVIDERS:
+        scheduler_call({
+            "operation": "rhythm_tune_pacing",
+            "provider": provider,
+            "target_average_gap_ms": 15 * 60 * 1000,
+        })
     # Remain the live acceptance owner.  The source-generation supervisor
     # replaces this process on code changes; ordinary completion does not turn
     # a permanent safety gate back into a foreground one-shot command.

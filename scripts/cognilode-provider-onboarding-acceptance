@@ -153,14 +153,22 @@ def memory_admitted(result: Mapping[str, Any]) -> bool:
 
 
 def source_packet(root: Path) -> Path:
-    """Give the provider the actual immutable SDK source, not a toy fixture."""
+    """Give the provider the actual SDK and browser-adapter sources."""
     source = Path(__file__).resolve().parents[1]
+    computerusex = Path(os.environ.get(
+        "COGNILODE_COMPUTERUSEX_PROJECT_ROOT",
+        "/runtime/source/current/automation-computeruse-vision",
+    )).resolve()
     target = root / "codex-backend-sdk-current-source.zip"
     temporary = target.with_suffix(".zip.tmp")
     with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as bundle:
         for path in sorted(source.rglob("*")):
             if path.is_file() and ".git" not in path.parts and "__pycache__" not in path.parts:
                 bundle.write(path, Path("codex-backend-sdk") / path.relative_to(source))
+        if computerusex.is_dir():
+            for path in sorted(computerusex.rglob("*")):
+                if path.is_file() and ".git" not in path.parts and "__pycache__" not in path.parts:
+                    bundle.write(path, Path("automation-computeruse-vision") / path.relative_to(computerusex))
     temporary.replace(target)
     return target
 
@@ -184,8 +192,13 @@ def prompt_for(provider: str, following: str | None) -> str:
         "Read every attached file in full. Perform at least five minutes of substantive provider-side reasoning "
         "and implementation; a receipt, short answer, outline, or status report is invalid. " + objective + " "
         f"Return a physical ZIP named {artifact} containing production-ready repository-relative files and an "
-        "APPLY_MANIFEST.json. The response and ZIP must be substantial enough to exceed what a five-minute "
-        "GPT-5.6-terra Codex implementation turn could produce."
+        "APPLY_MANIFEST.json. Modify the existing domain-owned implementations rather than creating a parallel "
+        "toy adapter. Trace and harden queue lease consumption, provider capability publication, authenticated "
+        "conversation create/continue, physical upload, terminal detection, returned-file download, exact "
+        "conversation/message identity, normalized result envelopes, central memory publication, and ambiguous "
+        "send recovery. Inspect both attached repositories and preserve their ownership boundary. The response "
+        "and ZIP must be substantial enough to exceed what a five-minute GPT-5.6-terra Codex implementation "
+        "turn could produce."
     )
 
 
@@ -244,6 +257,12 @@ def main() -> int:
                 "Do not submit the terminal answer until at least 300 seconds have elapsed since provider-side "
                 "work began; use all remaining time for substantive source work."
             )
+            if prior:
+                authored += (
+                    f" The previous {len(prior)} provider turn(s) were automatically rejected: "
+                    f"{json.dumps(prior[-1].get('reasons') or [])}. Do not repeat their superficial package. "
+                    "Perform a materially deeper in-place integration and use the full provider-side interval."
+                )
             packet_identity = hashlib.sha256()
             packet_identity.update(authored.encode())
             for inherited_path in inherited:

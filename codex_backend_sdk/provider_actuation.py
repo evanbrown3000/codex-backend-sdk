@@ -444,6 +444,7 @@ class ComputerUseXProviderAdapter:
                         "account_id": custody["account_id"],
                         "lease_id": custody["lease_id"],
                     },
+                conversation_url=(conversation_id or "") if request.mode in {"continue", "resume"} else "",
                 )
             except Exception as exc:
                 return self._modified_codex_recovery(request, exc)

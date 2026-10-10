@@ -17,7 +17,7 @@ Quickstart:
     print(response.output_text)
 """
 
-__version__ = "0.6.1"
+__version__ = "0.6.2"
 
 from .agent_memory import AgentMemoryClient
 from .remote_shell import RemoteShellClient

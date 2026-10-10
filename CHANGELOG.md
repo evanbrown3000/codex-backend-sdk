@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.2
+
+- Add persistent remote-environment inspection alongside list and select.
+- Run the native Codex App Server on the actor's selected environment.
+- Stream the remote JSONL App Server protocol through the existing unified bridge.
+- Preserve local native App Server behavior when the actor has no remote selection.
+
 ## 0.6.1
 
 - Preserve native ChatGPT continuation for centrally stored ChatGPT threads.

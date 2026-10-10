@@ -386,6 +386,13 @@ class ComputerUseXProviderAdapter:
                 attachment=list(request.attachments),
                 timeout_seconds=float(request.metadata.get("timeout_seconds", 900)),
                 stable_seconds=float(request.metadata.get("stable_seconds", 2.5)),
+                mutation_authority={
+                    "route": "b4pt0r-unified-provider",
+                    "operation_id": request.operation_id,
+                    "custody_ref": custody["custody_ref"],
+                    "account_id": custody["account_id"],
+                    "lease_id": custody["lease_id"],
+                },
             )
             urls = list(result.get("discovered_conversation_urls") or [])
             observed_url = str(result.get("observed_url") or "")

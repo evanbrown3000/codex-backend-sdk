@@ -38,7 +38,25 @@ def option(args: list[str], name: str, default: str = "") -> str:
         return default
 
 
-def b4pt0r_send(args: list[str]) -> dict:
+def _broker_call(payload: dict, *, timeout: int) -> tuple[int, dict, str]:
+    environment = os.environ.copy()
+    source_root = str(Path(__file__).resolve().parent.parent)
+    environment["PYTHONPATH"] = source_root + (
+        os.pathsep + environment["PYTHONPATH"] if environment.get("PYTHONPATH") else ""
+    )
+    completed = subprocess.run(
+        [str(runtime_python()), "-m", "codex_backend_sdk.provider_broker"],
+        input=json.dumps(payload, separators=(",", ":")) + "\n", text=True,
+        capture_output=True, timeout=timeout, check=False, env=environment,
+    )
+    try:
+        value = json.loads(completed.stdout.splitlines()[-1])
+    except (ValueError, IndexError):
+        value = {"ok": False, "error": "custody_broker_invalid_result"}
+    return completed.returncode, value, completed.stderr
+
+
+def b4pt0r_send(args: list[str], send_fence: dict) -> dict:
     prompt_file = Path(option(args, "--prompt-file"))
     job_id = option(args, "--queue-job-id")
     provider_attempt = option(args, "--provider-attempt", "0")
@@ -48,41 +66,50 @@ def b4pt0r_send(args: list[str]) -> dict:
         "b4pt0r-chatmode-job-" + hashlib.sha256(job_id.encode()).hexdigest()[:24] + ".files"
     )
     attachments = [args[index + 1] for index, value in enumerate(args[:-1]) if value == "--attach"]
+    attempt_identity = str(send_fence.get("provider_attempt") or provider_attempt or "0")
+    operation_id = str(
+        send_fence.get("operation_id")
+        or f"{job_id}:provider-attempt:{attempt_identity}"
+    )
+    account_id = option(args, "--provider-account-id", "primary")
+    lease_code, lease_result, lease_stderr = _broker_call({
+        "operation": "provider_lease_issue",
+        "provider": "chatgpt.com",
+        "account_id": account_id,
+        "operation_id": operation_id,
+        "ttl_seconds": 180,
+    }, timeout=60)
+    lease = lease_result.get("lease") if isinstance(lease_result.get("lease"), dict) else {}
+    if lease_code or not lease.get("capability"):
+        return {"exit_code": lease_code or 70,
+                "stdout": json.dumps(lease_result, separators=(",", ":")),
+                "stderr": lease_stderr[-1048576:]}
     payload = {
-        "operation": "chatgpt_continue",
+        "operation": "provider_prompt",
+        "provider": "chatgpt.com",
+        "operation_id": operation_id,
+        "capability_lease": lease["capability"],
+        "account_id": account_id,
         "prompt": prompt_file.read_text(encoding="utf-8"),
         "conversation_id": option(args, "--conversation-id") or None,
         "parent_message_id": option(args, "--parent-message-id") or None,
         "model": option(args, "--model", "gpt-5-6-thinking"),
-        "effort": option(args, "--effort", "xhigh"),
+        "reasoning_effort": option(args, "--effort", "xhigh"),
         "attachments": attachments,
-        "user_message_id": str(uuid.uuid5(
-            uuid.NAMESPACE_URL,
-            "cognilode-chatmode-queue:" + job_id + (
-                "" if provider_attempt == "0" else ":provider-attempt:" + provider_attempt
-            ),
-        )),
         "artifact_directory": str(artifact_root),
+        "parent_operation": {
+            "operation_id": str(send_fence.get("parent_operation_id") or job_id),
+            "automation_order": int(send_fence.get("automation_order") or 2),
+            "origin": str(send_fence.get("origin") or "provider_queue"),
+            "taskflow_node": send_fence.get("taskflow_node"),
+        },
+        "metadata": {"provider_attempt": provider_attempt, "queue_job_id": job_id},
     }
-    environment = os.environ.copy()
-    source_root = str(Path(__file__).resolve().parent.parent)
-    environment["PYTHONPATH"] = source_root + (
-        os.pathsep + environment["PYTHONPATH"] if environment.get("PYTHONPATH") else ""
-    )
-    completed = subprocess.run(
-        [str(runtime_python()), "-m", "codex_backend_sdk.provider_broker"],
-        input=json.dumps(payload, separators=(",", ":")) + "\n", text=True,
-        capture_output=True, timeout=1900, check=False, env=environment,
-    )
-    try:
-        value = json.loads(completed.stdout.splitlines()[-1])
-    except (ValueError, IndexError):
-        return {"exit_code": completed.returncode or 70, "stdout": completed.stdout[-1048576:],
-                "stderr": completed.stderr[-1048576:]}
-    if value.get("ok") is not True:
-        return {"exit_code": completed.returncode or 70,
+    completed_code, value, completed_stderr = _broker_call(payload, timeout=2100)
+    if value.get("accepted") is not True or value.get("terminal") is not True:
+        return {"exit_code": completed_code or 70,
                 "stdout": json.dumps(value, separators=(",", ":")),
-                "stderr": completed.stderr[-1048576:]}
+                "stderr": completed_stderr[-1048576:]}
     normalized = {
         "ok": True,
         "state": "collected",
@@ -131,7 +158,7 @@ def transport(args: list[str], send_fence: dict | None = None) -> dict:
             if send_fence:
                 child_env["COGNILODE_CHATMODE_SEND_FENCE"] = json.dumps(send_fence, separators=(",", ":"))
             if verb == "send":
-                return b4pt0r_send(args)
+                return b4pt0r_send(args, send_fence)
             return {"exit_code": 64, "stderr": "unsupported provider operation"}
         except subprocess.TimeoutExpired:
             return {"exit_code": 124, "stderr": "provider transport deadline exceeded; reconcile exact mutation"}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import time
@@ -247,6 +248,10 @@ class ChatModeOperations:
         readback: bool = True,
         artifact_directory: str | Path | None = None,
     ) -> dict[str, Any]:
+        if os.environ.get("B4PT0R_PROVIDER_CUSTODY_ACTIVE") != "1":
+            raise RuntimeError(
+                "direct ChatGPT mutation is disabled; use the queue-backed unified provider API"
+            )
         parent = parent_message_id
         if conversation_id and not parent:
             raise ValueError(

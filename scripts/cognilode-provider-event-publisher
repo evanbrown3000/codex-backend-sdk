@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Continuously admit custody outbox events to Agent Memory."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import signal
+import time
+
+from codex_backend_sdk.agent_memory import AgentMemoryClient
+
+STOP = False
+
+
+def stop(_signal, _frame):
+    global STOP
+    STOP = True
+
+
+def atomic_cursor(path: Path, value: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".partial")
+    temporary.write_text(str(value) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def cycle(outbox: Path, cursor_path: Path, memory: AgentMemoryClient) -> int:
+    if not outbox.is_file():
+        return 0
+    try:
+        offset = int(cursor_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        offset = 0
+    size = outbox.stat().st_size
+    if offset < 0 or offset > size:
+        offset = 0
+    admitted = 0
+    with outbox.open("rb") as stream:
+        stream.seek(offset)
+        while True:
+            start = stream.tell()
+            line = stream.readline()
+            if not line:
+                break
+            if not line.endswith(b"\n"):
+                break
+            try:
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    raise ValueError("event is not an object")
+                memory.ingest(event)
+            except Exception:
+                stream.seek(start)
+                break
+            atomic_cursor(cursor_path, stream.tell())
+            admitted += 1
+    return admitted
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--outbox", type=Path, default=Path(os.environ.get(
+        "B4PT0R_PROVIDER_EVENT_OUTBOX", "/runtime/provider-events/outbox.jsonl"
+    )))
+    parser.add_argument("--cursor", type=Path, default=Path(os.environ.get(
+        "B4PT0R_PROVIDER_EVENT_CURSOR", "/runtime/provider-events/agent-memory.cursor"
+    )))
+    parser.add_argument("--interval", type=float, default=10.0)
+    args = parser.parse_args()
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    memory = AgentMemoryClient(use_broker=False)
+    while not STOP:
+        cycle(args.outbox, args.cursor, memory)
+        for _ in range(max(1, int(args.interval * 2))):
+            if STOP:
+                break
+            time.sleep(0.5)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

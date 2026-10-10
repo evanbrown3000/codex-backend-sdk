@@ -1,0 +1,563 @@
+"""Singular first-order actuation for subscription-backed .com agents.
+
+This module owns provider mutation and nothing above it.  Schedulers supply an
+already-authored prompt and an opaque custody lease.  The actuator delegates to
+the recovered B4PT0R ChatGPT mini-loop or to the existing ComputerUseX hosted
+provider adapter, normalizes their receipts, commits returned artifacts, and
+publishes operation events to Agent Memory.
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+import hashlib
+import importlib
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+import tempfile
+import time
+from typing import Any, Callable, Mapping, Protocol, Sequence
+import uuid
+
+from .agent_memory import AgentMemoryClient
+from .attachment_custody import commit_returned_artifact
+from .provider_leases import ProviderLeaseAuthority
+
+
+PROVIDERS = ("chatgpt.com", "gemini.com", "claude.com", "anthropic.com")
+NORMAL_STATES = (
+    "accepted", "streaming", "terminal", "artifacts_collected", "provider_error"
+)
+
+
+def normalize_provider(value: str) -> str:
+    aliases = {
+        "chatgpt": "chatgpt.com", "chatgpt.com": "chatgpt.com",
+        "gemini": "gemini.com", "gemini.com": "gemini.com",
+        "claude": "claude.com", "claude.com": "claude.com",
+        "anthropic": "anthropic.com", "anthropic.com": "anthropic.com",
+    }
+    try:
+        return aliases[value.strip().casefold()]
+    except KeyError as exc:
+        raise ValueError("unsupported .com provider: " + value) from exc
+
+
+@dataclass(frozen=True)
+class ParentOperation:
+    operation_id: str
+    automation_order: int
+    origin: str
+    taskflow_node: str | None = None
+
+    def validate(self) -> None:
+        if not self.operation_id or not self.origin:
+            raise ValueError("higher-order parent provenance is incomplete")
+        if self.automation_order < 2:
+            raise ValueError("provider actuation requires order-2-or-higher parent provenance")
+
+
+@dataclass(frozen=True)
+class ProviderPromptRequest:
+    provider: str
+    prompt: str
+    operation_id: str
+    capability_lease: str
+    conversation_id: str | None = None
+    parent_message_id: str | None = None
+    mode: str = "create"
+    attachments: tuple[str, ...] = ()
+    model: str | None = None
+    reasoning_effort: str | None = None
+    account_id: str | None = None
+    artifact_directory: str | None = None
+    parent_operation: ParentOperation | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def normalized(self) -> "ProviderPromptRequest":
+        provider = normalize_provider(self.provider)
+        text = self.prompt.strip()
+        if not text:
+            raise ValueError("provider prompt must not be empty")
+        if self.mode not in {"create", "continue", "resume", "fork"}:
+            raise ValueError("mode must be create, continue, resume, or fork")
+        if self.mode in {"continue", "resume"} and not self.conversation_id:
+            raise ValueError(f"{self.mode} requires conversation_id")
+        source_provider = str(self.metadata.get("source_provider") or provider)
+        if (
+            provider == "chatgpt.com"
+            and self.mode in {"continue", "resume"}
+            and source_provider == "chatgpt.com"
+            and not self.parent_message_id
+        ):
+            raise ValueError("ChatGPT continuation requires exact parent_message_id from Agent Memory")
+        if self.parent_operation is not None:
+            self.parent_operation.validate()
+        elif os.environ.get("B4PT0R_REQUIRE_HIGHER_ORDER_PARENT", "1") != "0":
+            raise ValueError("provider mutation rejected without higher-order parent provenance")
+        for path in self.attachments:
+            source = Path(path).expanduser()
+            if not source.is_file():
+                raise ValueError("attachment is not a physical file: " + str(source))
+        return ProviderPromptRequest(
+            provider=provider,
+            prompt=text,
+            operation_id=self.operation_id,
+            capability_lease=self.capability_lease,
+            conversation_id=self.conversation_id,
+            parent_message_id=self.parent_message_id,
+            mode=self.mode,
+            attachments=tuple(str(Path(p).expanduser().resolve()) for p in self.attachments),
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            account_id=self.account_id,
+            artifact_directory=self.artifact_directory,
+            parent_operation=self.parent_operation,
+            metadata=dict(self.metadata),
+        )
+
+
+@dataclass
+class ProviderResultEnvelope:
+    schema: str
+    operation_id: str
+    provider: str
+    account_id: str
+    state: str
+    accepted: bool
+    terminal: bool
+    artifacts_collected: bool
+    conversation_id: str | None
+    user_message_id: str | None
+    assistant_message_id: str | None
+    assistant_text: str
+    artifacts: list[dict[str, Any]]
+    model_receipt: dict[str, Any]
+    provider_error: dict[str, Any] | None
+    provider_receipt: dict[str, Any]
+    event_ids: list[str]
+    started_at: str
+    completed_at: str
+    parent_operation: dict[str, Any] | None
+    automation_order: int = 1
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+class ProviderAdapter(Protocol):
+    def capabilities(self) -> Mapping[str, Any]: ...
+    def prompt(self, request: ProviderPromptRequest, custody: Mapping[str, Any]) -> Mapping[str, Any]: ...
+
+
+class AgentMemoryEventPublisher:
+    def __init__(
+        self, memory: AgentMemoryClient | None = None,
+        outbox: str | Path | None = None,
+    ) -> None:
+        self.memory = memory or AgentMemoryClient()
+        self.outbox = Path(outbox or os.environ.get(
+            "B4PT0R_PROVIDER_EVENT_OUTBOX", "/runtime/provider-events/outbox.jsonl"
+        ))
+
+    def _publish(self, observation: Mapping[str, Any]) -> dict[str, Any]:
+        self.outbox.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(dict(observation), ensure_ascii=False, separators=(",", ":")) + "\n"
+        with self.outbox.open("a", encoding="utf-8") as stream:
+            stream.write(line)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            return {"ingested": True, "receipt": self.memory.ingest(observation)}
+        except Exception as exc:
+            return {"ingested": False, "error": type(exc).__name__, "outbox": str(self.outbox)}
+
+    def emit(
+        self,
+        *,
+        request: ProviderPromptRequest,
+        state: str,
+        payload: Mapping[str, Any],
+        conversation_id: str | None = None,
+    ) -> str:
+        if state not in NORMAL_STATES:
+            raise ValueError("invalid provider operation state")
+        event_id = "provider-event-" + uuid.uuid4().hex
+        observed_at = datetime.now(timezone.utc).isoformat()
+        observation = {
+            "schema": "cognilode.provider_operation_event.v1",
+            "observation_kind": "provider_operation_event",
+            "event_id": event_id,
+            "operation_id": request.operation_id,
+            "provider": request.provider,
+            "provider_conversation_id": conversation_id,
+            "conversation_id": conversation_id or "operation:" + request.operation_id,
+            "observed_at": observed_at,
+            "state": state,
+            "source": {
+                "type": "b4pt0r_provider_actuator",
+                "provenance": "credential_custody_operation",
+            },
+            "parent_operation": asdict(request.parent_operation) if request.parent_operation else None,
+            "payload": dict(payload),
+        }
+        self._publish(observation)
+        return event_id
+
+
+def _last_json(stdout: str, stderr: str = "") -> dict[str, Any]:
+    for line in reversed((stdout + "\n" + stderr).splitlines()):
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    raise RuntimeError("provider actuator returned no JSON receipt")
+
+
+class ChatGPTB4PT0RAdapter:
+    """Adapter over the recovered send/attachment/SSE/artifact mini-loop."""
+
+    def __init__(self, command: Sequence[str] | None = None) -> None:
+        configured = os.environ.get("B4PT0R_CHATGPT_ACTUATOR_COMMAND", "").strip()
+        if command is not None:
+            self.command = tuple(command)
+        elif configured:
+            self.command = tuple(json.loads(configured) if configured.startswith("[") else shlex.split(configured))
+        else:
+            script = Path(__file__).resolve().parent.parent / "scripts" / "cognilode-b4pt0r-chatmode"
+            self.command = (sys.executable, str(script))
+
+    def capabilities(self) -> Mapping[str, Any]:
+        return {
+            "provider": "chatgpt.com", "create": True, "continue": True,
+            "resume": True, "fork": "logical_context_attachment", "attachments": True,
+            "terminal_stream": True, "returned_files": True,
+            "transport": "b4pt0r_desktop_observed_http_sse",
+            "ordinary_browser_observation": False,
+        }
+
+    def prompt(self, request: ProviderPromptRequest, custody: Mapping[str, Any]) -> Mapping[str, Any]:
+        temporary: tempfile.TemporaryDirectory[str] | None = None
+        prompt_text = request.prompt
+        conversation_id = request.conversation_id
+        parent_message_id = request.parent_message_id
+        attachments = list(request.attachments)
+        logical_fork = request.mode == "fork" or (
+            request.mode == "resume"
+            and str(request.metadata.get("source_provider") or "chatgpt.com") != "chatgpt.com"
+        )
+        if logical_fork and request.conversation_id:
+            rendered = AgentMemoryClient(use_broker=False).render_markdown(request.conversation_id)
+            temporary = tempfile.TemporaryDirectory(prefix="b4pt0r-logical-fork-")
+            context = Path(temporary.name) / "conversation.md"
+            context.write_text(rendered, encoding="utf-8")
+            attachments.insert(0, str(context))
+            prompt_text = "First, read the attached conversation.md in full, then " + prompt_text
+            conversation_id = None
+            parent_message_id = None
+        args = [*self.command, "--auth-source", "codex", "send", "--prompt", prompt_text,
+                "--queue-job-id", request.operation_id,
+                "--effort", request.reasoning_effort or "xhigh"]
+        if conversation_id:
+            args += ["--conversation-id", conversation_id]
+        if parent_message_id:
+            args += ["--parent-message-id", parent_message_id]
+        if request.model:
+            args += ["--model", request.model]
+        if request.artifact_directory:
+            args += ["--output-dir", request.artifact_directory]
+        for path in attachments:
+            args += ["--attach", path]
+        env = os.environ.copy()
+        env["B4PT0R_PROVIDER_ACCOUNT_ID"] = str(custody["account_id"])
+        env["B4PT0R_CUSTODY_REF"] = str(custody["custody_ref"])
+        env["B4PT0R_PROVIDER_CAPABILITY_REDEEMED"] = request.operation_id
+        env["B4PT0R_QUEUE_AUTHORIZED_RETRY_ONLY"] = "1"
+        try:
+            completed = subprocess.run(
+                args, capture_output=True, text=True,
+                timeout=int(request.metadata.get("timeout_seconds") or 2100),
+                env=env, check=False,
+            )
+            receipt = _last_json(completed.stdout, completed.stderr)
+            if completed.returncode and not receipt.get("provider_acceptance_observed"):
+                receipt.setdefault("ok", False)
+            return receipt
+        finally:
+            if temporary is not None:
+                temporary.cleanup()
+
+
+class ComputerUseXProviderAdapter:
+    """Thin adapter to the existing domain-owned Gemini/Claude implementation."""
+
+    def __init__(self, provider: str) -> None:
+        self.provider = normalize_provider(provider)
+
+    def _call(self, name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        source = Path(os.environ.get(
+            "COMPUTERUSEX_SOURCE", "/workspace/cognilode/source/current/automation-computeruse-vision/src"
+        ))
+        local = Path.home() / "Projects/automation-computeruse-vision/src"
+        for candidate in (source, local):
+            if candidate.is_dir() and str(candidate) not in sys.path:
+                sys.path.insert(0, str(candidate))
+        module = importlib.import_module("computerusex.web_agent_mcp_server")
+        result = module._semantic_call(name, dict(arguments))
+        if not isinstance(result, dict):
+            raise RuntimeError("ComputerUseX returned a non-object result")
+        return result
+
+    def capabilities(self) -> Mapping[str, Any]:
+        return {
+            "provider": self.provider, "create": True, "continue": True,
+            "resume": True, "fork": "logical", "attachments": True,
+            "terminal_stream": False, "terminal_collection": True,
+            "returned_files": False, "transport": "computerusex_native_web",
+            "browser_observation": "mutation_bound_terminal_collection_only",
+        }
+
+    def prompt(self, request: ProviderPromptRequest, custody: Mapping[str, Any]) -> Mapping[str, Any]:
+        conversation_id = request.conversation_id
+        if request.mode == "fork" and conversation_id:
+            forked = self._call("conversation.fork", {
+                "provider": self.provider, "conversation_id": conversation_id,
+                "request_id": request.operation_id,
+            })
+            conversation_id = str(forked.get("conversation_id") or "") or None
+        if not conversation_id and request.attachments:
+            opened = self._call("conversation.create", {
+                "provider": self.provider, "request_id": request.operation_id,
+                "transport": "browser",
+            })
+            conversation_id = str(opened.get("conversation_id") or "") or None
+        attachment_receipts = []
+        for path in request.attachments:
+            attachment_receipts.append(self._call("conversation.attach", {
+                "provider": self.provider, "conversation_id": conversation_id,
+                "path": path, "request_id": request.operation_id,
+            }))
+        result = self._call("conversation.prompt", {
+            "provider": self.provider, "conversation_id": conversation_id,
+            "prompt": request.prompt, "request_id": request.operation_id,
+            "transport": "auto",
+            "timeout_seconds": request.metadata.get("timeout_seconds", 900),
+        })
+        if attachment_receipts:
+            result["attachments"] = attachment_receipts
+        return result
+
+
+class UnifiedProviderActuator:
+    def __init__(
+        self,
+        *,
+        lease_authority: ProviderLeaseAuthority,
+        publisher: AgentMemoryEventPublisher | None = None,
+        adapters: Mapping[str, ProviderAdapter] | None = None,
+    ) -> None:
+        self.leases = lease_authority
+        self.publisher = publisher or AgentMemoryEventPublisher()
+        self.adapters: dict[str, ProviderAdapter] = {
+            "chatgpt.com": ChatGPTB4PT0RAdapter(),
+            "gemini.com": ComputerUseXProviderAdapter("gemini.com"),
+            "claude.com": ComputerUseXProviderAdapter("claude.com"),
+            "anthropic.com": ComputerUseXProviderAdapter("anthropic.com"),
+        }
+        self.adapters.update(dict(adapters or {}))
+
+    def capabilities(self) -> dict[str, Any]:
+        return {
+            "schema": "cognilode.provider_capabilities.v1",
+            "providers": {name: dict(adapter.capabilities()) for name, adapter in self.adapters.items()},
+        }
+
+    def publish_capabilities(self) -> dict[str, Any]:
+        value = self.capabilities()
+        receipt = self.publisher._publish({
+            **value,
+            "observation_kind": "provider_capability_inventory",
+            "conversation_id": "inventory:provider-capabilities",
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "source": {"type": "b4pt0r_provider_actuator", "provenance": "runtime_capabilities"},
+        })
+        return {**value, "agent_memory": receipt}
+
+    def prompt(self, request: ProviderPromptRequest) -> ProviderResultEnvelope:
+        request = request.normalized()
+        started = datetime.now(timezone.utc).isoformat()
+        event_ids: list[str] = []
+        custody = self.leases.redeem(
+            request.capability_lease, operation_id=request.operation_id, operation="prompt"
+        )
+        if request.account_id and custody["account_id"] != request.account_id:
+            raise ValueError("leased account differs from requested account")
+        adapter = self.adapters[request.provider]
+        try:
+            raw = dict(adapter.prompt(request, custody))
+            accepted = bool(raw.get("provider_acceptance_observed", raw.get("ok")))
+            terminal = bool(raw.get("assistant_terminal") or raw.get("terminal")
+                            or raw.get("complete_response_read")
+                            or raw.get("state") in {"completed", "response_collected"})
+            conversation_id = str(raw.get("conversation_id") or request.conversation_id or "") or None
+            user_message_id = str(raw.get("user_message_id") or raw.get("request_id") or "") or None
+            assistant_message_id = str(
+                raw.get("terminal_assistant_message_id") or raw.get("assistant_message_id") or ""
+            ) or None
+            assistant_text = str(
+                raw.get("terminal_assistant_text") or raw.get("assistant_text")
+                or raw.get("response") or ""
+            )
+            if accepted:
+                event_ids.append(self.publisher.emit(
+                    request=request, state="accepted",
+                    payload={
+                        "account_id": custody["account_id"],
+                        "lease_id": custody["lease_id"],
+                    }, conversation_id=conversation_id,
+                ))
+            stream_observed = bool(
+                raw.get("raw_bytes") or raw.get("provider_summary") or raw.get("stream")
+                or raw.get("complete_response_read") or assistant_text
+            )
+            if accepted and stream_observed:
+                event_ids.append(self.publisher.emit(
+                    request=request, state="streaming",
+                    payload={"transport": adapter.capabilities().get("transport")},
+                    conversation_id=conversation_id,
+                ))
+            artifacts: list[dict[str, Any]] = []
+            candidates = raw.get("downloaded_files") or raw.get("artifacts") or []
+            for item in candidates if isinstance(candidates, list) else []:
+                row = dict(item) if isinstance(item, Mapping) else {"path": str(item)}
+                path = str(row.get("path") or "")
+                if path and Path(path).is_file():
+                    try:
+                        row["custody"] = commit_returned_artifact(path)
+                        row["custody_state"] = "committed"
+                    except Exception as exc:
+                        row["custody_state"] = "pending"
+                        row["custody_error"] = type(exc).__name__
+                artifacts.append(row)
+            if terminal:
+                event_ids.append(self.publisher.emit(
+                    request=request, state="terminal",
+                    payload={
+                        "user_message_id": user_message_id,
+                        "assistant_message_id": assistant_message_id,
+                        "assistant_sha256": hashlib.sha256(assistant_text.encode()).hexdigest(),
+                    },
+                    conversation_id=conversation_id,
+                ))
+            if artifacts:
+                event_ids.append(self.publisher.emit(
+                    request=request, state="artifacts_collected",
+                    payload={"artifacts": artifacts}, conversation_id=conversation_id,
+                ))
+            error = None
+            state = "artifacts_collected" if artifacts else "terminal" if terminal else "accepted"
+            if not accepted:
+                state = "provider_error"
+                error = {
+                    "code": str(raw.get("state") or "provider_not_accepted"),
+                    "message": str(raw.get("error") or raw.get("error_preview") or "provider did not accept turn"),
+                }
+                event_ids.append(self.publisher.emit(
+                    request=request, state="provider_error", payload=error,
+                    conversation_id=conversation_id,
+                ))
+            envelope = ProviderResultEnvelope(
+                schema="cognilode.provider_result.v1",
+                operation_id=request.operation_id,
+                provider=request.provider,
+                account_id=str(custody["account_id"]),
+                state=state,
+                accepted=accepted,
+                terminal=terminal,
+                artifacts_collected=bool(artifacts),
+                conversation_id=conversation_id,
+                user_message_id=user_message_id,
+                assistant_message_id=assistant_message_id,
+                assistant_text=assistant_text,
+                artifacts=artifacts,
+                model_receipt=dict(raw.get("model_receipt") or raw.get("provider_model_receipt") or {}),
+                provider_error=error,
+                provider_receipt=raw,
+                event_ids=event_ids,
+                started_at=started,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                parent_operation=asdict(request.parent_operation) if request.parent_operation else None,
+            )
+            publication = self.publisher._publish({
+                "schema": "cognilode.provider_result.v1",
+                "observation_kind": "provider_result",
+                "provider": request.provider,
+                "provider_conversation_id": conversation_id,
+                "conversation_id": conversation_id or "operation:" + request.operation_id,
+                "operation_id": request.operation_id,
+                "observed_at": envelope.completed_at,
+                "source": {"type": "b4pt0r_provider_actuator", "provenance": "normalized_result"},
+                "result": envelope.to_dict(),
+            })
+            envelope.provider_receipt["agent_memory_publication"] = publication
+            return envelope
+        except Exception as exc:
+            error = {"code": type(exc).__name__, "message": str(exc)}
+            try:
+                event_ids.append(self.publisher.emit(
+                    request=request, state="provider_error", payload=error,
+                    conversation_id=request.conversation_id,
+                ))
+            except Exception:
+                pass
+            return ProviderResultEnvelope(
+                schema="cognilode.provider_result.v1", operation_id=request.operation_id,
+                provider=request.provider, account_id=str(custody["account_id"]),
+                state="provider_error", accepted=False, terminal=False,
+                artifacts_collected=False, conversation_id=request.conversation_id,
+                user_message_id=None, assistant_message_id=None, assistant_text="",
+                artifacts=[], model_receipt={}, provider_error=error,
+                provider_receipt={}, event_ids=event_ids, started_at=started,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                parent_operation=asdict(request.parent_operation) if request.parent_operation else None,
+            )
+
+
+_DEFAULT_ACTUATOR: UnifiedProviderActuator | None = None
+
+
+def configure_default_actuator(actuator: UnifiedProviderActuator) -> None:
+    global _DEFAULT_ACTUATOR
+    _DEFAULT_ACTUATOR = actuator
+
+
+def prompt(
+    provider: str,
+    conversation: str | None,
+    prompt_text: str,
+    attachments: Sequence[str] = (),
+    **options: Any,
+) -> dict[str, Any]:
+    """Public ``prompt(provider, conversation, prompt, attachments)`` operation."""
+    if _DEFAULT_ACTUATOR is None:
+        raise RuntimeError("provider actuator is not configured inside credential custody")
+    parent = options.pop("parent_operation", None)
+    if isinstance(parent, Mapping):
+        parent = ParentOperation(**dict(parent))
+    request = ProviderPromptRequest(
+        provider=provider,
+        conversation_id=conversation,
+        prompt=prompt_text,
+        attachments=tuple(attachments),
+        parent_operation=parent,
+        **options,
+    )
+    return _DEFAULT_ACTUATOR.prompt(request).to_dict()
+

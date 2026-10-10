@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.0 — Singular .com provider actuation and custody
+
+- Restores the B4PT0R ChatGPT physical-attachment, terminal-stream, exact-turn,
+  and returned-file mini-loop as the custody-resident provider actuator.
+- Adds one provider-neutral Python operation and normalized result envelope for
+  ChatGPT.com, Gemini.com, Claude.com, and Anthropic.com.
+- Reuses ComputerUseX for hosted Gemini/Claude/Anthropic mutations rather than
+  embedding a second browser implementation.
+- Adds single-use provider-account capability leases. OAuth tokens, cookies,
+  and browser profiles remain inside custody and are never returned to callers.
+- Requires order-2-or-higher parent provenance for every ordinary mutation and
+  closes the legacy direct ChatGPT send path.
+- Publishes request lifecycle, lease, conversation identity, and artifact
+  events to Agent Memory through a durable continuously drained outbox.
+- Adds encrypted Universe Storage credential custody and requester-containment
+  tooling recovered from the earlier internal implementation.
+
 ## 0.6.8
 
 - Route ChatGPT sends, continuations, collection, and cross-provider transfers through the singular central prompt queue instead of direct interactive provider mutations.

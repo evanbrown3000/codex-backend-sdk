@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "codex-backend-sdk"
-version = "0.6.8"
+version = "0.9.0"
 description = "Unofficial Python SDK for the ChatGPT Codex backend API"
 readme = "README.md"
 license = { text = "MIT" }
@@ -25,6 +25,7 @@ dependencies = [
     "pydantic>=2.0",
     "requests>=2.28",
     "websocket-client>=1.8",
+    "cryptography>=42.0",
 ]
 
 [project.scripts]
@@ -33,6 +34,7 @@ b4pt0r-app-server = "codex_backend_sdk.app_server_bridge:main"
 cognilode-b4pt0r-app-server = "codex_backend_sdk.app_server_bridge:main"
 b4pt0r-provider-broker = "codex_backend_sdk.provider_broker:main"
 b4pt0r-desktop = "codex_backend_sdk.desktop_launcher:main"
+cognilode-credential-custody = "codex_backend_sdk.credential_custody_cli:main"
 
 [project.optional-dependencies]
 openai    = [

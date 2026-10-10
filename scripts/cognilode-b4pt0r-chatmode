@@ -712,6 +712,17 @@ def _reconcile_turn(
     user_message_id: str,
 ) -> tuple[dict, object, dict, str]:
     """Poll read-only hydration for the exact submitted message; never replay the mutation."""
+    if os.environ.get("B4PT0R_QUEUE_AUTHORIZED_RETRY_ONLY") == "1":
+        return {
+            "accepted": False,
+            "terminal": False,
+            "conversation_id": conversation_id,
+            "events": [{
+                "phase": "reconcile",
+                "outcome": "provider_observation_gated_queue_retry_required",
+            }],
+            "state": "ambiguous_acceptance",
+        }, session, auth, device_id
     events: list[dict] = []
     saw_user = False
     last_state = "unknown"
@@ -1199,6 +1210,13 @@ def health(args: argparse.Namespace) -> dict:
 
 
 def send(args: argparse.Namespace) -> dict:
+    if not os.environ.get("COGNILODE_CHATMODE_SEND_FENCE") and not os.environ.get(
+        "B4PT0R_PROVIDER_CAPABILITY_REDEEMED"
+    ):
+        raise CapabilityError(
+            "exclusive_custody_required",
+            "provider mutation requires a queue fence or redeemed custody capability",
+        )
     prompt = args.prompt or (Path(args.prompt_file).read_text(encoding="utf-8") if args.prompt_file else "")
     prompt = prompt.strip()
     if not prompt:

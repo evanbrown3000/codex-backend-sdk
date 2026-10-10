@@ -11,17 +11,26 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 import sys
 import tempfile
 from typing import Any, Mapping
+import uuid
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from . import OpenAI
 from .agent_memory import AgentMemoryClient
 from .attachment_custody import commit_returned_artifact
+from .provider_actuation import (
+    AgentMemoryEventPublisher,
+    ParentOperation,
+    ProviderPromptRequest,
+    UnifiedProviderActuator,
+)
+from .provider_leases import ProviderLeaseAuthority
 
 
 def _operator_token() -> str:
@@ -43,6 +52,80 @@ def _relay_request(url: str, method: str, body: Any = None, params: Any = None) 
         headers["Content-Type"] = "application/json"
     with urlopen(Request(url, data=data, headers=headers, method=method), timeout=180) as response:
         return json.load(response)
+
+
+def _lease_authority() -> ProviderLeaseAuthority:
+    path = Path(os.environ.get(
+        "B4PT0R_PROVIDER_LEASE_DB",
+        "/runtime/custody/provider-capability-leases.sqlite3",
+    ))
+    authority = ProviderLeaseAuthority(path)
+    descriptor: Any = None
+    configured = os.environ.get("B4PT0R_PROVIDER_ACCOUNTS_JSON", "").strip()
+    descriptor_path = os.environ.get("B4PT0R_PROVIDER_ACCOUNTS_FILE", "").strip()
+    if configured:
+        descriptor = json.loads(configured)
+    elif descriptor_path and Path(descriptor_path).is_file():
+        descriptor = json.loads(Path(descriptor_path).read_text(encoding="utf-8"))
+    if not descriptor:
+        descriptor = [
+            {
+                "provider": "chatgpt.com",
+                "account_id": os.environ.get("B4PT0R_CHATGPT_ACCOUNT_ID", "primary"),
+                "custody_ref": "runtime:codex-home",
+                "capabilities": {
+                    "attachments": True, "artifact_downloads": True,
+                    "continuation": True, "models": ["gpt-5-6-thinking"],
+                    "reasoning_modes": ["medium", "high", "xhigh"],
+                },
+            },
+        ] + [
+            {
+                "provider": provider, "account_id": "primary",
+                "custody_ref": "runtime:managed-browser-profile",
+                "capabilities": {
+                    "attachments": True, "artifact_downloads": False,
+                    "continuation": True, "models": [], "reasoning_modes": [],
+                },
+            }
+            for provider in ("gemini.com", "claude.com", "anthropic.com")
+        ]
+    rows = descriptor.get("accounts", []) if isinstance(descriptor, Mapping) else descriptor
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, Mapping):
+            continue
+        authority.register_account(
+            provider=str(row.get("provider") or ""),
+            account_id=str(row.get("account_id") or ""),
+            custody_ref=str(row.get("custody_ref") or ""),
+            capabilities=row.get("capabilities") if isinstance(row.get("capabilities"), Mapping) else {},
+        )
+    return authority
+
+
+def _actuator(authority: ProviderLeaseAuthority) -> UnifiedProviderActuator:
+    return UnifiedProviderActuator(
+        lease_authority=authority,
+        publisher=AgentMemoryEventPublisher(AgentMemoryClient(use_broker=False)),
+    )
+
+
+def _publish_lease(lease: Any) -> dict[str, Any]:
+    observation = {
+        "schema": "cognilode.provider_credential_lease_event.v1",
+        "observation_kind": "provider_credential_lease",
+        "conversation_id": "operation:" + lease.operation_id,
+        "operation_id": lease.operation_id,
+        "provider": lease.provider,
+        "account_id": lease.account_id,
+        "lease": lease.public(),
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "source": {"type": "b4pt0r_provider_custody", "provenance": "capability_issued"},
+    }
+    try:
+        return AgentMemoryClient(use_broker=False).ingest(observation)
+    except Exception as exc:
+        return {"ingested": False, "error": type(exc).__name__}
 
 
 def _artifact_rows(turn: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -174,6 +257,79 @@ def _send(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 def execute(payload: Mapping[str, Any]) -> Any:
     operation = str(payload.get("operation") or "")
+    if operation == "provider_capabilities":
+        authority = _lease_authority()
+        capabilities = _actuator(authority).publish_capabilities()
+        capabilities["accounts"] = {
+            provider: authority.accounts(provider)
+            for provider in ("chatgpt.com", "gemini.com", "claude.com", "anthropic.com")
+        }
+        return capabilities
+    if operation == "provider_lease_issue":
+        lease = _lease_authority().issue(
+            provider=str(payload.get("provider") or ""),
+            account_id=str(payload.get("account_id") or "primary"),
+            operation_id=str(payload.get("operation_id") or ""),
+            operation="prompt",
+            ttl_seconds=int(payload.get("ttl_seconds") or 120),
+        )
+        memory_receipt = _publish_lease(lease)
+        return {"ok": True, "lease": {**lease.public(), "capability": lease.token},
+                "agent_memory": memory_receipt}
+    if operation == "provider_prompt_with_lease":
+        operation_id = str(payload.get("operation_id") or uuid.uuid4())
+        provider = str(payload.get("provider") or "")
+        account_id = str(payload.get("account_id") or "primary")
+        authority = _lease_authority()
+        lease = authority.issue(
+            provider=provider, account_id=account_id,
+            operation_id=operation_id, operation="prompt",
+            ttl_seconds=int(payload.get("ttl_seconds") or 180),
+        )
+        _publish_lease(lease)
+        forwarded = dict(payload)
+        forwarded.update({
+            "operation": "provider_prompt", "operation_id": operation_id,
+            "capability_lease": lease.token, "account_id": account_id,
+        })
+        parent_value = forwarded.get("parent_operation")
+        parent = ParentOperation(**dict(parent_value)) if isinstance(parent_value, Mapping) else None
+        request = ProviderPromptRequest(
+            provider=provider, prompt=str(forwarded.get("prompt") or ""),
+            operation_id=operation_id, capability_lease=lease.token,
+            conversation_id=str(forwarded.get("conversation_id") or "") or None,
+            parent_message_id=str(forwarded.get("parent_message_id") or "") or None,
+            mode=str(forwarded.get("mode") or ("continue" if forwarded.get("conversation_id") else "create")),
+            attachments=tuple(str(value) for value in forwarded.get("attachments") or ()),
+            model=str(forwarded.get("model") or "") or None,
+            reasoning_effort=str(forwarded.get("reasoning_effort") or forwarded.get("effort") or "") or None,
+            account_id=account_id,
+            artifact_directory=str(forwarded.get("artifact_directory") or "") or None,
+            parent_operation=parent,
+            metadata=forwarded.get("metadata") if isinstance(forwarded.get("metadata"), Mapping) else {},
+        )
+        return _actuator(authority).prompt(request).to_dict()
+    if operation == "provider_prompt":
+        authority = _lease_authority()
+        parent_value = payload.get("parent_operation")
+        parent = ParentOperation(**dict(parent_value)) if isinstance(parent_value, Mapping) else None
+        request = ProviderPromptRequest(
+            provider=str(payload.get("provider") or ""),
+            prompt=str(payload.get("prompt") or ""),
+            operation_id=str(payload.get("operation_id") or ""),
+            capability_lease=str(payload.get("capability_lease") or ""),
+            conversation_id=str(payload.get("conversation_id") or "") or None,
+            parent_message_id=str(payload.get("parent_message_id") or "") or None,
+            mode=str(payload.get("mode") or ("continue" if payload.get("conversation_id") else "create")),
+            attachments=tuple(str(value) for value in payload.get("attachments") or ()),
+            model=str(payload.get("model") or "") or None,
+            reasoning_effort=str(payload.get("reasoning_effort") or payload.get("effort") or "") or None,
+            account_id=str(payload.get("account_id") or "") or None,
+            artifact_directory=str(payload.get("artifact_directory") or "") or None,
+            parent_operation=parent,
+            metadata=payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {},
+        )
+        return _actuator(authority).prompt(request).to_dict()
     if operation == "agent_memory_request":
         explicit_url = str(payload.get("url") or "").strip()
         base = os.environ.get(
@@ -208,7 +364,9 @@ def execute(payload: Mapping[str, Any]) -> Any:
             return result["structuredContent"]
         return result
     if operation == "chatgpt_continue":
-        return _send(payload)
+        if os.environ.get("B4PT0R_ALLOW_LEGACY_DIRECT_PROVIDER") == "1":
+            return _send(payload)
+        return {"ok": False, "error": "provider_prompt_requires_capability_lease_and_parent_provenance"}
     if operation == "conversation_continue":
         if payload.get("context_delivery") != "rendered_conversation_attachment":
             return {"ok": False, "error": "conversation continuation requires rendered attachment"}
@@ -218,7 +376,9 @@ def execute(payload: Mapping[str, Any]) -> Any:
             payload["rendered_conversation"] = memory.render_markdown(
                 str(payload.get("source_conversation_id") or "")
             )
-        return _send(payload)
+        if os.environ.get("B4PT0R_ALLOW_LEGACY_DIRECT_PROVIDER") == "1":
+            return _send(payload)
+        return {"ok": False, "error": "provider_prompt_requires_capability_lease_and_parent_provenance"}
     return {"ok": False, "error": "unsupported broker operation: " + operation}
 
 

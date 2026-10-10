@@ -49,11 +49,58 @@ opens the browser OAuth flow. Most examples below assume an authenticated
 
 ## Chat-mode operations and unified CLI
 
-The low-level B4PT0R resources remain the provider implementation. The
-`client.chatgpt.operations` layer composes those resources into complete
-ChatGPT Chat-mode turns without introducing a second HTTP transport:
+### Singular provider actuator
+
+All company `.com` mutations terminate in one custody-resident B4PT0R
+operation:
 
 ```python
+result = ProviderActuationClient().prompt(
+    "chatgpt.com",
+    conversation=None,
+    prompt="Read the attached work packet and return the finished package.",
+    attachments=["work.zip"],
+    parent_operation={
+        "operation_id": "queue-job-...",
+        "automation_order": 2,
+        "origin": "provider_queue",
+    },
+)
+```
+
+`ProviderActuationClient` is credential-free.  It calls the custody broker,
+which issues and immediately redeems a single-use capability for the selected
+provider account.  The capability authorizes exactly one operation and never
+contains an OAuth token, cookie, browser profile, or secret path.  A direct
+provider mutation without order-2-or-higher parent provenance is rejected.
+
+The ChatGPT adapter is the recovered B4PT0R physical-file/SSE/artifact
+mini-loop.  Gemini, Claude, and Anthropic delegate to the domain-owned
+ComputerUseX hosted-provider implementation instead of duplicating browser
+automation in this SDK.  Every adapter returns the same result envelope and
+publishes `accepted`, `streaming`, `terminal`, `artifacts_collected`, or
+`provider_error` events to Agent Memory with exact operation, conversation,
+user-message, assistant-message, account, and artifact identities.
+
+Provider capabilities and active custody accounts are available through the
+same broker using `provider_capabilities`.  Artifact downloads are committed
+through Universe Storage before their locators are published.  Ordinary send
+paths do not browse provider history: ChatGPT consumes the mutation stream;
+hosted browser adapters collect the response only as part of the mutation.
+Ambiguity returns to the provider queue, whose fenced attempt generation is
+the only authority allowed to send another turn.
+
+The Electron client and public CLI remain queue clients.  They do not receive
+leases or call provider implementations directly; their queue worker reaches
+this actuator through the central provider-transport service.
+
+The low-level B4PT0R resources remain the ChatGPT implementation. Inside the
+credential-custody process, `client.chatgpt.operations` composes those
+resources into complete Chat-mode turns without introducing a second HTTP
+transport. Calls outside custody are rejected:
+
+```python
+os.environ["B4PT0R_PROVIDER_CUSTODY_ACTIVE"] = "1"  # custody runtime only
 result = client.chatgpt.operations.send(
     "Read the attached source and return the finished package.",
     attachment_paths=["source.zip"],

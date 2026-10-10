@@ -5,7 +5,7 @@ The package intentionally exposes existing execution surfaces without creating
 parallel provider, transport, or memory authorities.
 """
 
-__version__ = "0.6.4"
+__version__ = "0.9.0"
 
 from .agent_memory import AgentMemoryClient
 from .remote_shell import RemoteShellClient
@@ -39,6 +39,15 @@ from .resources.responses_websocket import (
     ResponsesWebSocketError,
 )
 from .codex_client import *
+from .provider_actuation import (
+    ParentOperation,
+    ProviderPromptRequest,
+    ProviderResultEnvelope,
+    UnifiedProviderActuator,
+    configure_default_actuator,
+    prompt,
+)
+from .provider_actuation_client import ProviderActuationClient
 
 __all__ = [
     "AgentMemoryClient",
@@ -74,4 +83,11 @@ __all__ = [
     "load_tokens",
     "save_tokens",
     "TokenStore",
+    "ParentOperation",
+    "ProviderPromptRequest",
+    "ProviderResultEnvelope",
+    "UnifiedProviderActuator",
+    "configure_default_actuator",
+    "prompt",
+    "ProviderActuationClient",
 ]

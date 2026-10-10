@@ -357,6 +357,9 @@ class ComputerUseXProviderAdapter:
         # and every environment resolves the same writable domain root instead
         # of inventing an environment-local credential/state location.
         os.environ.setdefault("COMPUTERUSEX_RUNTIME_ROOT", "/runtime/worker/computerusex")
+        os.environ.setdefault("XDG_DATA_HOME", "/runtime/worker/xdg-data")
+        os.environ.setdefault("XDG_STATE_HOME", "/runtime/worker/xdg-state")
+        os.environ.setdefault("XDG_CACHE_HOME", "/runtime/worker/xdg-cache")
         source = Path(os.environ.get(
             "COMPUTERUSEX_SOURCE", "/runtime/source/current/automation-computeruse-vision/src"
         ))

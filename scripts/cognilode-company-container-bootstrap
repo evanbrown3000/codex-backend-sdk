@@ -11,6 +11,7 @@ import json
 import hashlib
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -19,6 +20,21 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE = ROOT / "deploy/compose/company-chatmode.yml"
 SELF = "cognilode-company-containers.service"
+
+
+def notify_service(state: str) -> None:
+    """Let the sole host unit restart a reconciliation loop that stops moving."""
+    address = os.environ.get("NOTIFY_SOCKET", "")
+    if not address:
+        return
+    if address.startswith("@"):
+        address = "\0" + address[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as channel:
+            channel.sendto(state.encode("utf-8"), address)
+    except OSError:
+        # A container reconciliation can still run outside systemd for recovery.
+        pass
 
 
 def prepare_portable_aws(project: str, image: str, uid: int, gid: int) -> None:
@@ -248,7 +264,9 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
     synced = runtime / "shared/source/current/codex-backend-sdk"
     memory_applied = runtime / "shared/memory-source-applied"
     service_hash_path = runtime / "shared/compose-service-digests.json"
+    notify_service("READY=1\nSTATUS=Reconciling company containers")
     while True:
+        notify_service("WATCHDOG=1")
         candidate = synced / "deploy/compose/company-chatmode.yml"
         if candidate.is_file():
             selected = subprocess.run(["git", "-C", str(synced), "rev-parse", "HEAD"],
@@ -291,6 +309,7 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
                                             "-f", str(candidate), "up", "-d", "--no-deps",
                                             *changed], env=env, check=True,
                                            timeout=150 if "chatmode" in changed else 300)
+                        notify_service("WATCHDOG=1")
                         save_service_hashes(service_hash_path, current_hashes)
                     except subprocess.TimeoutExpired as exc:
                         if "chatmode" in changed:
@@ -314,6 +333,7 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
             retire_standalone_adopter(project, applied_compose, runtime, env)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             print(f"standalone adopter retirement pending: {exc}", flush=True)
+        notify_service("WATCHDOG=1")
         memory_source = runtime / "shared/source/current/memory-stock-canonical"
         if (memory_source / ".git").exists():
             revision = subprocess.run(["git", "-c", "safe.directory=*", "-C", str(memory_source),
@@ -332,6 +352,7 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
                     temporary.write_text(revision + "\n", encoding="utf-8")
                     temporary.replace(memory_applied)
                     print(f"memory source applied: {revision}", flush=True)
+        notify_service("WATCHDOG=1")
         time.sleep(30)
 
 
@@ -405,7 +426,12 @@ def main() -> int:
                     "/auth", "/operator", "/deploy", "/memory-auth", "/relay"],
                    stdout=subprocess.DEVNULL, check=True, timeout=60)
     command = ["docker", "compose", "--project-name", project, "-f", str(COMPOSE), "up", "-d"]
-    subprocess.run(command, env=env, check=True, timeout=180)
+    try:
+        subprocess.run(command, env=env, check=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        if not release_stalled_chatmode_replacement(project, runtime):
+            raise
+        subprocess.run(command, env=env, check=True, timeout=180)
     save_service_hashes(runtime / "shared/compose-service-digests.json",
                         compose_service_hashes(project, COMPOSE, env))
     (runtime / "shared/compose-config-applied.sha256").write_text(

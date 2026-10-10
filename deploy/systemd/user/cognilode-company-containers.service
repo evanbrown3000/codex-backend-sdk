@@ -4,9 +4,12 @@ After=network-online.target docker.service
 Wants=network-online.target
 
 [Service]
-Type=exec
+Type=notify
+NotifyAccess=main
 ExecStart=%h/Projects/codex-backend-sdk/scripts/cognilode-company-container-bootstrap
 TimeoutStartSec=0
+TimeoutStopSec=30s
+WatchdogSec=7min
 Restart=always
 RestartSec=30s
 

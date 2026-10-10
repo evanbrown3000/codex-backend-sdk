@@ -214,15 +214,31 @@ def _publish_central_installation_event(value: dict) -> None:
         "target": TARGET,
         "files": files,
     }
+    runtime_generation = {
+        "schema": "cognilode.runtime_generation.v1",
+        "event_id": f"{value['environment_id']}:codex-runtime:{PIN}:{TARGET}",
+        "authority": "evanbrown3000/cognilode-codex",
+        "environment_id": value["environment_id"],
+        "runtime_id": "modified-codex",
+        "generation_id": PIN,
+        "source_revision": PIN,
+        "target": TARGET,
+        "observed_at": value["installed_at"],
+        "entrypoints": ["codex", "managed-codex"],
+        "active_binary": value["active_binary"],
+    }
     try:
         CENTRAL_LEDGER.parent.mkdir(parents=True, exist_ok=True)
         with CENTRAL_LEDGER.open("a+", encoding="utf-8") as stream:
             fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
             stream.seek(0)
-            if not any(json.loads(line).get("event_id") == event_id
-                       for line in stream if line.strip()):
+            existing = {json.loads(line).get("event_id") for line in stream if line.strip()}
+            pending = [record for record in (central, runtime_generation)
+                       if record["event_id"] not in existing]
+            if pending:
                 stream.seek(0, os.SEEK_END)
-                stream.write(json.dumps(central, sort_keys=True) + "\n")
+                stream.writelines(json.dumps(record, sort_keys=True) + "\n"
+                                  for record in pending)
                 stream.flush()
                 os.fsync(stream.fileno())
     except OSError as error:

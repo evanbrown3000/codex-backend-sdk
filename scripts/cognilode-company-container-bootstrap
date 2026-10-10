@@ -480,14 +480,31 @@ def reconcile_host_managed_codex(project: str, runtime: Path) -> None:
              "installed_at": time.time(), "kind": "managed_codex_runtime_installation",
              "target": "linux-x86_64", "entrypoints": ["codex", "managed-codex"],
              "codex_version": version.stdout.strip()}
+    runtime_event = {
+        "schema": "cognilode.runtime_generation.v1",
+        "event_id": f"evanpc-host:codex-runtime:{release_pin}:linux-x86_64",
+        "authority": "evanbrown3000/cognilode-codex",
+        "environment_id": "evanpc-host",
+        "runtime_id": "modified-codex",
+        "generation_id": release_pin,
+        "source_revision": pin,
+        "rust_tree": tree,
+        "target": "linux-x86_64",
+        "observed_at": time.time(),
+        "entrypoints": ["codex", "managed-codex"],
+        "codex_version": version.stdout.strip(),
+    }
     ledger.parent.mkdir(parents=True, exist_ok=True)
     with ledger.open("a+", encoding="utf-8") as stream:
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
         stream.seek(0)
-        if not any(json.loads(line).get("event_id") == event_id
-                   for line in stream if line.strip()):
+        existing = {json.loads(line).get("event_id") for line in stream if line.strip()}
+        pending = [record for record in (event, runtime_event)
+                   if record["event_id"] not in existing]
+        if pending:
             stream.seek(0, os.SEEK_END)
-            stream.write(json.dumps(event, sort_keys=True) + "\n")
+            stream.writelines(json.dumps(record, sort_keys=True) + "\n"
+                              for record in pending)
             stream.flush()
             os.fsync(stream.fileno())
     print(f"host managed Codex release active: {release_pin} for selected source {pin} "

@@ -49,7 +49,14 @@ def run(_cli: str, root: Path, item: dict) -> dict:
             decisionx=item.get("decisionx") if isinstance(item.get("decisionx"), dict) else None,
         )
     except Exception as exc:
-        result = {"ok": False, "error": type(exc).__name__, "message": str(exc)}
+        if isinstance(exc, RuntimeError) and str(exc) == "idempotency_conflict":
+            # This batch is intake, not a second execution authority.  A
+            # conflict means the stable batch identity already has a durable
+            # central queue row; the rhythm actuator owns its later lifecycle.
+            result = {"ok": True, "queued": True, "idempotent_existing": True,
+                      "request_id": request_id}
+        else:
+            result = {"ok": False, "error": type(exc).__name__, "message": str(exc)}
     temporary = (job / "queue-admission.json.tmp")
     temporary.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, job / "queue-admission.json")

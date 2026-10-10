@@ -27,6 +27,12 @@ from codex_backend_sdk.provider_scheduler_client import scheduler_call
 
 STOP = False
 DRAINING = False
+CHATGPT_DEFAULT_CONCURRENCY = 10
+# A bad deployment value must not turn one credential-bearing process into an
+# unbounded thread factory.  This ceiling is local actuation policy only; the
+# biological scheduler remains the authority that decides which jobs exist and
+# which leases may be claimed.
+MAX_ACTUATION_CONCURRENCY = 32
 
 
 def provider_backend_ready(provider: str) -> bool:
@@ -47,6 +53,25 @@ def stop(*_args: object) -> None:
     # hosted-agent turn. Stop claiming new work, retain the incumbent runtime,
     # and let already-started provider operations reach terminal state.
     DRAINING = True
+
+
+def actuation_concurrency(provider: str) -> int:
+    """Return a bounded lane count without coupling native and browser lanes."""
+    if provider == "chatgpt.com":
+        configured = os.environ.get(
+            "COGNILODE_CHATGPT_MAX_PARALLEL",
+            os.environ.get(
+                "COGNILODE_PROVIDER_ACCOUNT_CONCURRENCY",
+                str(CHATGPT_DEFAULT_CONCURRENCY),
+            ),
+        )
+    else:
+        configured = os.environ.get("COGNILODE_PROVIDER_ACCOUNT_CONCURRENCY", "1")
+    try:
+        requested = int(configured)
+    except ValueError:
+        requested = CHATGPT_DEFAULT_CONCURRENCY if provider == "chatgpt.com" else 1
+    return min(MAX_ACTUATION_CONCURRENCY, max(1, requested))
 
 
 def fence(job: Mapping[str, Any]) -> dict[str, Any]:
@@ -612,10 +637,11 @@ def main() -> int:
     # as a real concurrent workforce.  Serializing the account behind one long
     # turn starves higher-order work and wastes subscription capacity. Browser
     # adapters retain one protected profile lane unless explicitly expanded.
-    default_concurrency = "10" if args.provider == "chatgpt.com" else "1"
-    max_concurrency = max(1, int(os.environ.get(
-        "COGNILODE_PROVIDER_ACCOUNT_CONCURRENCY", default_concurrency
-    )))
+    max_concurrency = actuation_concurrency(args.provider)
+    print(json.dumps({
+        "kind": "provider_actuator_ready", "provider": args.provider,
+        "device_id": device, "max_concurrency": max_concurrency,
+    }, sort_keys=True), flush=True)
 
     def launch(job: Mapping[str, Any]) -> bool:
         job_id = str(job.get("id") or "")
@@ -663,7 +689,11 @@ def main() -> int:
                 with lock:
                     active.pop(job_id, None)
 
-        threading.Thread(target=run, daemon=True, name="provider-" + job_id[:24]).start()
+        # Non-daemon job threads keep their own fence, transport response and
+        # output collection alive even if the polling loop stops unexpectedly.
+        # The cooperative drain below still provides the normal source-change
+        # handoff and waits for this same active registry to become empty.
+        threading.Thread(target=run, daemon=False, name="provider-" + job_id[:24]).start()
         return True
 
     device_ids = [device]
@@ -736,7 +766,8 @@ def main() -> int:
                 for state in ("effect_pending", "claimed"):
                     listed = scheduler_call({
                         "operation": "list_jobs", "provider": args.provider,
-                        "state": state, "assigned_device": assigned_device, "limit": 10,
+                        "state": state, "assigned_device": assigned_device,
+                        "limit": max_concurrency,
                     })
                     for job in listed.get("jobs") or []:
                         if not isinstance(job, Mapping) or job.get("id") in seen:

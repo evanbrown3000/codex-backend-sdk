@@ -199,7 +199,14 @@ def supervise(program: list[str], extra_environment: dict[str, str] | None = Non
         worker_name = Path(selected[1]).name if len(selected) > 1 else "external"
         log_root = ROOT / "supervisor-logs"
         log_root.mkdir(parents=True, exist_ok=True)
-        log_path = log_root / f"{worker_name}.log"
+        # Provider actuators share one executable basename but not one output
+        # stream.  Keep diagnostics isolated by provider so concurrent turns
+        # cannot make a ChatGPT fence look like a browser-provider failure.
+        log_identity = worker_name
+        if worker_name == "cognilode-provider-queue-actuator" and "--provider" in selected:
+            provider = selected[selected.index("--provider") + 1]
+            log_identity += "-" + provider.replace(".", "-")
+        log_path = log_root / f"{log_identity}.log"
         if log_path.is_file() and log_path.stat().st_size > 5_000_000:
             log_path.replace(log_path.with_suffix(".log.previous"))
         log_stream = log_path.open("ab", buffering=0)

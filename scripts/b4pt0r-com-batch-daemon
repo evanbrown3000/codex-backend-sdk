@@ -114,10 +114,11 @@ def supervise(program: list[str], extra_environment: dict[str, str] | None = Non
     environment = os.environ.copy()
     environment.update(extra_environment or {})
     while not STOP:
-        while not STOP and not _onboarding_ready(program):
-            time.sleep(5)
-        if STOP:
-            return
+        # Each provider owns an independent clock, account lane, actuator and
+        # queue.  A ChatGPT acceptance artifact is evidence about ChatGPT; it
+        # must never disable Gemini, Claude, or Anthropic as repair/workforce
+        # fallbacks.  Provider-specific readiness is enforced by capability
+        # matching and custody leases at claim time, not by a global sequence.
         selected, signature = _sdk_worker_generation(program)
         worker_name = Path(selected[1]).name if len(selected) > 1 else "external"
         log_root = ROOT / "supervisor-logs"

@@ -75,16 +75,24 @@ def _send(payload: Mapping[str, Any]) -> dict[str, Any]:
             "0", "false", "none", "off", "disabled",
         }
         if memory_enabled:
-            foreground = memory.prompt_foreground(
-                persona=str(payload.get("memory_persona") or "company"),
-                max_tokens=int(payload.get("memory_max_tokens") or 40_000),
-            )
-            foreground_path = root / "foreground.md"
-            foreground_path.write_text(str(foreground["context"]), encoding="utf-8")
-            actual = hashlib.sha256(foreground_path.read_bytes()).hexdigest()
-            if actual != str(foreground.get("content_sha256") or ""):
-                raise RuntimeError("Agent Memory foreground content identity mismatch")
-            attachments.insert(0, str(foreground_path))
+            try:
+                foreground = memory.prompt_foreground(
+                    persona=str(payload.get("memory_persona") or "company"),
+                    max_tokens=int(payload.get("memory_max_tokens") or 40_000),
+                )
+            except Exception as exc:
+                # Prompt transport is the availability boundary.  Memory is an
+                # enrichment layer and records its own liveness; an unavailable
+                # foreground projection must not turn an otherwise valid,
+                # rhythm-fenced provider operation into a permanent outage.
+                foreground = {"state": "unavailable", "error": type(exc).__name__}
+            else:
+                foreground_path = root / "foreground.md"
+                foreground_path.write_text(str(foreground["context"]), encoding="utf-8")
+                actual = hashlib.sha256(foreground_path.read_bytes()).hexdigest()
+                if actual != str(foreground.get("content_sha256") or ""):
+                    raise RuntimeError("Agent Memory foreground content identity mismatch")
+                attachments.insert(0, str(foreground_path))
         if payload.get("rendered_conversation"):
             rendered = root / "conversation.md"
             rendered.write_text(str(payload["rendered_conversation"]), encoding="utf-8")

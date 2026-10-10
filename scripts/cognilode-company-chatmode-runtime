@@ -68,24 +68,49 @@ def release_for(source: Path) -> tuple[Path, Path]:
             builder = Path(sys.executable)
         subprocess.run([str(builder), "-m", "venv", "--clear", str(release)],
                        check=True, timeout=300)
-        # The runtime builder image already carries the packaging backend.  A
-        # fresh isolated build environment redownloaded that backend for every
-        # source generation, leaving provider custody pinned behind minutes of
-        # redundant network work.  Reuse the immutable venv's build tooling;
-        # dependency resolution and installation remain owned by pip.
-        install = [str(release / "bin" / "python"), "-m", "pip", "install",
-                   "--no-cache-dir", "--no-build-isolation", str(source)]
         universe = Path(os.environ.get(
             "COGNILODE_UNIVERSE_STORAGE_ROOT", "/runtime/source/current/universe-storage"
         )).resolve()
-        if universe.is_dir():
-            install.append(str(universe))
         computerusex = Path(os.environ.get(
             "COGNILODE_COMPUTERUSEX_PROJECT_ROOT",
             "/runtime/source/current/automation-computeruse-vision",
         )).resolve()
-        subprocess.run(install, check=True, timeout=900)
-        if computerusex.is_dir():
+        # Source generations normally change company code, not the third-party
+        # dependency set.  Seed the new, non-relocatable venv from the newest
+        # complete environment, then overlay synchronized domain sources.  It
+        # removes a network/build-backend round trip from every commit while
+        # retaining a full pip bootstrap for the first generation.
+        base_cli = latest_complete_cli()
+        if base_cli is not None:
+            base_release = base_cli.parent.parent
+            base_sites = sorted(base_release.glob("lib/python*/site-packages"))
+            new_sites = sorted(release.glob("lib/python*/site-packages"))
+            if not base_sites or not new_sites:
+                raise RuntimeError("immutable release site-packages unavailable")
+            shutil.copytree(base_sites[-1], new_sites[-1], dirs_exist_ok=True)
+            overlays = [(source / "codex_backend_sdk", new_sites[-1] / "codex_backend_sdk")]
+            if universe.is_dir():
+                overlays.append((universe / "src" / "universe_storage", new_sites[-1] / "universe_storage"))
+            if computerusex.is_dir():
+                overlays.append((computerusex / "src" / "computerusex", new_sites[-1] / "computerusex"))
+            for origin, destination in overlays:
+                if origin.is_dir():
+                    if destination.exists():
+                        shutil.rmtree(destination)
+                    shutil.copytree(origin, destination)
+            cli.write_text(
+                f"#!{release / 'bin' / 'python'}\n"
+                "from codex_backend_sdk.cli import main\n"
+                "raise SystemExit(main())\n", encoding="utf-8",
+            )
+            cli.chmod(0o755)
+        else:
+            install = [str(release / "bin" / "python"), "-m", "pip", "install",
+                       "--no-cache-dir", str(source)]
+            if universe.is_dir():
+                install.append(str(universe))
+            subprocess.run(install, check=True, timeout=900)
+        if computerusex.is_dir() and base_cli is None:
             # ComputerUseX is an internal source dependency whose optional
             # domain packages are not all published on PyPI.  Installing its
             # declared dependency graph makes a cold-start release impossible

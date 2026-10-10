@@ -544,38 +544,14 @@ def main() -> int:
     # than converting every source update into a retry.  The batch supervisor
     # deliberately grants this process a long drain window; remain alive so
     # the existing transport and collector can publish their terminal result.
-    drain_deadline = time.monotonic() + max(300.0, float(os.environ.get(
-        "COGNILODE_PROVIDER_GENERATION_DRAIN_SECONDS", "2700"
-    )))
-    while time.monotonic() < drain_deadline:
+    while True:
         with lock:
             if not active:
                 break
         time.sleep(1.0)
-
-    # A source-generation handoff must not strand jobs after begin_effect.
-    # Provider transports are deliberately isolated in daemon threads so the
-    # actuator can continue heartbeating, but daemon threads disappear when
-    # this generation exits.  Hand every unfinished fence back to the central
-    # scheduler before exit; the scheduler remains the only component allowed
-    # to authorize the retry on the successor immutable generation.
-    with lock:
-        interrupted = list(active.values())
-    for job in interrupted:
-        try:
-            scheduler_call({
-                "operation": "release_job", **fence(job),
-                "provider_state": "provider_runtime_interrupted",
-                "reason": "immutable_provider_generation_handoff",
-                "retry_after_seconds": 1,
-            }, timeout=15)
-        except Exception as exc:
-            print(json.dumps({
-                "kind": "provider_actuator_handoff_release_failed",
-                "provider": args.provider,
-                "job_id": str(job.get("id") or ""),
-                "error": type(exc).__name__ + ":" + str(exc)[:300],
-            }), flush=True)
+    # Never release or destroy an authorized provider effect at a wall-clock
+    # generation deadline. The sender retains its live thread until it records
+    # the terminal receipt (or the scheduler's persisted effect lease expires).
     return 0
 
 

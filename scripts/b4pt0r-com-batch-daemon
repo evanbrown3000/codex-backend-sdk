@@ -140,14 +140,18 @@ def supervise(program: list[str], extra_environment: dict[str, str] | None = Non
             mutation_worker = worker_name in {
                 "cognilode-provider-queue-actuator", "cognilode-chatmode-queue-worker",
             }
-            drain_seconds = (max(300, float(os.environ.get(
-                "COGNILODE_PROVIDER_GENERATION_DRAIN_SECONDS", "2700"
-            ))) if mutation_worker else 30.0)
-            try:
-                process.wait(timeout=drain_seconds)
-            except subprocess.TimeoutExpired:
-                process.kill()
+            if mutation_worker:
+                # Accepted/in-turn provider effects outlive source generations.
+                # Keep this supervisor alive until the worker has recorded a
+                # terminal receipt; a fixed drain timeout would kill daemon
+                # threads and lose that accepted turn.
                 process.wait()
+            else:
+                try:
+                    process.wait(timeout=30.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
         returncode = process.poll()
         log_stream.close()
         event = {

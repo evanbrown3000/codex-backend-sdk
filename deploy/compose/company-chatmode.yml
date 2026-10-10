@@ -82,6 +82,10 @@ services:
   provider-transport:
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
+    # Docker must not SIGKILL an accepted in-turn send while Compose is
+    # applying a source generation. Scheduler effect leases are at least an
+    # hour; the supervisor additionally waits for terminal receipts.
+    stop_grace_period: 2h
     # Docker bridge forwarding is intentionally unavailable on the host.  The
     # credential-bearing transport must nevertheless reach provider mutation
     # endpoints; use the host network rather than silently timing every ChatGPT
@@ -160,6 +164,7 @@ services:
     tmpfs: *company_aws_cli_cache
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
+    stop_grace_period: 2h
     networks:
       - company-universe
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
@@ -719,6 +724,7 @@ services:
     tmpfs: *company_aws_cli_cache
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
+    stop_grace_period: 2h
     network_mode: bridge
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
     working_dir: /runtime/source/current/codex-manager

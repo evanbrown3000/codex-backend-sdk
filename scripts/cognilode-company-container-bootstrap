@@ -40,6 +40,16 @@ def notify_service(state: str) -> None:
         pass
 
 
+def run_with_watchdog(command: list[str], *, env: dict[str, str]) -> None:
+    """Run a potentially long Compose handoff without a destructive timeout."""
+    child = subprocess.Popen(command, env=env)
+    while child.poll() is None:
+        notify_service("WATCHDOG=1")
+        time.sleep(5)
+    if child.returncode:
+        raise subprocess.CalledProcessError(child.returncode, command)
+
+
 def prepare_portable_aws(project: str, image: str, uid: int, gid: int) -> None:
     """Create credential_process custody after one central broker readback.
 
@@ -314,6 +324,13 @@ def release_stalled_chatmode_replacement(project: str, runtime: Path) -> bool:
                         and item.get("State") == "created"), None)
     if not old or not replacement:
         return False
+    # A failed Compose client timeout is not permission to destroy a provider
+    # effect. Leave the old container and Created replacement under the
+    # bootstrap supervisor until scheduler and transport custody are quiescent.
+    active = provider_mutations_active(runtime)
+    if active is None or active != 0:
+        print("Chatmode replacement deferred while provider effect is active or unknown", flush=True)
+        return False
     old_id = old.get("ID", "")
     replacement_id = replacement.get("ID", "")
     if not old_id or not replacement_id or old_id == replacement_id:
@@ -327,15 +344,14 @@ def release_stalled_chatmode_replacement(project: str, runtime: Path) -> bool:
             pass
     print(f"bounded Chatmode replacement: stopping old={old_id} "
           f"preserving created={replacement_id}", flush=True)
-    # `docker stop` sends TERM, then KILL after the grace period. If its client
-    # stalls behind the old container's drain, target the same exact ID with a
-    # bounded KILL. Neither command removes a container or a volume.
+    # Stop only after all provider effects are terminal. Never convert a
+    # Compose timeout into a forced container kill.
     try:
-        subprocess.run(["docker", "stop", "--time", "10", old_id],
-                       check=True, timeout=35, stdout=subprocess.DEVNULL)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        subprocess.run(["docker", "kill", "--signal", "KILL", old_id],
-                       check=True, timeout=20, stdout=subprocess.DEVNULL)
+        subprocess.run(["docker", "stop", "--time", "7200", old_id],
+                       check=True, timeout=7230, stdout=subprocess.DEVNULL)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        print(f"Chatmode graceful stop remains pending: {exc}", flush=True)
+        return False
     temporary = receipt.with_suffix(".tmp")
     temporary.write_text(json.dumps({"schema": "cognilode.chatmode-replacement-stop.v1",
                                      "old_container_id": old_id,
@@ -481,10 +497,9 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
                             # Each selected service is reconciled against its own
                             # resolved config. Do not cascade through dependencies:
                             # their unchanged long-running work must keep its lease.
-                            subprocess.run(["docker", "compose", "--project-name", project,
-                                            "-f", str(candidate), "up", "-d", "--no-deps",
-                                            *changed], env=env, check=True,
-                                           timeout=150 if "chatmode" in changed else 300)
+                            run_with_watchdog(["docker", "compose", "--project-name", project,
+                                               "-f", str(candidate), "up", "-d", "--no-deps",
+                                               *changed], env=env)
                         notify_service("WATCHDOG=1")
                         applied_hashes = dict(current_hashes)
                         if deferred and "codex-builder" in previous_hashes:

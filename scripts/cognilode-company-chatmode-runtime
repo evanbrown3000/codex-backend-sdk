@@ -208,22 +208,16 @@ def prepare_frontier() -> tuple[Path, Path, Path]:
 
 
 def drain(process: subprocess.Popen) -> None:
-    """Let admitted turns finish, but never let an obsolete generation wedge custody."""
+    """Drain safely; accepted provider turns have no source-generation timeout."""
     if process.poll() is not None:
         return
     # Signal the supervisor only.  It owns a cooperative drain protocol for
     # the queue actuator and its streamed provider children; signalling the
     # whole process group would kill those children before they could finish.
     process.terminate()
-    timeout = float(os.environ.get("COGNILODE_PROVIDER_GENERATION_DRAIN_SECONDS", "2700"))
-    try:
-        process.wait(timeout=max(300.0, timeout))
-    except subprocess.TimeoutExpired:
-        # Jobs are deterministic queue operations.  The next generation will
-        # submit unresolved work through the singular queue rather than leave
-        # provider custody permanently pinned to obsolete code.
-        os.killpg(process.pid, signal.SIGKILL)
-        process.wait()
+    # The batch runner owns accepted in-turn sends. Never kill it on a wall
+    # clock: wait for terminal receipt handling and its own clean exit.
+    process.wait()
 
 
 def prepare_while_live(process: subprocess.Popen) -> tuple[Path, Path, Path]:

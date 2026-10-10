@@ -252,10 +252,23 @@ def main() -> int:
                 # from the checkout that produced the fallback release; the
                 # normal generation comparison below will hand over once the
                 # exact frontier release exists.
-                fallback_revision = interpreter.parent.parent.name
-                fallback_script = (root / "checkouts/codex-backend-sdk" /
-                                   fallback_revision / "scripts" / options.script)
-                fallback_generation = content_generation(fallback_script)
+                fallback_identity = interpreter.parent.parent.name
+                # Composite immutable releases append dependency identities to
+                # the SDK checkout revision (for example ``<sdk>-<cux>``).  The
+                # source checkout is keyed only by the SDK revision.  Treating
+                # the composite release directory as a checkout name made a
+                # cold-start fallback impossible and removed provider.sock while
+                # a moving frontier built.
+                checkout_candidates = [fallback_identity]
+                if "-" in fallback_identity:
+                    checkout_candidates.append(fallback_identity.split("-", 1)[0])
+                fallback_script = next(
+                    (root / "checkouts/codex-backend-sdk" / revision / "scripts" / options.script
+                     for revision in checkout_candidates
+                     if (root / "checkouts/codex-backend-sdk" / revision / "scripts" / options.script).is_file()),
+                    None,
+                )
+                fallback_generation = content_generation(fallback_script) if fallback_script else None
                 if fallback_generation is None:
                     interpreter = None
                 else:

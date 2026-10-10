@@ -10,6 +10,7 @@ import signal
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 HERE = Path(__file__).resolve().parent
@@ -166,12 +167,20 @@ def launch_prepared(runner: Path, cli: Path) -> subprocess.Popen:
     )
 
 
-def replace_supervisor(source: Path) -> None:
+def replace_supervisor(source: Path, draining_pids: list[int] | None = None) -> None:
     """Continue supervision with the synchronized generation's own code."""
     supervisor = (source / "scripts" / "cognilode-company-chatmode-runtime").resolve()
     # Source convergence may advance the Git worktree in place, so equal
     # filesystem paths do not imply equal executable generations.
-    os.execve(sys.executable, [sys.executable, str(supervisor)], os.environ.copy())
+    environment = os.environ.copy()
+    inherited = [int(value) for value in environment.get(
+        "COGNILODE_DRAINING_PROVIDER_PIDS", ""
+    ).split(",") if value.strip().isdigit()]
+    inherited.extend(draining_pids or [])
+    environment["COGNILODE_DRAINING_PROVIDER_PIDS"] = ",".join(
+        str(value) for value in sorted(set(inherited))
+    )
+    os.execve(sys.executable, [sys.executable, str(supervisor)], environment)
 
 
 def source_revision(source: Path) -> str:
@@ -229,17 +238,40 @@ def prepare_frontier() -> tuple[Path, Path, Path]:
             return candidate, runner, cli
 
 
-def drain(process: subprocess.Popen) -> None:
+def _reap(pid: int) -> None:
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
+
+
+def reap_inherited_drains() -> None:
+    """Reap old generation children without making them a handoff barrier."""
+    raw = os.environ.pop("COGNILODE_DRAINING_PROVIDER_PIDS", "")
+    for value in raw.split(","):
+        if value.strip().isdigit():
+            threading.Thread(target=_reap, args=(int(value),), daemon=True).start()
+
+
+def drain(process: subprocess.Popen, *, handoff: bool = True) -> list[int]:
     """Drain safely; accepted provider turns have no source-generation timeout."""
     if process.poll() is not None:
-        return
+        return []
     # Signal the supervisor only.  It owns a cooperative drain protocol for
     # the queue actuator and its streamed provider children; signalling the
     # whole process group would kill those children before they could finish.
     process.terminate()
-    # The batch runner owns accepted in-turn sends. Never kill it on a wall
-    # clock: wait for terminal receipt handling and its own clean exit.
-    process.wait()
+    if not handoff:
+        process.wait()
+        return []
+    try:
+        process.wait(timeout=5.0)
+        return []
+    except subprocess.TimeoutExpired:
+        # The retiring generation remains alive only to finish already accepted
+        # effects. Its generation-scoped daemon lock permits the successor to
+        # start immediately; queue leases still prevent duplicate mutation.
+        return [process.pid]
 
 
 def prepare_while_live(process: subprocess.Popen) -> tuple[Path, Path, Path]:
@@ -264,6 +296,7 @@ def prepare_while_live(process: subprocess.Popen) -> tuple[Path, Path, Path]:
 def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+    reap_inherited_drains()
     source = active_source()
     active_revision = source_revision(source)
     bootstrap_cli = latest_complete_cli()
@@ -273,7 +306,8 @@ def main() -> int:
     if bootstrap_cli is not None and not target_cli.is_file():
         process = launch_prepared(source / "scripts" / "b4pt0r-com-batch-daemon", bootstrap_cli)
         source, runner, cli = prepare_while_live(process)
-        drain(process)
+        for pid in drain(process):
+            threading.Thread(target=_reap, args=(pid,), daemon=True).start()
         process = launch_prepared(runner, cli)
     else:
         source, runner, cli = prepare_frontier()
@@ -313,14 +347,14 @@ def main() -> int:
                     time.sleep(2)
                     continue
                 candidate, runner, cli = prepare_frontier()
-                drain(process)
+                draining = drain(process)
                 # A source cutover includes the supervisor itself, not only its
                 # children.  Otherwise an old bootstrap process can keep stale
                 # release/install semantics forever while merely launching new
                 # worker scripts beneath it.  Candidate preparation happens
                 # before the drain, so provider custody remains live during the
                 # potentially slow immutable-release build.
-                replace_supervisor(candidate)
+                replace_supervisor(candidate, draining)
                 source = candidate
                 active_revision = source_revision(candidate)
                 pending_generation = None
@@ -331,7 +365,7 @@ def main() -> int:
                 pending_frontier_since = 0.0
         time.sleep(2)
     if process.poll() is None:
-        drain(process)
+        drain(process, handoff=False)
     return 0
 
 

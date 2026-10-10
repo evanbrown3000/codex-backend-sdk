@@ -276,7 +276,12 @@ def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     ROOT.mkdir(parents=True, exist_ok=True)
-    daemon_lock = (ROOT / ".batch-daemon.lock").open("a+")
+    # A source handoff may overlap the retiring generation while one accepted
+    # provider turn drains. Central queue leases and effect fences—not a
+    # process-global file lock—provide mutation singularity. Scope this lock to
+    # the immutable generation so a successor can serve the other providers.
+    generation = os.environ.get("COGNILODE_GENERATION_FENCE_IDENTITY", "legacy")[:24]
+    daemon_lock = (ROOT / f".batch-daemon.{generation}.lock").open("a+")
     try:
         fcntl.flock(daemon_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:

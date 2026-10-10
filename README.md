@@ -109,6 +109,15 @@ Cognilode operator endpoint. `transfer` obtains the centralized Markdown
 rendering and supplies it as a physical `conversation.md` attachment to a new
 or existing ChatGPT conversation.
 
+Provider-broker sends also obtain the current selected Agent Memory foreground
+and upload it as a physical `foreground.md` attachment before invoking the
+existing B4PT0R operation. The selected task bytes remain unchanged. The
+provider result records the persona, foreground content identity, selected
+token count, durable handle, and source ledger consumed by that turn. A bare
+Agent Memory service origin is normalized to the existing conversation,
+ingestion, and foreground routes, so the broker can use the same client against
+the central container or the Cognilode relay.
+
 ## App Server pass-through bridge
 
 `cognilode-b4pt0r-app-server` (also installed as

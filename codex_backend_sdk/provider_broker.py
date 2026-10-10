@@ -8,6 +8,7 @@ provider credential is returned across this boundary.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -51,8 +52,24 @@ def _send(payload: Mapping[str, Any]) -> dict[str, Any]:
     client = OpenAI().authenticate()
     attachments = [str(value) for value in payload.get("attachments") or []]
     prompt = str(payload.get("prompt") or "")
+    memory = AgentMemoryClient(use_broker=False)
+    foreground: dict[str, Any] = {}
     with tempfile.TemporaryDirectory(prefix="b4pt0r-operation-") as directory:
         root = Path(directory)
+        memory_enabled = str(payload.get("memory_context", "required")).casefold() not in {
+            "0", "false", "none", "off", "disabled",
+        }
+        if memory_enabled:
+            foreground = memory.prompt_foreground(
+                persona=str(payload.get("memory_persona") or "company"),
+                max_tokens=int(payload.get("memory_max_tokens") or 40_000),
+            )
+            foreground_path = root / "foreground.md"
+            foreground_path.write_text(str(foreground["context"]), encoding="utf-8")
+            actual = hashlib.sha256(foreground_path.read_bytes()).hexdigest()
+            if actual != str(foreground.get("content_sha256") or ""):
+                raise RuntimeError("Agent Memory foreground content identity mismatch")
+            attachments.insert(0, str(foreground_path))
         if payload.get("rendered_conversation"):
             rendered = root / "conversation.md"
             rendered.write_text(str(payload["rendered_conversation"]), encoding="utf-8")
@@ -71,7 +88,7 @@ def _send(payload: Mapping[str, Any]) -> dict[str, Any]:
         )
         turn = result.get("turn") if isinstance(result.get("turn"), Mapping) else {}
         try:
-            memory = AgentMemoryClient(use_broker=False).record_chatgpt_turn(
+            memory_receipt = memory.record_chatgpt_turn(
                 conversation_id=str(result.get("conversation_id") or ""),
                 user_message_id=str(result.get("user_message_id") or ""),
                 assistant_message_id=str(turn.get("assistant_message_id") or ""),
@@ -82,7 +99,7 @@ def _send(payload: Mapping[str, Any]) -> dict[str, Any]:
                 provider_receipt=turn.get("model_receipt") or result.get("stream") or {},
             )
         except Exception as exc:
-            memory = {"ingested": False, "error": type(exc).__name__, "message": str(exc)}
+            memory_receipt = {"ingested": False, "error": type(exc).__name__, "message": str(exc)}
         return {
             "ok": True,
             "conversation_id": result.get("conversation_id"),
@@ -91,7 +108,12 @@ def _send(payload: Mapping[str, Any]) -> dict[str, Any]:
             "assistant_text": turn.get("assistant_text") or "",
             "provider_receipt": turn.get("model_receipt") or result.get("stream") or {},
             "artifacts": _artifact_rows(turn),
-            "agent_memory": memory,
+            "agent_memory": memory_receipt,
+            "memory_foreground": {
+                key: foreground.get(key)
+                for key in ("persona_id", "content_sha256", "selected_tokens", "foreground_handle", "selected")
+                if foreground.get(key) is not None
+            },
         }
 
 

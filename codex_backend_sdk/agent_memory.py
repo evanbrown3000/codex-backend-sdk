@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import hashlib
 import os
 from typing import Any, Mapping
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import requests
 
@@ -23,15 +23,29 @@ class AgentMemoryClient:
         timeout: float = 120,
         use_broker: bool = True,
     ) -> None:
-        self.endpoint = (
+        selected_endpoint = (
             endpoint
             or os.environ.get("AGENT_MEMORY_ENDPOINT")
             or "https://cognilode.com/api/operator/conversations"
         ).rstrip("/")
+        endpoint_path = urlsplit(selected_endpoint).path.rstrip("/")
+        if not endpoint_path:
+            selected_endpoint += "/api/operator/conversations"
+            endpoint_path = "/api/operator/conversations"
+        self.endpoint = selected_endpoint
         self.legacy_endpoint = (
             os.environ.get("AGENT_MEMORY_INGEST_ENDPOINT")
-            or self.endpoint.rsplit("/conversations", 1)[0] + "/agent-memory"
+            or (
+                self.endpoint.rsplit("/conversations", 1)[0] + "/agent-memory"
+                if endpoint_path.endswith("/conversations")
+                else self.endpoint.rstrip("/") + "/api/operator/agent-memory"
+            )
         ).rstrip("/")
+        self.foreground_endpoint = (
+            self.endpoint.rsplit("/conversations", 1)[0] + "/foreground"
+            if endpoint_path.endswith("/conversations")
+            else self.endpoint.rstrip("/") + "/api/operator/foreground"
+        )
         self.token = operator_token(token)
         self.timeout = timeout
         self._session = requests.Session()
@@ -132,6 +146,23 @@ class AgentMemoryClient:
                 if isinstance(result.get(key), str):
                     return result[key]
         raise RuntimeError("Agent Memory response omitted rendered conversation Markdown.")
+
+    def prompt_foreground(
+        self,
+        *,
+        persona: str = "company",
+        max_tokens: int = 40_000,
+    ) -> dict[str, Any]:
+        value = self._request(
+            "GET",
+            self.foreground_endpoint,
+            params={"persona": persona, "max_tokens": max_tokens},
+        )
+        if isinstance(value, Mapping) and isinstance(value.get("result"), Mapping):
+            value = value["result"]
+        if not isinstance(value, Mapping) or not str(value.get("context") or "").strip():
+            raise RuntimeError("Agent Memory response omitted selected prompt foreground")
+        return dict(value)
 
     def ingest(self, observation: Mapping[str, Any]) -> Any:
         return self._request("POST", self.legacy_endpoint, body={"operation": "ingest_conversation", **dict(observation)})

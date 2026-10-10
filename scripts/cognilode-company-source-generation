@@ -110,12 +110,12 @@ def request_stop(_signum, _frame):
     STOP = True
 
 
-def drain(socket_path: Path) -> int | None:
+def custody_state(socket_path: Path, operation: str = "active") -> tuple[int, bool] | None:
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
             channel.settimeout(5)
             channel.connect(str(socket_path))
-            channel.sendall(b'{"operation":"drain"}\n')
+            channel.sendall((json.dumps({"operation": operation}) + "\n").encode())
             data = bytearray()
             while b'\n' not in data and len(data) < 4096:
                 piece = channel.recv(4096)
@@ -123,11 +123,16 @@ def drain(socket_path: Path) -> int | None:
                     break
                 data.extend(piece)
         reply = json.loads(data.split(b'\n', 1)[0])
-        if reply.get("draining") is True and type(reply.get("active")) is int:
-            return max(0, reply["active"])
+        if type(reply.get("draining")) is bool and type(reply.get("active")) is int:
+            return max(0, reply["active"]), reply["draining"]
     except (OSError, ValueError, IndexError, TypeError):
         pass
     return None
+
+
+def drain(socket_path: Path) -> int | None:
+    state = custody_state(socket_path, "drain")
+    return state[0] if state is not None and state[1] else None
 
 
 def main() -> int:
@@ -206,6 +211,12 @@ def main() -> int:
                     # later revisions replace the target without resetting it.
                     if pending_since == 0.0:
                         pending_since = time.monotonic()
+                # A higher-level reconciler may already have fenced admission.
+                # With no admitted send left, retaining the drained generation
+                # for the debounce interval is pure provider downtime; adopt
+                # the newest complete generation immediately.
+                if custody_state(options.drain_socket) == (0, True):
+                    break
                 if time.monotonic() - pending_since >= stability_seconds:
                     break
             else:

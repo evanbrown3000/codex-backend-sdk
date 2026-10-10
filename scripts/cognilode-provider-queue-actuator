@@ -413,6 +413,8 @@ def reject_prohibited_elapsed_time_padding(job: Mapping[str, Any]) -> bool:
         "visible heartbeat" in prompt
         or "heartbeat loop" in prompt
         or ("separate python tool calls" in prompt and "sleep" in prompt)
+        or ("time.sleep" in prompt and "heartbeat" in prompt)
+        or ("six separate" in prompt and "heartbeat" in prompt)
         or ("do not finish before" in prompt and "heartbeat" in prompt)
     )
     if not prohibited:

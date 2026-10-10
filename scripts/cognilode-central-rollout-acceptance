@@ -155,7 +155,15 @@ def rpc(process: subprocess.Popen, request_id: int, method: str, params: dict,
         try:
             message = json.loads(line)
         except ValueError as error:
-            raise RuntimeError(f'native {method} non_json_reply') from error
+            stripped = line.strip()
+            kind = ('blank' if not stripped else
+                'content_length' if stripped.lower().startswith('content-length:') else
+                'sse_data' if stripped.startswith('data:') else
+                'log_prefix' if stripped.startswith(('INFO ', 'WARN ', 'ERROR ', '[')) else
+                'other')
+            fingerprint = hashlib.sha256(line.encode()).hexdigest()[:12]
+            raise RuntimeError(f'native {method} non_json_reply kind={kind} '
+                f'bytes={len(line.encode())} sha12={fingerprint}') from error
         if message.get('id') != request_id:
             continue
         if 'error' in message:

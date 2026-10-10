@@ -18,13 +18,6 @@ import uuid
 
 from codex_backend_sdk.generation_fence import GenerationManifest, require_generation
 
-# ComputerUseX durable state belongs on the provider runtime's writable company
-# custody mount.  The container home itself is intentionally not writable.
-os.environ.setdefault(
-    "COMPUTERUSEX_RUNTIME_ROOT",
-    str(Path.home() / ".local" / "share" / "cognilode" / "computerusex"),
-)
-
 SENDER = Path(__file__).with_name("cognilode-b4pt0r-chatmode")
 COLLECTOR = Path(__file__).with_name("cognilode-b4pt0r-collect")
 COUNTER_LOCK = threading.Lock()

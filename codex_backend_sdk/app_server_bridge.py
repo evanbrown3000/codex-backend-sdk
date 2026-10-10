@@ -22,7 +22,7 @@ from .app_server_transport import (
     LocalAppServerTransport,
     RemoteAppServerTransport,
 )
-from .bridge_provider import ProviderCommandClient
+from .bridge_provider import ProviderCommandClient, provider_queue
 from .remote_shell import RemoteShellClient
 
 
@@ -452,25 +452,33 @@ class Bridge:
             effort = params.get("effort") or params.get("reasoningEffort") or source.get("reasoning_effort")
             requested_provider = str(params.get("provider") or provider)
             input_paths = _input_paths(params)
-            provider_kind = provider.rstrip("/").removesuffix(".com")
-            requested_provider_kind = requested_provider.rstrip("/").removesuffix(".com")
-            if provider_kind == "chatgpt" and provider_conversation_id and requested_provider_kind == "chatgpt":
-                result = self.provider.continue_chatgpt(
-                    conversation_id=str(provider_conversation_id),
+            try:
+                source_queue = provider_queue(provider)
+            except ValueError:
+                source_queue = "codex.research"
+            try:
+                destination_queue = provider_queue(requested_provider)
+            except ValueError:
+                destination_queue = "codex.research"
+            if provider_conversation_id and source_queue == destination_queue:
+                result = self.provider.send_provider(
+                    provider=destination_queue,
                     prompt=prompt,
+                    conversation_id=str(provider_conversation_id),
                     parent_message_id=source.get("parent_message_id"),
+                    environment_id=self._selected_environment,
                     model=str(model) if model else None,
                     effort=str(effort) if effort else None,
                     attachments=input_paths,
                 )
             else:
-                reduced = self.memory.reduced_rollout(conversation_id) if requested_provider_kind == "codex" else {}
+                reduced = self.memory.reduced_rollout(conversation_id) if destination_queue == "codex.research" else {}
                 rendered = "" if reduced else self.memory.render_markdown(conversation_id)
                 result = self.provider.continue_from_memory(
                     source_conversation_id=conversation_id,
                     prompt=prompt,
-                    destination_provider=requested_provider if requested_provider in {"chatgpt", "codex"} else "codex",
-                    destination_conversation_id=str(provider_conversation_id) if provider_conversation_id else None,
+                    destination_provider=destination_queue,
+                    destination_conversation_id=None,
                     environment_id=self._selected_environment,
                     model=str(model) if model else None,
                     effort=str(effort) if effort else None,

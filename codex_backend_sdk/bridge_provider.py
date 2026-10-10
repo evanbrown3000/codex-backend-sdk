@@ -24,6 +24,21 @@ from .operator_auth import operator_token
 
 
 TERMINAL_STATES = {"completed", "failed", "cancelled", "held", "dead_letter"}
+PROVIDER_QUEUES = {
+    "chatgpt": "chatgpt.com", "chatgpt.com": "chatgpt.com",
+    "gemini": "gemini.com", "gemini.com": "gemini.com",
+    "claude": "claude.com", "claude.com": "claude.com",
+    "anthropic": "anthropic.com", "anthropic.com": "anthropic.com",
+    "codex": "codex.research", "codex.research": "codex.research",
+    "openai-codex": "codex.research", "codex.com": "codex.research",
+}
+
+
+def provider_queue(value: str) -> str:
+    selected = PROVIDER_QUEUES.get(str(value).strip().casefold())
+    if selected is None:
+        raise ValueError("unsupported provider: " + str(value))
+    return selected
 
 
 class ProviderCommandClient:
@@ -275,16 +290,7 @@ class ProviderCommandClient:
         neither provider credentials nor provider HTTP and therefore behaves
         identically from every environment.
         """
-        aliases = {
-            "chatgpt": "chatgpt.com", "chatgpt.com": "chatgpt.com",
-            "gemini": "gemini.com", "gemini.com": "gemini.com",
-            "claude": "claude.com", "claude.com": "claude.com",
-            "anthropic": "anthropic.com", "anthropic.com": "anthropic.com",
-            "codex": "codex.research", "codex.research": "codex.research",
-        }
-        selected = aliases.get(str(provider).strip().casefold())
-        if selected is None:
-            raise ValueError("unsupported provider: " + str(provider))
+        selected = provider_queue(provider)
         return self._enqueue({
             "provider": selected,
             "conversation_id": conversation_id,
@@ -320,8 +326,7 @@ class ProviderCommandClient:
         reduced_rollout: str | None = None,
         attachments: Sequence[str] = (),
     ) -> dict[str, Any]:
-        kind = destination_provider.rstrip("/").removesuffix(".com")
-        provider = "chatgpt.com" if kind == "chatgpt" else "codex.research"
+        provider = provider_queue(destination_provider)
         refs = [self.stage_file(path) for path in attachments]
         if reduced_rollout:
             refs.insert(0, self.stage_text(reduced_rollout, name="conversation.jsonl"))

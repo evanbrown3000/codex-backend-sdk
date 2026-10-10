@@ -163,6 +163,7 @@ def install_remote(manifest: dict) -> None:
             "source_commit": PIN,
             "host_sha256": manifest["files"]["codex-code-mode-host"]["sha256"],
             "probe": "help-exit-0",
+            "host_origin": manifest.get("host_origin") or "legacy-unspecified",
         }, separators=(",", ":")) + "\n")
         (stage / "source-commit").write_text(PIN + "\n")
         (stage / "SHA256SUMS").write_text("".join(
@@ -181,9 +182,18 @@ def publish_local() -> None:
     files = {name: RELEASE / name for name in RELEASE_FILES}
     if not all(path.is_file() for path in files.values()) or not RELEASE.joinpath(HOST_READY).is_file():
         return
+    ready = json.loads(RELEASE.joinpath(HOST_READY).read_text(encoding="utf-8"))
+    if (ready.get("schema") != "cognilode.codex-code-mode-host-ready.v1" or
+            ready.get("source_commit") != PIN or
+            ready.get("host_sha256") != digest(files["codex-code-mode-host"])):
+        raise RuntimeError("local code-mode host provenance does not match release")
+    host_origin = str(ready.get("host_origin") or "legacy-unspecified")
     manifest = {"schema": "cognilode.codex-release.v1", "source_commit": PIN,
-                "target": TARGET, "files": {name: {"sha256": digest(path), "size": path.stat().st_size}
-                                          for name, path in files.items()}}
+                "target": TARGET,
+                "files": {name: {"sha256": digest(path), "size": path.stat().st_size}
+                          for name, path in files.items()}}
+    if host_origin != "legacy-unspecified":
+        manifest["host_origin"] = host_origin
     existing = remote_manifest()
     if existing:
         if existing != manifest:

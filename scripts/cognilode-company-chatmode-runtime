@@ -73,9 +73,19 @@ def release_for(source: Path) -> tuple[Path, Path]:
             "COGNILODE_COMPUTERUSEX_PROJECT_ROOT",
             "/runtime/source/current/automation-computeruse-vision",
         )).resolve()
-        if computerusex.is_dir():
-            install.append(str(computerusex))
         subprocess.run(install, check=True, timeout=900)
+        if computerusex.is_dir():
+            # ComputerUseX is an internal source dependency whose optional
+            # domain packages are not all published on PyPI.  Installing its
+            # declared dependency graph makes a cold-start release impossible
+            # before those source domains have converged.  The provider
+            # actuator needs the synchronized ComputerUseX modules and the
+            # SDK's already-installed runtime libraries, so install the source
+            # package without asking PyPI to resolve unrelated internal names.
+            subprocess.run([
+                str(release / "bin" / "python"), "-m", "pip", "install",
+                "--no-cache-dir", "--no-deps", str(computerusex),
+            ], check=True, timeout=300)
         (release / ".complete").write_text(source.name + "\n", encoding="utf-8")
     return source / "scripts" / "b4pt0r-com-batch-daemon", release / "bin" / "b4pt0r"
 

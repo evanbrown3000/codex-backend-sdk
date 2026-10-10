@@ -137,6 +137,26 @@ def target_pin() -> str:
     return selected if len(selected) == 40 and all(ch in "0123456789abcdef" for ch in selected) else ""
 
 
+def maintain_observer(child: subprocess.Popen | None, source: Path | None,
+                      retry_at: float):
+    """Keep quota observation independent of the native sandbox release gate."""
+    current = (ROOT / "current/modified-codex-runtime/src/modified_codex/codex_quota_observer.py").resolve()
+    exited = child is not None and child.poll() is not None
+    if child is not None and (exited or source != current):
+        retire(child)
+        child = None
+        if exited:
+            retry_at = time.monotonic() + 60
+    if child is None and time.monotonic() >= retry_at and current.is_file() and CODEX.is_file():
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(ROOT / "current/modified-codex-runtime/src")
+        child = subprocess.Popen([sys.executable, "-m", "modified_codex.codex_quota_observer",
+                                  "--interval", "1800"], env=env)
+        source = current
+        print(f"Codex quota observer source generation {current}", flush=True)
+    return child, source, retry_at
+
+
 def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
@@ -159,43 +179,48 @@ def main() -> int:
         os.setgroups([])
         os.setgid(gid)
         os.setuid(uid)
-    while not STOP:
-        try:
-            codex_release = probe_bubblewrap()
-        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-            SANDBOX_READY.unlink(missing_ok=True)
-            print(f"Codex broker sandbox unavailable: {str(exc)[:200]}", flush=True)
-            time.sleep(60)
-            continue
-        broker = (CURRENT / "cognilode-codex-exec-broker").resolve()
-        quota = (ROOT / "current/modified-codex-runtime/src/modified_codex/codex_quota_observer.py").resolve()
-        if not broker.is_file() or not quota.is_file():
-            print("Codex broker waiting for synchronized source", flush=True)
-            time.sleep(5)
-            continue
-        print(f"Codex broker source generation {broker}", flush=True)
-        env = dict(os.environ)
-        env["PYTHONPATH"] = str(ROOT / "current/modified-codex-runtime/src")
-        worker = subprocess.Popen([sys.executable, str(broker)], env=env)
-        observer = subprocess.Popen([sys.executable, "-m", "modified_codex.codex_quota_observer",
-                                     "--interval", "1800"], env=env)
-        try:
-            while worker.poll() is None:
-                changed = codex_release != CODEX.resolve() or \
-                    codex_release.parent.name != target_pin() or \
-                    broker != (CURRENT / "cognilode-codex-exec-broker").resolve() or \
-                    quota != (ROOT / "current/modified-codex-runtime/src/modified_codex/codex_quota_observer.py").resolve()
-                if STOP or changed or observer.poll() is not None:
-                    DRAIN_FILE.write_text("1")
-                    if active() == 0:
-                        break
+    observer = None
+    observer_source = None
+    observer_retry_at = 0.0
+    try:
+        while not STOP:
+            observer, observer_source, observer_retry_at = maintain_observer(
+                observer, observer_source, observer_retry_at)
+            try:
+                codex_release = probe_bubblewrap()
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                SANDBOX_READY.unlink(missing_ok=True)
+                print(f"Codex broker sandbox unavailable: {str(exc)[:200]}", flush=True)
+                time.sleep(60)
+                continue
+            broker = (CURRENT / "cognilode-codex-exec-broker").resolve()
+            if not broker.is_file():
+                print("Codex broker waiting for synchronized source", flush=True)
                 time.sleep(5)
-        finally:
-            retire(worker)
-            retire(observer)
-            SANDBOX_READY.unlink(missing_ok=True)
-        if not STOP:
-            time.sleep(2)
+                continue
+            print(f"Codex broker source generation {broker}", flush=True)
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(ROOT / "current/modified-codex-runtime/src")
+            worker = subprocess.Popen([sys.executable, str(broker)], env=env)
+            try:
+                while worker.poll() is None:
+                    observer, observer_source, observer_retry_at = maintain_observer(
+                        observer, observer_source, observer_retry_at)
+                    changed = codex_release != CODEX.resolve() or \
+                        codex_release.parent.name != target_pin() or \
+                        broker != (CURRENT / "cognilode-codex-exec-broker").resolve()
+                    if STOP or changed:
+                        DRAIN_FILE.write_text("1")
+                        if active() == 0:
+                            break
+                    time.sleep(5)
+            finally:
+                retire(worker)
+                SANDBOX_READY.unlink(missing_ok=True)
+            if not STOP:
+                time.sleep(2)
+    finally:
+        retire(observer)
     return 0
 
 

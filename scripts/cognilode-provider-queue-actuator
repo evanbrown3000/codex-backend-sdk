@@ -622,11 +622,41 @@ def main() -> int:
         threading.Thread(target=run, daemon=True, name="provider-" + job_id[:24]).start()
         return True
 
+    device_ids = [device]
+    # The predecessor ChatGPT actuator advertised the environment ID directly.
+    # Keep accepting those fenced leases during rolling upgrades.
+    if args.provider == "chatgpt.com":
+        device_ids.append(args.device_id)
+
     while not STOP:
         if DRAINING:
             with lock:
-                if not active:
-                    break
+                active_count = len(active)
+            if not active_count:
+                # A rhythm tick and SIGTERM can cross after the scheduler has
+                # fenced a job but before this process has put it in `active`.
+                # Exiting there strands the queue lease until its full expiry.
+                # Drain every already-assigned claim through the incumbent
+                # generation; do not claim any new work while draining.
+                found_claim = False
+                try:
+                    for assigned_device in device_ids:
+                        listed = scheduler_call({
+                            "operation": "list_jobs", "provider": args.provider,
+                            "state": "claimed", "assigned_device": assigned_device,
+                            "limit": max_concurrency,
+                        })
+                        for job in listed.get("jobs") or []:
+                            if isinstance(job, Mapping) and launch(job):
+                                found_claim = True
+                    if not found_claim:
+                        break
+                except Exception as exc:
+                    print(json.dumps({
+                        "kind": "provider_actuator_drain_retry",
+                        "provider": args.provider,
+                        "error": type(exc).__name__ + ":" + str(exc)[:300],
+                    }), flush=True)
             time.sleep(1.0)
             continue
         try:
@@ -653,13 +683,6 @@ def main() -> int:
                     },
                 },
             })
-            device_ids = [device]
-            # The predecessor ChatGPT actuator advertised the environment ID
-            # directly.  Consume its still-fenced leases during rolling
-            # upgrades instead of waiting for them to expire or resending the
-            # provider mutation.
-            if args.provider == "chatgpt.com":
-                device_ids.append(args.device_id)
             seen = set()
             for assigned_device in device_ids:
                 for state in ("effect_pending", "claimed"):

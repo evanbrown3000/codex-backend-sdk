@@ -12,6 +12,9 @@ import uuid
 import os
 
 
+SDK_ROOT = Path(__file__).resolve().parent.parent
+
+
 def run(cli: str, root: Path, item: dict) -> dict:
     job_id = str(item.get("id") or uuid.uuid4())
     job = root / job_id
@@ -31,6 +34,13 @@ def run(cli: str, root: Path, item: dict) -> dict:
     for attachment in item.get("attachments") or []:
         command.extend(("--attach", str(Path(attachment).resolve())))
     environment = os.environ.copy()
+    # The long-lived company container deliberately survives source cutovers.
+    # Its console-script entry point may therefore have been installed from an
+    # older editable checkout.  Always import the SDK adjacent to this batch
+    # runner so a cutover changes implementation without rebuilding a container
+    # or mutating its credential volume.
+    pythonpath = environment.get("PYTHONPATH", "")
+    environment["PYTHONPATH"] = str(SDK_ROOT) + (os.pathsep + pythonpath if pythonpath else "")
     # Direct SDK sends are the same credential-custody capability as the
     # established Chat-mode sender.  Preserve that centrally authorized source
     # identity rather than falling into the policy's generic `b4pt0r` bucket.

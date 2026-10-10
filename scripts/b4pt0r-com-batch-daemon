@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import signal
 import time
 
 
@@ -18,6 +19,12 @@ CLI = os.environ.get(
     "B4PT0R_CLI",
     str(Path.home() / ".local/share/cognilode/b4pt0r-chatmode/venv-python3.12/bin/b4pt0r"),
 )
+STOP = False
+
+
+def stop(_signal, _frame):
+    global STOP
+    STOP = True
 
 
 def complete(state: Path) -> bool:
@@ -29,9 +36,11 @@ def complete(state: Path) -> bool:
 
 
 def main() -> int:
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
     ROOT.mkdir(parents=True, exist_ok=True)
     retry: dict[str, tuple[int, float]] = {}
-    while True:
+    while not STOP:
         now = time.time()
         for batch in ROOT.glob("*/batch.json"):
             state = batch.parent / "state"
@@ -47,7 +56,11 @@ def main() -> int:
             ], check=False)
             failures = 0 if result.returncode == 0 else failures + 1
             retry[str(batch)] = (failures, time.time() + min(900, 15 * (2 ** min(failures, 6))))
-        time.sleep(5)
+            if STOP:
+                break
+        if not STOP:
+            time.sleep(5)
+    return 0
 
 
 if __name__ == "__main__":

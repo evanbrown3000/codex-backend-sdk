@@ -80,18 +80,20 @@ TERMINAL_DELIVERABLE_WINDOW_SECONDS = 1800
 TERMINAL_DELIVERABLE_ABSOLUTE_SECONDS = 10800
 
 
+def unified_prompter_path() -> Path:
+    """Use the transport shipped with this exact B4PT0R source generation."""
+    return Path(__file__).with_name("cognilode-unified-provider")
+
+
 def sender_prefix() -> list[str]:
     """Route the single rhythm queue through unified prompting's provider adapter."""
     source = os.environ.get("COGNILODE_CHATMODE_AUTH_SOURCE", "codex").strip().lower()
     if source not in {"codex", "chrome"}:
         raise ValueError("COGNILODE_CHATMODE_AUTH_SOURCE must be codex or chrome")
-    unified = os.environ.get("COGNILODE_UNIFIED_PROMPTER", "").strip()
-    if not unified:
-        source_root = Path(os.environ.get("COGNILODE_COMPANY_SOURCE_ROOT", "/runtime/source"))
-        unified = str(source_root / "current/modified-codex-runtime/src/modified_codex/unified_bridge.py")
-    if not Path(unified).is_file():
+    unified = unified_prompter_path()
+    if not unified.is_file():
         raise RuntimeError("unified prompting transport is unavailable")
-    command = [sys.executable, unified, "transport", "--provider", "chatgpt.com", "--", "--auth-source", source]
+    command = [sys.executable, str(unified), "transport", "--provider", "chatgpt.com", "--", "--auth-source", source]
     if source == "chrome":
         profile = os.environ.get("COGNILODE_CHATMODE_CHROME_PROFILE", "").strip()
         if profile:
@@ -2233,7 +2235,7 @@ def health_ready() -> bool:
     if not local_ready:
         return False
     try:
-        unified = Path(os.environ.get("COGNILODE_UNIFIED_PROMPTER", "")).resolve(strict=True)
+        unified = unified_prompter_path().resolve(strict=True)
         source = unified.stat()
         if not _transport_cli_ready(str(unified), source.st_ino, source.st_size, source.st_mtime_ns):
             return False

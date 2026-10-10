@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""Queue-facing entrypoint for the SDK's central provider transport."""
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from codex_backend_sdk.provider_transport_client import main
+
+raise SystemExit(main())

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import fcntl
+import hashlib
 from pathlib import Path
 import subprocess
 import signal
@@ -24,6 +25,7 @@ CLI = os.environ.get(
 )
 STOP = False
 SUPERVISORS: list[threading.Thread] = []
+SOURCE_ROOT = Path(os.environ.get("COGNILODE_COMPANY_SOURCE_ROOT", "/runtime/source"))
 
 
 def stop(_signal, _frame):
@@ -39,12 +41,42 @@ def complete(state: Path) -> bool:
     return bool(rows) and all(row.get("returncode") == 0 for row in rows)
 
 
+def _sdk_worker_generation(program: list[str]) -> tuple[list[str], str]:
+    """Resolve SDK worker code from the moving source pointer, never stale HERE."""
+    if len(program) < 2:
+        return program, "external"
+    current = SOURCE_ROOT / "current/codex-backend-sdk/scripts" / Path(program[1]).name
+    selected = current if current.is_file() else Path(program[1])
+    dependencies = [selected]
+    if selected.name == "cognilode-chatmode-queue-worker":
+        checkout = selected.parent.parent
+        dependencies.extend([
+            selected.with_name("cognilode-unified-provider"),
+            checkout / "codex_backend_sdk/provider_transport_client.py",
+            selected.with_name("cognilode-provider-transport"),
+        ])
+    digest = hashlib.sha256()
+    try:
+        for dependency in dependencies:
+            digest.update(dependency.read_bytes())
+        signature = digest.hexdigest()
+    except OSError:
+        signature = "unavailable"
+    resolved = list(program)
+    resolved[1] = str(selected)
+    return resolved, signature
+
+
 def supervise(program: list[str], extra_environment: dict[str, str] | None = None) -> None:
     environment = os.environ.copy()
     environment.update(extra_environment or {})
     while not STOP:
-        process = subprocess.Popen(program, env=environment)
+        selected, signature = _sdk_worker_generation(program)
+        process = subprocess.Popen(selected, env=environment)
         while not STOP and process.poll() is None:
+            _, active_signature = _sdk_worker_generation(program)
+            if active_signature != signature:
+                break
             time.sleep(1)
         if process.poll() is None:
             process.terminate()
@@ -93,7 +125,7 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
         (candidate for candidate in candidates if (candidate / "computerusex").is_dir()),
         candidates[0],
     )
-    gemini_worker = computerusex / "computerusex" / "g3_gemini_agent_memory_worker.py"
+    gemini_worker = computerusex / "computerusex" / "gemini_agent_memory_worker.py"
     if "gemini.com" in requested and gemini_worker.is_file():
         pythonpath = str(computerusex)
         inherited = os.environ.get("PYTHONPATH", "")
@@ -101,7 +133,7 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
             pythonpath += os.pathsep + inherited
         workers.append(([
             sys.executable,
-            "-m", "computerusex.g3_gemini_agent_memory_worker",
+            "-m", "computerusex.gemini_agent_memory_worker",
             "--token-file", os.environ.get(
                 "COGNILODE_OPERATOR_TOKEN_FILE",
                 "/home/worker/.config/cognilode/operator-bearer",

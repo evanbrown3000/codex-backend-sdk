@@ -82,8 +82,12 @@ services:
   provider-transport:
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
-    networks:
-      - company-universe
+    # Docker bridge forwarding is intentionally unavailable on the host.  The
+    # credential-bearing transport must nevertheless reach provider mutation
+    # endpoints; use the host network rather than silently timing every ChatGPT
+    # prepare request out after sixty seconds.  All local control planes remain
+    # Unix sockets or loopback-bound services.
+    network_mode: host
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
     cpus: 1
     mem_limit: 2g
@@ -105,9 +109,9 @@ services:
       COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
       COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
       COMPUTERUSEX_CDP_ENDPOINT: ${COMPUTERUSEX_CDP_ENDPOINT:-http://172.20.0.6:9334}
-      AGENT_MEMORY_ENDPOINT: http://memory:8098/v1/conversations
-      AGENT_MEMORY_INGEST_ENDPOINT: http://memory:8098/v1/conversations/ingest
-      AGENT_MEMORY_INVENTORY_ENDPOINT: http://memory:8098/v1/inventory/events
+      AGENT_MEMORY_ENDPOINT: http://127.0.0.1:8098/v1/conversations
+      AGENT_MEMORY_INGEST_ENDPOINT: http://127.0.0.1:8098/v1/conversations/ingest
+      AGENT_MEMORY_INVENTORY_ENDPOINT: http://127.0.0.1:8098/v1/inventory/events
       PATH: /node-runtime:/usr/bin:/usr/local/bin:/bin
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro

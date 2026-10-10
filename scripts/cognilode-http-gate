@@ -36,10 +36,16 @@ def purpose(method: str, url: str) -> tuple[str, str, str]:
     if host in {"chatgpt.com", "www.chatgpt.com"} or host.endswith(".chatgpt.com"):
         if path.startswith("/api/auth/"):
             return "credential_refresh", host, path
+        # Chat-mode creates an input file with POST /backend-api/files before
+        # uploading its bytes to the returned URL. The exact create path has
+        # no trailing slash, so it must not inherit the observability gate.
+        if method in {"POST", "PUT", "PATCH"} and (
+            path == "/backend-api/files" or path.startswith("/backend-api/files/")
+            or "/conversation" in path or "/uploads" in path
+        ):
+            return "chatmode_prompt_or_upload", host, path
         if "/interpreter/download" in path or "/files/" in path:
             return "artifact_download", host, path
-        if method in {"POST", "PUT", "PATCH"} and ("/conversation" in path or "/uploads" in path):
-            return "chatmode_prompt_or_upload", host, path
         return "observability", host, path
     if host == "cognilode.com" and path.startswith("/api/operator/http-gate"):
         return "central_gate_control", host, path

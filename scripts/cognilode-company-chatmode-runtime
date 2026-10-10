@@ -109,14 +109,25 @@ def latest_complete_cli() -> Path | None:
     Completed immutable releases are safe bootstrap executables; the normal
     frontier preparation below replaces them after the current release exists.
     """
-    root = Path(os.environ.get(
-        "COGNILODE_B4PT0R_RELEASE_ROOT", "/runtime/b4pt0r-releases/locked-v2"
+    configured = Path(os.environ.get(
+        "COGNILODE_B4PT0R_RELEASE_ROOT", "/runtime/b4pt0r-releases/locked-v3-computerusex"
     ))
+    # A release-root generation is intentionally changed when dependency
+    # composition changes.  Cold-start custody must nevertheless use the newest
+    # completed predecessor while the first release in the new root is built.
+    # Searching sibling generation roots is safe because only `.complete`
+    # immutable environments qualify; it also prevents a compose/container
+    # restart from leaving every provider queue without an actuator for minutes.
+    roots = [configured]
+    parent = configured.parent
+    if parent.is_dir():
+        roots.extend(path for path in parent.iterdir() if path.is_dir() and path != configured)
     candidates = []
-    for marker in root.glob("*/.complete"):
-        cli = marker.parent / "bin" / "b4pt0r"
-        if cli.is_file():
-            candidates.append((marker.stat().st_mtime_ns, cli))
+    for root in roots:
+        for marker in root.glob("*/.complete"):
+            cli = marker.parent / "bin" / "b4pt0r"
+            if cli.is_file():
+                candidates.append((marker.stat().st_mtime_ns, cli))
     return max(candidates, default=(0, None))[1]
 
 

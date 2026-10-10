@@ -170,7 +170,17 @@ def main() -> int:
             duration = provider_seconds(job)
             if duration < MIN_PROVIDER_SECONDS:
                 reasons.append("provider_execution_shorter_than_five_minutes")
-            conversation_id = str(result.get("conversation_id") or "")
+            normalized = job.get("normalized_provider_result") if isinstance(
+                job.get("normalized_provider_result"), Mapping
+            ) else {}
+            conversation_id = str(normalized.get("conversation_id") or result.get("conversation_id") or "")
+            user_message_id = str(normalized.get("user_message_id") or "")
+            assistant_message_id = str(normalized.get("assistant_message_id") or "")
+            assistant_text = str(normalized.get("assistant_text") or "")
+            if not conversation_id or not user_message_id or not assistant_message_id:
+                reasons.append("missing_exact_provider_identity")
+            if len(assistant_text.strip()) < MIN_RESPONSE_CHARS:
+                reasons.append("superficial_provider_response")
             try:
                 rendered = response(memory, conversation_id) if conversation_id else ""
             except Exception:
@@ -194,6 +204,7 @@ def main() -> int:
                 continue
             record = {
                 "provider": provider, "job_id": job.get("id"), "conversation_id": conversation_id,
+                "user_message_id": user_message_id, "assistant_message_id": assistant_message_id,
                 "prompt_sha256": hashlib.sha256(authored.encode()).hexdigest(),
                 "response_sha256": hashlib.sha256(rendered.encode()).hexdigest(),
                 "response": rendered, "provider_seconds": duration,

@@ -25,7 +25,7 @@ def _require_central_http_gate(method: str, url: str) -> None:
         from cognilode_http_gate import require
     except ImportError:
         # Compatibility with older custody-runtime generations.
-        from control_exec.http_gate_client import require
+    from .http_gate_client import require
 
     require(method, url)
 

@@ -17,6 +17,7 @@ if not all((BEARER,NODE_ID,NODE_TOKEN)):
     raise RuntimeError('company relay custody is incomplete')
 CENTRAL=str(CUSTODY.get('central_url') or 'https://cognilode.com').rstrip('/')
 PORT=int(os.environ.get('COGNILODE_MCP_PORT','8899'))
+BIND_HOST=os.environ.get('COGNILODE_MCP_BIND_HOST','0.0.0.0')
 WORKSPACE=os.environ.get('COGNILODE_WORKSPACE','/runtime/source/current')
 HB_STATUS=os.environ.get('COGNILODE_HEARTBEAT_STATUS','')
 MAX_OUTPUT=4*1024*1024
@@ -298,4 +299,4 @@ class H(BaseHTTPRequestHandler):
             self.sendj({'jsonrpc':'2.0','id':payload.get('id'),'result':{'content':[{'type':'text','text':json.dumps({'error':str(e)})}],'isError':True}})
 
 if __name__=='__main__':
-    os.makedirs(WORKSPACE,exist_ok=True); threading.Thread(target=heartbeat,daemon=True).start(); ThreadingHTTPServer.allow_reuse_address=True; ThreadingHTTPServer(('0.0.0.0',PORT),H).serve_forever()
+    os.makedirs(WORKSPACE,exist_ok=True); threading.Thread(target=heartbeat,daemon=True).start(); ThreadingHTTPServer.allow_reuse_address=True; ThreadingHTTPServer((BIND_HOST,PORT),H).serve_forever()

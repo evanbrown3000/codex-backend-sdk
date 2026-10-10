@@ -41,8 +41,7 @@ def pending_path(pin: str) -> Path:
 def pending_state(pin: str) -> dict:
     try:
         value = json.loads(pending_path(pin).read_text())
-        if isinstance(value, dict) and value.get('source_pin') == pin and \
-                UUID.fullmatch(str(value.get('conversation_id') or '')):
+        if isinstance(value, dict) and value.get('source_pin') == pin:
             return value
     except (OSError, ValueError):
         pass
@@ -173,7 +172,7 @@ def run() -> dict:
     wait = math.ceil(deadline - time.time()) if isinstance(deadline, (int, float)) else 0
     if wait > 0:
         raise RetryDeferred(wait)
-    if pending:
+    if UUID.fullmatch(str(pending.get('conversation_id') or '')):
         conversation_id = pending['conversation_id']
         stock_thread_id = str(pending.get('stock_thread_id') or '')
     else:
@@ -258,13 +257,13 @@ if __name__ == '__main__':
             detail = str(error)[:220]
             advice = re.search(r'retry_after_seconds=(\d+)', detail)
             retry_after = min(86400, int(advice.group(1))) if advice else 0
-            if retry_after and not isinstance(error, RetryDeferred):
+            if not isinstance(error, RetryDeferred):
                 try:
                     pin = source_pin()
                     pending = pending_state(pin)
-                    if pending:
-                        pending['retry_at'] = time.time() + retry_after
-                        save_pending(pin, pending)
+                    pending['source_pin'] = pin
+                    pending['retry_at'] = time.time() + max(delay, retry_after)
+                    save_pending(pin, pending)
                 except (OSError, RuntimeError, ValueError):
                     pass
             print(json.dumps({'ok': False, 'state': 'pending' if daemon else 'failed',

@@ -189,6 +189,11 @@ def main() -> int:
                 parent_operation={"operation_id": "area1-four-provider-acceptance",
                                   "automation_order": 3, "kind": "taskflow_plan"},
             )
+            # Acceptance is an explicit bootstrap operation, not ordinary
+            # production cadence.  Release exactly one preserved biological
+            # slot through the scheduler rather than mutating clocks or
+            # waiting behind an unrelated historical rest interval.
+            scheduler_call({"operation": "rhythm_fast_forward", "provider": provider, "slots": 1})
             result = client.wait(str(queued.get("job_id") or queued.get("job", {}).get("id") or request_id))
             job = result.get("job") if isinstance(result.get("job"), Mapping) else {}
             reasons: list[str] = []

@@ -173,8 +173,13 @@ def recover_terminal(job: Mapping[str, Any]) -> bool:
     if str(job.get("provider") or "") != "chatgpt.com":
         return False
     job_id = str(job.get("id") or "")
-    generation = int(job.get("lease_generation") or (job.get("lease") or {}).get("generation") or 0)
-    prefix = f"{job_id}:queue-lease:{generation}:"
+    # A source cutover can release the scheduler lease after the provider has
+    # already written its terminal receipt.  The next claim has a newer fence,
+    # but repeating the same provider mutation is wrong.  Queue identity binds
+    # every attempt to the same immutable prompt and attachments, so recover
+    # the newest terminal receipt from any earlier lease generation and commit
+    # it under the currently held fence.
+    prefix = f"{job_id}:queue-lease:"
     root = Path(os.environ.get(
         "COGNILODE_CHATMODE_WORK_ROOT",
         str(Path.home() / ".local/share/cognilode/b4pt0r-chatmode"),

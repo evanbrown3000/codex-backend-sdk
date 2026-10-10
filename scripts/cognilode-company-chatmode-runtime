@@ -30,13 +30,19 @@ def spawn(name: str, argv: list[str]) -> subprocess.Popen:
 
 
 def stop_children(children: dict[str, tuple[list[str], subprocess.Popen]], *, drain_queue: bool = False) -> None:
+    # An accepted/ambiguous provider mutation is fenced in D1 before POST and
+    # reconciled by the next queue generation. A wedged old worker must not
+    # keep the rhythm child stopped forever during a source cutover.
+    grace = max(30, min(900, int(os.environ.get("COGNILODE_CHATMODE_DRAIN_GRACE_SECONDS", "120"))))
     for _, process in children.values():
         if process.poll() is None:
             process.terminate()
     for name, (_, process) in children.items():
         try:
-            process.wait(timeout=None if drain_queue and name == "queue" else 20)
+            process.wait(timeout=grace if drain_queue and name == "queue" else 20)
         except subprocess.TimeoutExpired:
+            print(f"{name} drain exceeded {grace if drain_queue and name == 'queue' else 20}s; "
+                  "continuing from durable queue custody", flush=True)
             process.kill()
             process.wait()
 

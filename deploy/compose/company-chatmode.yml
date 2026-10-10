@@ -130,6 +130,8 @@ services:
     environment:
       HOME: /home/worker
       COGNILODE_CHATMODE_PORTABLE: "1"
+      COGNILODE_CHATMODE_RUNTIME_EPOCH: bounded-drain-20261010
+      COGNILODE_CHATMODE_DRAIN_GRACE_SECONDS: "120"
       PYTHONPATH: /runtime/source/current/codex-backend-sdk/gate:/runtime/source/current/modified-codex-runtime/src
       COGNILODE_HTTP_GATE_SOCKET: /runtime/http-gate/gate.sock
       COGNILODE_HTTP_GATE_FALLBACK_LOG: /runtime/http-gate/fallback.jsonl

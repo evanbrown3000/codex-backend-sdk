@@ -17,7 +17,7 @@ import subprocess
 
 ROOT = Path(os.environ.get("COGNILODE_COMPANY_SOURCE_ROOT", "/runtime/source"))
 REPOS = ("taskflow-orchestration-history", "research-plan-execute", "agent-memory",
-         "cognilode-cloudflare-pages-site", "codex-backend-sdk", "cognilode-codex",
+         "universe-storage", "cognilode-cloudflare-pages-site", "codex-backend-sdk", "cognilode-codex",
          # These are runtime dependencies, not vendored B4PT0R features.  The
          # immutable source frontier must nevertheless publish them so the
          # Area-1 actuator and Area-2 scheduler never fall back to an EvanPC

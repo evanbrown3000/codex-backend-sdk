@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import fcntl
+import hashlib
 from pathlib import Path
 import signal
 import shutil
@@ -34,6 +35,19 @@ def active_source() -> Path:
     return root.resolve()
 
 
+def release_revision(source: Path) -> str:
+    """Identify the SDK plus synchronized provider-domain dependencies."""
+    identities = [source.name]
+    for variable, fallback in (
+        ("COGNILODE_UNIVERSE_STORAGE_ROOT", "/runtime/source/current/universe-storage"),
+        ("COGNILODE_COMPUTERUSEX_PROJECT_ROOT", "/runtime/source/current/automation-computeruse-vision"),
+    ):
+        dependency = Path(os.environ.get(variable, fallback)).resolve()
+        identities.append(dependency.name if dependency.exists() else "missing")
+    digest = hashlib.sha256("|".join(identities).encode()).hexdigest()[:16]
+    return f"{source.name}-{digest}"
+
+
 def release_for(source: Path) -> tuple[Path, Path]:
     """Build one immutable CLI environment for a synchronized SDK revision."""
     release_root = Path(os.environ.get(
@@ -47,7 +61,7 @@ def release_for(source: Path) -> tuple[Path, Path]:
     # git metadata may share a moving branch with other checkouts, so
     # ``git rev-parse HEAD`` can name a newer revision than the files in this
     # directory.  Key the runtime to the immutable directory identity.
-    revision = source.name
+    revision = release_revision(source)
     release = release_root / revision
     cli = release / "bin" / "b4pt0r"
     marker = release / ".complete"
@@ -156,7 +170,7 @@ def replace_supervisor(source: Path) -> None:
 def source_revision(source: Path) -> str:
     # Converged checkouts are named by immutable revision. Their embedded git
     # metadata may share a moving branch and cannot identify these files.
-    return source.name
+    return release_revision(source)
 
 
 def launch(source: Path) -> subprocess.Popen:
@@ -248,7 +262,7 @@ def main() -> int:
     bootstrap_cli = latest_complete_cli()
     target_cli = Path(os.environ.get(
         "COGNILODE_B4PT0R_RELEASE_ROOT", "/runtime/b4pt0r-releases/locked-v2"
-    )) / source.name / "bin" / "b4pt0r"
+    )) / source_revision(source) / "bin" / "b4pt0r"
     if bootstrap_cli is not None and not target_cli.is_file():
         process = launch_prepared(source / "scripts" / "b4pt0r-com-batch-daemon", bootstrap_cli)
         source, runner, cli = prepare_while_live(process)

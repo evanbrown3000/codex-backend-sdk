@@ -77,10 +77,14 @@ def service_python(source: Path) -> Path | None:
     # metadata can point at a shared moving branch and is not its identity.
     revision = repository.name
     for root in roots:
-        release = root / revision
-        interpreter = release / "bin/python"
-        if interpreter.is_file() and (release / ".complete").is_file():
-            return interpreter
+        complete: list[tuple[int, Path]] = []
+        for release in (root / revision, *root.glob(revision + "-*")):
+            interpreter = release / "bin/python"
+            marker = release / ".complete"
+            if interpreter.is_file() and marker.is_file():
+                complete.append((marker.stat().st_mtime_ns, interpreter))
+        if complete:
+            return max(complete)[1]
     return None
 
 

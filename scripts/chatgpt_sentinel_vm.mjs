@@ -20,32 +20,32 @@ globalThis.atob ??= value => Buffer.from(value, "base64").toString("binary");
 globalThis.btoa ??= value => Buffer.from(value, "binary").toString("base64");
 
 const H=0,U=1,W=2,G=3,K=4,q=5,J=6,Y=7,X=8,F=9,Z=10,Q=11,$=12,E=13,T=14,N=15,R=16,I=17,A=18,O=19,S=20,C=21,L=22,V=23,D=24,NOOP1=25,NOOP2=26,M=27,NOOP3=28,LESS=29,FN=30,MUL=33,DIV=34,SUB=35;
-const state = new Map();
-let steps = 0;
-let halted = false;
-
 function xor(value, secret) {
   let result = "";
   for (let i=0; i<value.length; i++) result += String.fromCharCode(value.charCodeAt(i) ^ secret.charCodeAt(i % secret.length));
   return result;
 }
 
-async function run() {
-  while (!halted && (state.get(F) || []).length > 0) {
-    const [op, ...args] = state.get(F).shift() || [];
-    const result = state.get(op)?.(...args);
-    if (result && typeof result.then === "function") await result;
-    steps++;
-    // Opaque programs may keep replenishing the instruction queue. Yield so
-    // the protocol's 500 ms fallback timer can fire instead of being starved
-    // by an unbounded synchronous microtask chain.
-    if ((steps & 255) === 0) await new Promise(resolve => setImmediate(resolve));
-  }
-}
+function solve(payload, secret, deadline = Date.now() + 500) {
+  // Each nested H program needs an independent VM. Sharing the outer state
+  // map cleared its instruction queue and return registers, while serializing
+  // nested solve() behind the awaiting outer solve() self-deadlocked.
+  const state = new Map();
+  let steps = 0;
+  let halted = false;
+  let done = false;
 
-function initialize() {
-  state.clear();
-  state.set(H, value => solve(value, String(state.get(R))));
+  async function run() {
+    while (!halted && (state.get(F) || []).length > 0) {
+      const [op, ...args] = state.get(F).shift() || [];
+      const result = state.get(op)?.(...args);
+      if (result && typeof result.then === "function") await result;
+      steps++;
+      if ((steps & 255) === 0) await new Promise(resolve => setImmediate(resolve));
+    }
+  }
+
+  state.set(H, value => solve(value, String(state.get(R)), deadline));
   state.set(U, (out,a) => state.set(out, xor(String(state.get(a)), String(state.get(R)))));
   state.set(W, (out,value) => state.set(out,value));
   state.set(q, (out,value) => { const old=state.get(out); Array.isArray(old) ? old.push(state.get(value)) : state.set(out,old+state.get(value)); });
@@ -72,18 +72,11 @@ function initialize() {
   state.set(M, (out,value) => Promise.resolve(state.get(value)).then(v=>state.set(out,v)));
   state.set(L, (out,queue) => { const old=[...(state.get(F)||[])]; state.set(F,[...queue]); return run().catch(e=>state.set(out,String(e))).finally(()=>state.set(F,old)); });
   state.set(NOOP1,()=>{}); state.set(NOOP2,()=>{}); state.set(NOOP3,()=>{});
-}
 
-function solve(payload, secret) {
-  // A Sentinel program can invoke opcode H to evaluate a nested program.  The
-  // old process-wide promise chain queued that nested evaluation behind the
-  // outer evaluation which was awaiting it, creating a self-deadlock until
-  // Python killed this process at its 30-second prepare timeout.  This CLI
-  // handles one top-level request per process, so isolation already provides
-  // serialization; nested programs must execute immediately.
   return new Promise((resolve,reject) => {
-    initialize(); steps=0; halted=false; state.set(R,secret); let done=false;
-    const timer=setTimeout(()=>{ if(!done){done=true;halted=true;resolve(String(steps));}},500);
+    state.set(R,secret);
+    const timer=setTimeout(()=>{ if(!done){done=true;halted=true;resolve(String(steps));}},
+                           Math.max(0, deadline - Date.now()));
     state.set(G,value=>{if(!done){done=true;halted=true;clearTimeout(timer);resolve(btoa(String(value)));}});
     state.set(K,value=>{if(!done){done=true;halted=true;clearTimeout(timer);reject(new Error(btoa(String(value))));}});
     state.set(FN,(out,target,params,queue)=>{const array=Array.isArray(queue), names=array?params:[], instructions=(array?queue:params)||[];state.set(out,(...values)=>{if(done)return;const old=[...(state.get(F)||[])];if(array)for(let i=0;i<names.length;i++)state.set(names[i],values[i]);state.set(F,[...instructions]);return run().then(()=>state.get(target)).catch(String).finally(()=>state.set(F,old));});});

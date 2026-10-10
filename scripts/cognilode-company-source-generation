@@ -255,8 +255,7 @@ def main() -> int:
             if active_generation is None:
                 time.sleep(2)
                 continue
-            if (active_generation[1] != signature
-                    and service_python(active_generation[0]) is not None):
+            if active_generation[1] != signature:
                 if pending_signature != active_generation[1]:
                     pending_signature = active_generation[1]
                     # Coalesce a moving frontier, but do not let continuous
@@ -265,13 +264,14 @@ def main() -> int:
                     # later revisions replace the target without resetting it.
                     if pending_since == 0.0:
                         pending_since = time.monotonic()
+                candidate_ready = service_python(active_generation[0]) is not None
                 # A higher-level reconciler may already have fenced admission.
                 # With no admitted send left, retaining the drained generation
                 # for the debounce interval is pure provider downtime; adopt
                 # the newest complete generation immediately.
-                if custody_state(options.drain_socket) == (0, True):
+                if candidate_ready and custody_state(options.drain_socket) == (0, True):
                     break
-                if time.monotonic() - pending_since >= stability_seconds:
+                if candidate_ready and time.monotonic() - pending_since >= stability_seconds:
                     break
             else:
                 pending_signature = None

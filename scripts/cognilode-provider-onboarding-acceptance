@@ -276,6 +276,22 @@ def main() -> int:
     }
     proof.setdefault("rejected_attempts", [])
     proof.setdefault("inflight", {})
+    # Source upgrades preserve rejected-attempt history. Enrich older rows
+    # from their durable scheduler envelopes so subsequent turns continue the
+    # actual conversation and physical work instead of repeatedly restarting
+    # the same shallow task.
+    for row in proof["rejected_attempts"]:
+        if not isinstance(row, dict) or not row.get("job_id"):
+            continue
+        if row.get("assistant_message_id") and row.get("artifacts"):
+            continue
+        observed = scheduler_call({"operation": "get_job", "job_id": row["job_id"]})
+        historical = observed.get("job") if isinstance(observed.get("job"), Mapping) else {}
+        normalized = historical.get("normalized_provider_result") if isinstance(
+            historical.get("normalized_provider_result"), Mapping) else {}
+        row.setdefault("assistant_message_id", str(normalized.get("assistant_message_id") or ""))
+        row.setdefault("response", str(normalized.get("assistant_text") or ""))
+        row.setdefault("artifacts", physical_outputs(historical))
     # A source cutover may inherit proof written by an older acceptance
     # generation.  Never grandfather a row that lacks the exact provider
     # identities or the required physical evidence; demote it to an attempt
@@ -330,8 +346,12 @@ def main() -> int:
                 authored += (
                     f" The previous {len(prior)} provider turn(s) were automatically rejected: "
                     f"{json.dumps(prior[-1].get('reasons') or [])}. Do not repeat their superficial package. "
-                    "Perform a materially deeper in-place integration and use the full provider-side interval."
+                    "Resume from the prior conversation and returned package, preserve every sound change, "
+                    "and perform a materially deeper in-place integration using the full provider-side interval."
                 )
+                for path in prior[-1].get("artifacts") or []:
+                    if Path(str(path)).is_file() and str(path) not in inherited:
+                        inherited.append(str(path))
             packet_identity = hashlib.sha256()
             packet_identity.update(authored.encode())
             for inherited_path in inherited:
@@ -342,6 +362,10 @@ def main() -> int:
             if not job_id:
                 queued = client.send_provider(
                     provider=provider, prompt=authored, attachments=tuple(inherited), request_id=request_id,
+                    conversation_id=(str(prior[-1].get("conversation_id") or "") or None)
+                    if prior else None,
+                    parent_message_id=(str(prior[-1].get("assistant_message_id") or "") or None)
+                    if prior else None,
                     project="unified-provider-actuation", role="provider-implementation-worker",
                     source="area1-sequential-onboarding", prompt_authority="taskflow_plan",
                     priority=ACCEPTANCE_PRIORITY,
@@ -421,6 +445,9 @@ def main() -> int:
             if reasons:
                 proof["rejected_attempts"].append({"provider": provider, "attempt": attempt,
                     "job_id": job.get("id") or result.get("job_id"), "conversation_id": conversation_id,
+                    "assistant_message_id": assistant_message_id,
+                    "response": rendered,
+                    "artifacts": artifacts,
                     "provider_seconds": duration, "provider_reasoning_seconds": reasoning_seconds,
                     "provider_assistant_events": reasoning_events, "reasons": reasons})
                 state_path.write_text(json.dumps(proof, ensure_ascii=False, indent=2, sort_keys=True) + "\n")

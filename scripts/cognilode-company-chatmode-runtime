@@ -279,12 +279,48 @@ def _reap(pid: int) -> None:
         pass
 
 
+def _descendant_has_provider_broker(pid: int) -> bool:
+    frontier = [pid]
+    seen: set[int] = set()
+    while frontier:
+        current = frontier.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        try:
+            root = Path("/proc") / str(current)
+            command = (root / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+            children = (root / "task" / str(current) / "children").read_text().split()
+        except OSError:
+            continue
+        if "codex_backend_sdk.provider_broker" in command:
+            return True
+        frontier.extend(int(value) for value in children if value.isdigit())
+    return False
+
+
+def _reap_draining_generation(pid: int) -> None:
+    """Keep live transports, but retire generations with no transport left."""
+    # The predecessor already received SIGTERM and had a handoff grace window.
+    # A live broker owns the only socket that can still collect an accepted
+    # provider turn; without one, retaining its supervisors merely publishes
+    # duplicate capability heartbeats forever.
+    while _descendant_has_provider_broker(pid):
+        time.sleep(2)
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    _reap(pid)
+
+
 def reap_inherited_drains() -> None:
     """Reap old generation children without making them a handoff barrier."""
     raw = os.environ.pop("COGNILODE_DRAINING_PROVIDER_PIDS", "")
     for value in raw.split(","):
         if value.strip().isdigit():
-            threading.Thread(target=_reap, args=(int(value),), daemon=True).start()
+            threading.Thread(target=_reap_draining_generation,
+                             args=(int(value),), daemon=True).start()
 
 
 def drain(process: subprocess.Popen, *, handoff: bool = True) -> list[int]:

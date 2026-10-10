@@ -42,7 +42,9 @@ def request_json(base: str, path: str, token: str, *, method: str = 'POST',
         except (ValueError, UnicodeDecodeError):
             failure = {}
         code = str(failure.get('error_code') or failure.get('error') or 'http_error')[:80]
-        raise CentralHTTPError(f'central_http_{error.code}:{code}') from error
+        detail = str(failure.get('detail') or '').replace('\n', ' ').replace('\r', ' ')[:160]
+        raise CentralHTTPError(f'central_http_{error.code}:{code}' +
+            (f':{detail}' if detail else '')) from error
     if not isinstance(result, dict):
         raise CentralHTTPError('central_response_not_object')
     return result

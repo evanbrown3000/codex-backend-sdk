@@ -492,6 +492,17 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
     service_hash_path = runtime / "shared/compose-service-digests.json"
     notify_service("READY=1\nSTATUS=Reconciling company containers")
     while True:
+        # Adopt accepted bootstrap source generations from this permanent host
+        # reconciler without relying on a foreground/systemd restart.
+        next_bootstrap = synced / "scripts/cognilode-company-container-bootstrap"
+        if next_bootstrap.is_file() and next_bootstrap.resolve() != Path(__file__).resolve():
+            selected_revision = subprocess.run(
+                ["git", "-C", str(synced), "rev-parse", "HEAD"],
+                capture_output=True, text=True, check=False, timeout=20).stdout.strip()
+            if selected_revision:
+                os.execve(sys.executable, [sys.executable, str(next_bootstrap)],
+                          {**os.environ, "COGNILODE_BOOTSTRAP_FROM_SYNC": "1",
+                           "COGNILODE_BOOTSTRAP_LOADED_REVISION": selected_revision})
         # Docker may successfully create a replacement container but fail
         # before starting it. Compose hashes do not change in that case, so
         # digest-only reconciliation would strand custody services in Created

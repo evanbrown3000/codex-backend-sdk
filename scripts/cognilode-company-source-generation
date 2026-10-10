@@ -178,6 +178,11 @@ def main() -> int:
         # retires the whole tree atomically.
         child = subprocess.Popen([str(interpreter), str(selected), *child_args],
                                  env=os.environ.copy(), start_new_session=True)
+        pending_signature: str | None = None
+        pending_since = 0.0
+        stability_seconds = float(os.environ.get(
+            "COGNILODE_PROVIDER_SOURCE_STABILITY_SECONDS", "120"
+        ))
         while child.poll() is None and not STOP:
             active_generation = content_generation(current)
             if active_generation is None:
@@ -185,7 +190,13 @@ def main() -> int:
                 continue
             if (active_generation[1] != signature
                     and service_python(active_generation[0]) is not None):
-                break
+                if pending_signature != active_generation[1]:
+                    pending_signature = active_generation[1]
+                    pending_since = time.monotonic()
+                elif time.monotonic() - pending_since >= stability_seconds:
+                    break
+            else:
+                pending_signature = None
             time.sleep(2)
         if child.poll() is None:
             last_report = 0.0

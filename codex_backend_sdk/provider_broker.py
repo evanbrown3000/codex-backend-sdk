@@ -106,7 +106,7 @@ def _lease_authority() -> ProviderLeaseAuthority:
 def _actuator(authority: ProviderLeaseAuthority) -> UnifiedProviderActuator:
     return UnifiedProviderActuator(
         lease_authority=authority,
-        publisher=AgentMemoryEventPublisher(AgentMemoryClient(use_broker=False)),
+        publisher=AgentMemoryEventPublisher(AgentMemoryClient(use_broker=False, timeout=20)),
     )
 
 
@@ -123,7 +123,7 @@ def _publish_lease(lease: Any) -> dict[str, Any]:
         "source": {"type": "b4pt0r_provider_custody", "provenance": "capability_issued"},
     }
     try:
-        return AgentMemoryClient(use_broker=False).ingest(observation)
+        return AgentMemoryClient(use_broker=False, timeout=10).ingest(observation)
     except Exception as exc:
         return {"ingested": False, "error": type(exc).__name__}
 

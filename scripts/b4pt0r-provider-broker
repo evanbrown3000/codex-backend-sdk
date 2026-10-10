@@ -70,7 +70,7 @@ def managed_control(payload: dict) -> dict:
         return {"ok": True, "action": action,
                 "result": request(url, "GET")}
     if action in {"environment_list", "environment_current", "environment_select"}:
-        name = {"environment_list": "node_list", "environment_current": "environment_current",
+        name = {"environment_list": "node_list", "environment_current": "route_get",
                 "environment_select": "environment_select"}[action]
         arguments = {"actor_id": actor}
         if action == "environment_select":

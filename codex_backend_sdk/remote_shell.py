@@ -43,6 +43,8 @@ class RemoteShellClient:
     def call(self, name: str, arguments: Mapping[str, Any] | None = None) -> Any:
         if self._broker.available() and not self.token:
             typed = {"node_list": "environment_list",
+                     # The incumbent relay names persisted selection readback
+                     # route_get; it does not implement environment_current.
                      "environment_current": "environment_current",
                      "environment_select": "environment_select"}.get(name)
             if typed:

@@ -10,7 +10,7 @@ import json
 import os
 from pathlib import Path
 import sys
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
@@ -26,8 +26,74 @@ def request(url: str, method: str, body=None, params=None):
     headers = {"Accept": "application/json", "Authorization": "Bearer " + token()}
     if data is not None:
         headers["Content-Type"] = "application/json"
-    with urlopen(Request(url, data=data, headers=headers, method=method), timeout=180) as response:
+    with urlopen(Request(url, data=data, headers=headers, method=method), timeout=45) as response:
         return json.load(response)
+
+
+def managed_control(payload: dict) -> dict:
+    """Narrow authenticated control relay; never enters provider scheduling."""
+    action = str(payload.get("action") or "")
+    actor = str(payload.get("actor_id") or "default")
+    args = payload.get("arguments") or {}
+    if not isinstance(args, dict):
+        raise ValueError("managed_control_arguments_must_be_object")
+    token()
+    if action in {"conversation_list", "conversation_search", "conversation_read"}:
+        base = os.environ.get("AGENT_MEMORY_ENDPOINT", "https://cognilode.com/api/operator/agent-memory").rstrip("/")
+        endpoint = base.rsplit("/agent-memory", 1)[0] + "/conversations" if base.endswith("/agent-memory") else base
+        params = {}
+        if action == "conversation_list":
+            params = {"limit": str(min(100, max(1, int(args.get("limit", 50))))),
+                      "projection": str(args.get("projection") or "app-server-summary"),
+                      "provider": str(args.get("provider") or "chatgpt.com")}
+            if args.get("cursor"):
+                params["offset"] = str(args["cursor"])
+            url = endpoint + "?" + urlencode(params)
+        elif action == "conversation_search":
+            query = str(args.get("query") or "").strip()
+            if not query:
+                raise ValueError("conversation_search_query_required")
+            params = {"q": query, "limit": str(min(100, max(1, int(args.get("limit", 50))))),
+                      "projection": str(args.get("projection") or "app-server-summary"),
+                      "provider": str(args.get("provider") or "chatgpt.com")}
+            url = endpoint + "?" + urlencode(params)
+        else:
+            conversation_id = str(args.get("conversation_id") or "").strip()
+            if not conversation_id:
+                raise ValueError("conversation_read_id_required")
+            params = {"reader_id": str(args.get("reader_id") or actor),
+                      "peek": str(bool(args.get("peek", False))).lower(),
+                      "projection": str(args.get("projection") or "read-model")}
+            if args.get("after") and not args.get("full"):
+                params["cursor"] = str(args["after"])
+            url = endpoint + "/" + quote(conversation_id, safe="") + "?" + urlencode(params)
+        return {"ok": True, "action": action,
+                "result": request(url, "GET")}
+    if action in {"environment_list", "environment_current", "environment_select"}:
+        name = {"environment_list": "node_list", "environment_current": "environment_current",
+                "environment_select": "environment_select"}[action]
+        arguments = {"actor_id": actor}
+        if action == "environment_select":
+            environment_id = str(args.get("environment_id") or "").strip()
+            if not environment_id:
+                raise ValueError("environment_select_id_required")
+            arguments["environment_id"] = environment_id
+        body = {"jsonrpc": "2.0", "id": "managed-control", "method": "tools/call",
+                "params": {"name": name, "arguments": arguments}}
+        raw = request(os.environ.get("COGNILODE_REMOTE_SHELL_ENDPOINT",
+                    "https://cognilode.com/api/operator/remote-shell/mcp"), "POST", body)
+        result = raw.get("result", raw) if isinstance(raw, dict) else raw
+        if isinstance(result, dict) and result.get("structuredContent") is not None:
+            result = result["structuredContent"]
+        elif isinstance(result, dict) and isinstance(result.get("content"), list):
+            blocks = result["content"]
+            if len(blocks) == 1 and isinstance(blocks[0], dict):
+                try:
+                    result = json.loads(blocks[0].get("text", ""))
+                except (TypeError, ValueError):
+                    pass
+        return {"ok": True, "action": action, "actor_id": actor, "result": result}
+    raise ValueError("unsupported_managed_control_action")
 
 
 def provider_send(payload: dict) -> dict:
@@ -59,11 +125,11 @@ def main() -> int:
     payload = json.loads(sys.stdin.readline())
     operation = payload.pop("operation", "")
     if operation == "managed_control_request":
-        source_root = Path(__file__).resolve().parent.parent
-        if str(source_root) not in sys.path:
-            sys.path.insert(0, str(source_root))
-        from codex_backend_sdk.provider_broker import execute
-        result = execute({"operation": operation, **payload})
+        try:
+            result = managed_control(payload)
+        except Exception as exc:
+            result = {"ok": False, "error": "managed_control_relay_failed",
+                      "detail": type(exc).__name__}
     elif operation == "agent_memory_request":
         base = os.environ.get("AGENT_MEMORY_ENDPOINT", "https://cognilode.com/api/operator/agent-memory").rstrip("/")
         target = str(payload.get("url") or "").strip() or (

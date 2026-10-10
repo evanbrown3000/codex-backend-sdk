@@ -212,7 +212,7 @@ def _publish_central_installation_event(value: dict) -> None:
         "installed_at": value["installed_at"],
         "kind": "managed_codex_runtime_installation",
         "target": TARGET,
-        "files": files,
+        "files": value["files"],
     }
     runtime_generation = {
         "schema": "cognilode.runtime_generation.v1",

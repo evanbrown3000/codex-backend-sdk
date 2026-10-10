@@ -79,7 +79,10 @@ def test_saved_terminal_tmp_zip_is_downloaded_without_conversation_poll(monkeypa
         return [{"name": "result.zip", "sandbox_path": "/tmp/result.zip",
                  "path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}]
     monkeypatch.setattr(collector.sender, "download_interpreter_artifacts", download)
-    monkeypatch.setattr(collector.sender, "admit_central_conversation", lambda **_kw: {
+    monkeypatch.setenv("COGNILODE_AWS_PURPOSE", "artifact-write")
+    monkeypatch.setenv("COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET", "example-private-bucket")
+    monkeypatch.setattr(collector.sender, "admit_central_conversation", lambda **_kw: pytest.fail("replayed prior turn"))
+    monkeypatch.setattr(collector.sender, "admit_central_artifacts_only", lambda **_kw: {
         "ok": True, "central_readback_verified": True, "conversation_id": "conv-1",
         "central_artifacts": [{"sha256": "returned"}]})
     outcome = collector.collect(receipt, allow_provider_read=False)
@@ -107,6 +110,36 @@ def test_saved_terminal_artifact_waits_for_credential_holder(monkeypatch, tmp_pa
     monkeypatch.setattr(collector.sender, "codex_identity", lambda: pytest.fail("provider credentials read in queue"))
     monkeypatch.setattr(collector, "get_conversation", lambda *_args: pytest.fail("conversation polled"))
     assert collector.collect(receipt, allow_provider_read=False)["state"] == "artifact_recovery_delegated"
+
+
+def test_artifact_only_admission_preserves_verified_turn(monkeypatch):
+    prompt, response = "Original prompt", "Original terminal"
+    raw_sha = "a" * 64
+    raw_source = {"uri": "s3://private/source.sse", "sha256": raw_sha,
+                  "readback_verified": True}
+    prior = {"ok": True, "central_readback_verified": True,
+             "conversation_id": "conv-1", "central_prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+             "central_response_sha256": hashlib.sha256(response.encode()).hexdigest(),
+             "central_raw_stream_sha256": raw_sha, "central_raw_sse_source": raw_source,
+             "central_artifacts": []}
+    artifact = {"name": "result.zip", "sha256": "b" * 64,
+                "storage_uri": "s3://private/result.zip", "readback_verified": True}
+    monkeypatch.setattr(collector.sender, "archive_returned_artifact", lambda _item: artifact)
+    posts = []
+    def post(body):
+        posts.append(body)
+        if body["operation"] == "record_conversation":
+            return {"stored": True}
+        return {"conversation": {"downloadable_files": [artifact],
+                "read_receipt": {"raw_sha256": raw_sha, "raw_sse_source": raw_source}}}
+    monkeypatch.setattr(collector.sender, "operator_memory_post", post)
+    result = collector.sender.admit_central_artifacts_only(
+        prompt=prompt, result={"conversation_id": "conv-1", "terminal_assistant_text": response,
+                               "raw_sha256": raw_sha, "downloaded_files": [artifact]},
+        prior_central=prior)
+    assert result["central_artifacts"] == [artifact]
+    assert [p["operation"] for p in posts] == ["record_conversation", "read"]
+    assert "events" not in posts[0] and "prompt" not in posts[0] and "response_excerpt" not in posts[0]
 
 
 def test_local_terminal_with_central_readback_needs_no_provider_read(tmp_path, monkeypatch):

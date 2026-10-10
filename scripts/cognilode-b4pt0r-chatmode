@@ -861,6 +861,45 @@ def archive_returned_artifact(item: dict) -> dict:
             "source": "chatgpt_interpreter_download", "readback_verified": True}
 
 
+def admit_central_artifacts_only(*, prompt: str, result: dict, prior_central: dict) -> dict:
+    """Attach new files to an already verified exact terminal without replaying it."""
+    assistant = str(result.get("terminal_assistant_text") or "")
+    conversation_id = str(result.get("conversation_id") or "")
+    raw_sha = str(result.get("raw_sha256") or "")
+    raw_source = prior_central.get("central_raw_sse_source") or {}
+    if not (prior_central.get("ok") is True and prior_central.get("central_readback_verified") is True
+            and prior_central.get("conversation_id") == conversation_id
+            and prior_central.get("central_prompt_sha256") == hashlib.sha256(prompt.encode()).hexdigest()
+            and prior_central.get("central_response_sha256") == hashlib.sha256(assistant.encode()).hexdigest()
+            and raw_sha and prior_central.get("central_raw_stream_sha256") == raw_sha
+            and isinstance(raw_source, dict) and raw_source.get("readback_verified") is True
+            and raw_source.get("sha256") == raw_sha):
+        raise CapabilityError("artifact_only_source_unverified", "prior exact turn or SSE custody is not verified")
+    archived = [archive_returned_artifact(item) for item in (result.get("downloaded_files") or [])]
+    if not archived:
+        raise CapabilityError("artifact_only_empty", "artifact-only admission has no verified files")
+    admitted = operator_memory_post({"operation": "record_conversation", "provider": "chatgpt.com",
+                                     "conversation_id": conversation_id, "downloadable_files": archived})
+    if admitted.get("stored") is not True:
+        raise CapabilityError("central_artifact_admission_failed", "central artifact metadata was not stored")
+    readback = operator_memory_post({"operation": "read", "provider": "chatgpt.com",
+                                     "conversation_id": conversation_id})
+    conversation = readback.get("conversation") if isinstance(readback.get("conversation"), dict) else {}
+    observed = {str(item.get("sha256") or ""): item for item in
+                (conversation.get("downloadable_files") or []) if isinstance(item, dict)}
+    for item in archived:
+        seen = observed.get(item["sha256"])
+        if not seen or seen.get("storage_uri") != item["storage_uri"]:
+            raise CapabilityError("central_artifact_readback_mismatch", "new artifact reference was not retained")
+    receipt = conversation.get("read_receipt") or {}
+    if receipt.get("raw_sha256") != raw_sha or receipt.get("raw_sse_source") != raw_source:
+        raise CapabilityError("central_artifact_source_mismatch", "artifact update changed original SSE custody")
+    previous = [item for item in (prior_central.get("central_artifacts") or []) if isinstance(item, dict)]
+    by_sha = {str(item.get("sha256")): item for item in [*previous, *archived]}
+    return {**prior_central, "stored": True, "central_artifacts": list(by_sha.values()),
+            "artifact_only_reconciliation": True, "provider_requests_created_by_readback": 0}
+
+
 def admit_central_conversation(*, result_id: str, prompt: str, result: dict, attachments: list[dict]) -> dict:
     assistant = str(result.get("terminal_assistant_text") or "")
     summary = result.get("provider_summary") if isinstance(result.get("provider_summary"), dict) else {}

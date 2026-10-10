@@ -111,14 +111,16 @@ or existing ChatGPT conversation.
 
 ## App Server pass-through bridge
 
-`b4pt0r-app-server app-server --stdio` preserves native Codex App Server
+`cognilode-b4pt0r-app-server app-server --stdio` (also installed as
+`b4pt0r-app-server`) preserves native Codex App Server
 behavior by launching the installed Codex executable and forwarding all
 unknown JSON-RPC methods and notifications unchanged. It merges Agent Memory
 threads into the first `thread/list` page and projects ChatGPT threads through
 the existing `thread/read`, `thread/resume`, `thread/turns/list`, and
 `turn/start` shapes consumed by Codex Desktop.
 
-Set `CODEX_APP_SERVER_EXECUTABLE` in B4PT0R Electron to `b4pt0r-app-server`.
+Set `CODEX_APP_SERVER_EXECUTABLE` in B4PT0R Electron to
+`cognilode-b4pt0r-app-server`.
 Set `CODEX_EXECUTABLE` to the real installed Codex binary; it must not point
 back to the bridge. The bridge passes the ordinary App Server arguments and
 every unowned method and notification to that binary unchanged.

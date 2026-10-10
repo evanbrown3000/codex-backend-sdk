@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.3
+
+- Keep B4PT0R Electron unchanged and install the bridge under its discovered
+  `cognilode-b4pt0r-app-server` executable name.
+- Preserve every unowned native Codex App Server method and notification while
+  projecting normalized Agent Memory conversations into the same interface.
+- Continue provider conversations through the singular credential-owning
+  broker instead of loading provider credentials or hydrating ChatGPT in the
+  bridge.
+- Retain the relay's actor-scoped environment choice and run the unchanged
+  native Codex delegate with the App Server arguments supplied by Electron.
+
 ## 0.6.2
 
 - Add persistent remote-environment inspection alongside list and select.
@@ -22,11 +34,6 @@
 - Publish provider observations into the central Agent Memory conversation facade.
 - Add central-conversation Markdown transfer into ChatGPT through attachments.
 - Add a pass-through Codex App Server bridge for B4PT0R Electron.
-- Add actor-persistent remote Codex environment selection through the existing
-  Cognilode remote-shell relay while retaining unchanged native App Server
-  methods and notifications.
-- Project normalized Agent Memory conversations through the App Server and
-  route provider continuations through the credential-owning broker command.
 - Remove queue, TaskFlow, DecisionX, company, deployment, and credential-custody code from the provider SDK domain.
 
 All notable changes to this project will be documented in this file.

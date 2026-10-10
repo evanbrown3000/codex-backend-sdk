@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "codex-backend-sdk"
-version = "0.6.2"
+version = "0.6.3"
 description = "Unofficial Python SDK for the ChatGPT Codex backend API"
 readme = "README.md"
 license = { text = "MIT" }
@@ -30,6 +30,7 @@ dependencies = [
 [project.scripts]
 b4pt0r = "codex_backend_sdk.cli:main"
 b4pt0r-app-server = "codex_backend_sdk.app_server_bridge:main"
+cognilode-b4pt0r-app-server = "codex_backend_sdk.app_server_bridge:main"
 
 [project.optional-dependencies]
 openai    = [

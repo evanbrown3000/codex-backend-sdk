@@ -133,8 +133,14 @@ class ProviderCommandClient:
                 str(row.get("sha256") or "") for row in existing.get("attachment_refs") or []
                 if isinstance(row, Mapping)
             )
+            source_prompt_hash = str(
+                existing.get("source_prompt_sha256")
+                or (existing.get("interactive_operator_receipt") or {}).get("prompt_sha256")
+                or existing.get("prompt_sha256")
+                or ""
+            )
             if (not existing
-                    or existing.get("prompt_sha256") != prompt_hash
+                    or source_prompt_hash != prompt_hash
                     or str(existing.get("provider") or "") != str(request.get("provider") or "")
                     or expected_attachments != actual_attachments):
                 raise

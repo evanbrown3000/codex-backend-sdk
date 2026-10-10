@@ -191,7 +191,14 @@ def main() -> int:
         thread = threading.Thread(
             target=supervise,
             args=(actuator, extra_environment),
-            daemon=False,
+            # During a generation handoff the supervised actuator receives
+            # TERM and enters its own cooperative drain.  It is a separate
+            # process and must be allowed to finish an admitted provider turn
+            # after this supervisor releases the singleton lock.  Non-daemon
+            # threads pinned the old batch process (and therefore the lock)
+            # for the entire turn, preventing the successor generation from
+            # serving every other independent provider queue.
+            daemon=True,
         )
         SUPERVISORS.append(thread)
         thread.start()
@@ -202,10 +209,13 @@ def main() -> int:
     # the provider queue workers supervised above.
     while not STOP:
         time.sleep(5)
+    # Give every supervisor an opportunity to signal its child into drain,
+    # then release the batch lock.  Active actuator processes remain alive as
+    # orphans until their already-fenced turns reach terminal state; the new
+    # generation can immediately claim unrelated work without interrupting
+    # them or duplicating their scheduler fences.
     for thread in SUPERVISORS:
-        thread.join(timeout=max(300, float(os.environ.get(
-            "COGNILODE_PROVIDER_GENERATION_DRAIN_SECONDS", "2700"
-        ))) + 60)
+        thread.join(timeout=2.0)
     return 0
 
 

@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Dispatch a durable JSON batch through the B4PT0R provider API in parallel."""
+from __future__ import annotations
+
+import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
+from pathlib import Path
+import subprocess
+import sys
+import uuid
+
+
+def run(cli: str, root: Path, item: dict) -> dict:
+    job_id = str(item.get("id") or uuid.uuid4())
+    job = root / job_id
+    job.mkdir(parents=True, exist_ok=True)
+    prompt = job / "prompt.txt"
+    prompt.write_text(str(item["prompt"]), encoding="utf-8")
+    command = [cli, "chatgpt", "send", "--prompt-file", str(prompt),
+               "--model", str(item.get("model") or "gpt-5-6-thinking"),
+               "--effort", str(item.get("effort") or "xhigh"),
+               "--user-message-id", str(uuid.uuid5(uuid.NAMESPACE_URL, "b4pt0r-batch:" + job_id)),
+               "--artifact-dir", str(job / "artifacts")]
+    for attachment in item.get("attachments") or []:
+        command.extend(("--attach", str(Path(attachment).resolve())))
+    completed = subprocess.run(command, text=True, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, check=False)
+    (job / "provider-result.json").write_text(completed.stdout, encoding="utf-8")
+    return {"id": job_id, "returncode": completed.returncode}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("batch", type=Path)
+    parser.add_argument("--state-root", type=Path, required=True)
+    parser.add_argument("--cli", default="b4pt0r")
+    args = parser.parse_args()
+    items = json.loads(args.batch.read_text(encoding="utf-8"))
+    args.state_root.mkdir(parents=True, exist_ok=True)
+    results = []
+    with ThreadPoolExecutor(max_workers=max(1, len(items))) as pool:
+        futures = [pool.submit(run, args.cli, args.state_root, item) for item in items]
+        for future in as_completed(futures):
+            result = future.result()
+            results.append(result)
+            print(json.dumps(result, separators=(",", ":")), flush=True)
+    (args.state_root / "batch-result.json").write_text(
+        json.dumps(results, indent=2) + "\n", encoding="utf-8")
+    return 0 if all(row["returncode"] == 0 for row in results) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

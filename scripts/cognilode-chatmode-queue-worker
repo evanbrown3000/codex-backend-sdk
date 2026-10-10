@@ -1617,16 +1617,23 @@ def recover(job: dict, device_id: str = DEVICE_ID) -> None:
                 return
         if terminal_deliverable_candidate(job, value):
             now = time.time()
-            deadline = terminal_deliverable_deadline(job, value)
+            deadline = max(terminal_deliverable_deadline(job, value),
+                           float(prior_state.get("deliverable_deadline_at") or 0))
             latest_fresh = now if fresh_collection else float(prior_state.get("deliverable_fresh_collection_at") or 0)
             # A prior successful GET cannot justify failure classification if
             # the current post-deadline collector request hit 403/502/429.
             if now >= deadline and fresh_collection:
                 complete_failed_deliverable(job, value, deadline=deadline)
                 return
+            if not fresh_collection:
+                # A gate cooldown, deployment gap, or exact artifact GET still
+                # in progress is not a provider deliverable defect. Keep a
+                # bounded fresh-observation window after collection recovers.
+                deadline = max(deadline, now + TERMINAL_DELIVERABLE_WINDOW_SECONDS)
             next_at = now + TERMINAL_DELIVERABLE_RECHECK_SECONDS
             atomic_json(state_path, {**prior_state, "state": "terminal_deliverable_collection",
                                      "job_id": job["id"], "deliverable_deadline_at": deadline,
+                                     "deliverable_deadline_renewed": not fresh_collection,
                                      "deliverable_next_collect_at": next_at,
                                      "deliverable_fresh_collection_at": latest_fresh,
                                      "collector_state": outcomes[0].get("state") if collection.returncode == 0 and outcomes else "collector_error"})

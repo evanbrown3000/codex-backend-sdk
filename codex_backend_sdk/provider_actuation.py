@@ -451,6 +451,11 @@ class ComputerUseXProviderAdapter:
             # ComputerUseX's ChatGPT-only package guards here can invoke the
             # legacy Modified Codex repair path before the native browser turn.
             os.environ["COMPUTERUSEX_SKIP_IMPORT_GUARDS"] = "1"
+            os.environ["COGNILODE_PROVIDER_CODEX_RECOVERY"] = "0"
+            os.environ.setdefault("COMPUTERUSEX_RUNTIME_ROOT", "/runtime/worker/computerusex")
+            os.environ.setdefault("XDG_DATA_HOME", "/runtime/worker/xdg-data")
+            os.environ.setdefault("XDG_STATE_HOME", "/runtime/worker/xdg-state")
+            os.environ.setdefault("XDG_CACHE_HOME", "/runtime/worker/xdg-cache")
             source = Path(os.environ.get(
                 "COMPUTERUSEX_SOURCE", "/runtime/source/current/automation-computeruse-vision/src"
             ))

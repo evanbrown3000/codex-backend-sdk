@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 import requests
@@ -50,22 +51,29 @@ class AgentMemoryClient:
         response.raise_for_status()
         return response.json()
 
+    def list(self, *, limit: int = 50, **filters: Any) -> Any:
+        return self._request("GET", "v1/conversations", params={"limit": limit, **filters})
+
     def recent(self, *, limit: int = 50, **filters: Any) -> Any:
-        return self._request("GET", "v1/kb/recent", params={"limit": limit, **filters})
+        return self.list(limit=limit, **filters)
 
     def search(self, query: str, *, limit: int = 20, **filters: Any) -> Any:
         return self._request(
-            "POST", "v1/kb/search", body={"query": query, "limit": limit, **filters}
+            "POST", "v1/conversations/search", body={"query": query, "limit": limit, **filters}
         )
 
     def get(self, conversation_id: str, **options: Any) -> Any:
-        return self._request(
-            "GET", "v1/kb/get", params={"conversation_id": conversation_id, **options}
-        )
+        return self._request("GET", f"v1/conversations/{conversation_id}", params=options)
 
     def thread(self, conversation_id: str, **options: Any) -> Any:
+        return self.get(conversation_id, **options)
+
+    def changes(self, conversation_id: str, *, after: str | None = None, **options: Any) -> Any:
+        params = dict(options)
+        if after is not None:
+            params["after"] = after
         return self._request(
-            "GET", "v1/kb/thread", params={"conversation_id": conversation_id, **options}
+            "GET", f"v1/conversations/{conversation_id}/changes", params=params
         )
 
     def read(
@@ -77,23 +85,25 @@ class AgentMemoryClient:
         peek: bool = False,
         projection: str = "read-model",
     ) -> Any:
-        return self._request(
-            "POST",
-            "v1/conversations/read",
-            body={
-                "conversation_id": conversation_id,
-                "reader_id": reader_id,
-                "mode": "full" if full else "adaptive",
-                "peek": peek,
-                "projection": projection,
-            },
+        if full:
+            return self.get(
+                conversation_id,
+                reader_id=reader_id,
+                peek=str(peek).lower(),
+                projection=projection,
+            )
+        return self.changes(
+            conversation_id,
+            reader_id=reader_id,
+            peek=str(peek).lower(),
+            projection=projection,
         )
 
     def render_markdown(self, conversation_id: str) -> str:
         result = self._request(
             "GET",
-            "v1/conversations/render",
-            params={"conversation_id": conversation_id, "format": "markdown"},
+            f"v1/conversations/{conversation_id}/render",
+            params={"format": "markdown"},
         )
         if isinstance(result, dict):
             for key in ("markdown", "content", "text"):
@@ -103,3 +113,41 @@ class AgentMemoryClient:
             return result
         raise RuntimeError("Agent Memory render response omitted Markdown content.")
 
+    def ingest(self, observation: Mapping[str, Any]) -> Any:
+        return self._request("POST", "v1/conversations/ingest", body=observation)
+
+    def expand(self, request: Mapping[str, Any]) -> Any:
+        return self._request("POST", "v1/conversations/expand", body=request)
+
+    def ingest_chatgpt_turn(
+        self,
+        result: Mapping[str, Any],
+        *,
+        environment_id: str | None = None,
+        account_id: str | None = None,
+    ) -> Any:
+        turn = result.get("turn") if isinstance(result.get("turn"), Mapping) else {}
+        messages = [
+            value
+            for value in (turn.get("user_message"), turn.get("assistant_message"))
+            if isinstance(value, Mapping)
+        ]
+        observation = {
+            "schema": "memory_stock.conversation_observation.v1",
+            "provider": "chatgpt",
+            "provider_conversation_id": result.get("conversation_id"),
+            "conversation_id": f"chatgpt:{result.get('conversation_id')}",
+            "provider_user_message_id": result.get("user_message_id"),
+            "environment_id": environment_id or os.environ.get("COGNILODE_REMOTE_ENVIRONMENT_ID"),
+            "provider_account_id": account_id or os.environ.get("B4PT0R_CHATGPT_ACCOUNT_ID"),
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "source": {
+                "type": "b4pt0r_sdk_chat_mode",
+                "provenance": "provider_stream_and_exact_branch_readback",
+            },
+            "messages": messages,
+            "attachments": result.get("attachments") or [],
+            "artifacts": turn.get("artifacts") or [],
+            "terminal": turn.get("terminal") is True,
+        }
+        return self.ingest(observation)

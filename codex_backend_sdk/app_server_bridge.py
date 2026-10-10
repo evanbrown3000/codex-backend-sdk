@@ -260,6 +260,19 @@ class Bridge:
                 conversation_id=conversation_id,
                 user_message_id=user_id,
             )
+            try:
+                self.memory.ingest_chatgpt_turn(result)
+            except Exception as error:
+                self.emit(
+                    {
+                        "method": "cognilode/memoryIngestFailed",
+                        "params": {
+                            "threadId": thread_id,
+                            "turnId": turn_id,
+                            "message": str(error),
+                        },
+                    }
+                )
             turn = result.get("turn") if isinstance(result, Mapping) else None
             assistant = turn.get("assistant_message") if isinstance(turn, Mapping) else None
             assistant_id = str(assistant.get("id") if isinstance(assistant, Mapping) else uuid.uuid4())
@@ -324,4 +337,3 @@ def main(argv: Iterable[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

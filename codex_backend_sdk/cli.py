@@ -46,7 +46,7 @@ def _chatgpt(args: argparse.Namespace) -> Any:
     if args.chatgpt_command == "upload":
         return client.chatgpt.operations.upload_attachments(args.path)
     if args.chatgpt_command == "send":
-        return client.chatgpt.operations.send(
+        result = client.chatgpt.operations.send(
             _prompt(args),
             conversation_id=args.conversation_id,
             parent_message_id=args.parent_message_id,
@@ -58,6 +58,16 @@ def _chatgpt(args: argparse.Namespace) -> Any:
             readback=not args.no_readback,
             artifact_directory=args.artifact_dir,
         )
+        if not args.no_memory_ingest:
+            try:
+                result["agent_memory"] = AgentMemoryClient().ingest_chatgpt_turn(result)
+            except Exception as error:
+                result["agent_memory"] = {
+                    "ingested": False,
+                    "error": type(error).__name__,
+                    "message": str(error),
+                }
+        return result
     if args.chatgpt_command == "collect":
         return client.chatgpt.operations.collect(
             args.conversation_id,
@@ -158,6 +168,7 @@ def parser() -> argparse.ArgumentParser:
     send.add_argument("--user-message-id")
     send.add_argument("--artifact-dir")
     send.add_argument("--no-readback", action="store_true")
+    send.add_argument("--no-memory-ingest", action="store_true")
     collect = chat.add_parser("collect")
     collect.add_argument("conversation_id")
     collect.add_argument("user_message_id")

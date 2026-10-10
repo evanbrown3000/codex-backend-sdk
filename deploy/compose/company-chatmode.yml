@@ -302,12 +302,16 @@ services:
       COGNILODE_CODEX_INSTALL_ROOT: /codex
       COGNILODE_BUILDER_GENERATION: synced-resolved-pin-v2
       COGNILODE_CODEX_MIN_BUILD_MEMORY_BYTES: "5368709120"
+      COGNILODE_CODEX_LEGACY_RELEASE_DIR: /codex-legacy/605bd31c
+      COGNILODE_CODEX_LEGACY_BINARY_SHA256: 11de0a3b7a8fb6a6f6513b06892eab0cff9b98524960fa2a065cdfbf894b7539
+      COGNILODE_CODEX_LEGACY_RUST_TREE: b092910d25163510dc31e3a387f3090365fc826f
       CARGO_TARGET_DIR: /cargo-target
       CARGO_BUILD_JOBS: "4"
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
       - company_codex_release:/codex
+      - ${HOME}/.local/share/cognilode/modified-codex/releases/605bd31c:/codex-legacy/605bd31c:ro
       - company_codex_target:/cargo-target
       - company_cargo_registry:/usr/local/cargo/registry
       - company_cargo_git:/usr/local/cargo/git

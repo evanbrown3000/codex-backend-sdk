@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.0
+
+- Compose B4PT0R ChatGPT resources into complete prepared Chat-mode turns.
+- Upload physical attachments and collect returned interpreter artifacts.
+- Resolve terminal responses against the exact submitted provider branch.
+- Expose one machine CLI for ChatGPT, remote Codex execution, and Agent Memory.
+- Publish provider observations into the central Agent Memory conversation facade.
+- Add central-conversation Markdown transfer into ChatGPT through attachments.
+- Add a pass-through Codex App Server bridge for B4PT0R Electron.
+- Remove queue, TaskFlow, DecisionX, company, deployment, and credential-custody code from the provider SDK domain.
+
 All notable changes to this project will be documented in this file.
 
 ## [0.5.4] - 2026-09-24

@@ -26,7 +26,7 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 import uuid
 import threading
 import time
@@ -330,7 +330,7 @@ def _stage_remote_attachment(url: str, expected: str, *, max_bytes: int = MAX_AT
     return target
 
 
-def _stage_universe_attachment(locator: str, expected: str) -> Path:
+def _stage_universe_attachment(locator: str, expected: str, name: str = "") -> Path:
     """Materialize a custody locator through the elected Universe Storage API."""
     from universe_storage.client import UniverseStorageClient
 
@@ -348,9 +348,11 @@ def _stage_universe_attachment(locator: str, expected: str) -> Path:
     if expected and actual != expected.lower():
         raise ValueError("staged attachment SHA-256 mismatch")
     STAGE_ROOT.mkdir(parents=True, exist_ok=True)
-    target = STAGE_ROOT / actual
+    selected_name = Path(name or unquote(urlsplit(locator).path).rsplit("/", 1)[-1] or "attachment").name
+    target = STAGE_ROOT / actual / selected_name
     if not target.is_file():
-        with tempfile.NamedTemporaryFile(dir=STAGE_ROOT, delete=False) as stream:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as stream:
             temporary = Path(stream.name)
             stream.write(data)
             stream.flush()
@@ -370,7 +372,9 @@ def attachment_paths(job: dict) -> list[Path]:
         parsed = urlsplit(ref)
         custody_locator = bool(parsed.scheme and parsed.netloc) and parsed.scheme not in {"http", "https", "s3"}
         if custody_locator:
-            path = _stage_universe_attachment(ref, expected)
+            path = _stage_universe_attachment(
+                ref, expected, "" if isinstance(row, str) else str(row.get("name") or "")
+            )
         elif ref.startswith("file:"):
             ref = ref.removeprefix("file:")
             path = Path(ref).expanduser()

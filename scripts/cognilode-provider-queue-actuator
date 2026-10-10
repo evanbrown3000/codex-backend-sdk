@@ -281,6 +281,7 @@ def recover_terminal(job: Mapping[str, Any]) -> bool:
         receipt_root = runtime_root / "durable" / "web_agents" / profile
         prompt_sha = hashlib.sha256(str(job.get("prompt") or "").encode()).hexdigest()
         effect_started = float(job.get("effect_started_at") or 0)
+        operation_prefix = f"{job_id}:lease:"
         candidates: list[tuple[int, Path, Mapping[str, Any]]] = []
         for path in receipt_root.glob(f"web-agent-{profile}-*.json"):
             try:
@@ -289,6 +290,8 @@ def recover_terminal(job: Mapping[str, Any]) -> bool:
                 continue
             if (str(row.get("provider") or "") not in {provider, profile}
                     or str(row.get("prompt_sha256") or "") != prompt_sha
+                    or (row.get("operation_id")
+                        and not str(row.get("operation_id")).startswith(operation_prefix))
                     or row.get("ok") is not True
                     or str(row.get("status") or "") != "response_collected"
                     or float(row.get("completed_at") or 0) < effect_started):

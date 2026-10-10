@@ -407,6 +407,16 @@ def main() -> int:
                             if isinstance(row, Mapping) and row.get("kind") in
                             {"provider_uploaded_attachment", "provider_structured_upload", "provider_tool_evidence"}]
             if not upload_proof:
+                receipt = normalized.get("provider_receipt") if isinstance(
+                    normalized.get("provider_receipt"), Mapping
+                ) else {}
+                for attached in receipt.get("attached_context_files") or []:
+                    if not isinstance(attached, Mapping):
+                        continue
+                    ref = str(attached.get("sha256") or attached.get("id") or attached.get("path") or "")
+                    if ref:
+                        upload_proof.append({"kind": "provider_uploaded_attachment", "ref": ref})
+            if not upload_proof:
                 reasons.append("no_provider_upload_evidence")
             if reasons:
                 proof["rejected_attempts"].append({"provider": provider, "attempt": attempt,

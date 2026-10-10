@@ -652,7 +652,10 @@ exit 2
                  (conversations or {}).get("conversations") or [])
         conversation_row = items[0] if items and isinstance(items[0], dict) else {}
         conversation_id = (conversation_row.get("id") or conversation_row.get("conversation_id"))
-        query = conversation_row.get("title") or "Codex"
+        # Avoid an unbounded broad "Codex" query when the index is large.
+        # Search for the exact identifier returned by this immediately
+        # preceding list call; an empty match set is still a successful query.
+        query = conversation_id or conversation_row.get("title") or "Codex"
         searched = (control_call("conversations", "search", str(query), "--limit", "1")
                     if control_ok(conversations) else None)
         readback = (control_call("conversations", "read", str(conversation_id))

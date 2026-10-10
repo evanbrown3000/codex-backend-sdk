@@ -307,6 +307,10 @@ def main() -> int:
             time.sleep(2)
         if child.poll() is None:
             last_report = 0.0
+            drain_started = time.monotonic()
+            orphan_grace = max(30.0, float(os.environ.get(
+                "COGNILODE_ORPHAN_DRAIN_GRACE_SECONDS", "60"
+            )))
             while child.poll() is None:
                 if options.no_drain:
                     break
@@ -319,6 +323,19 @@ def main() -> int:
                 elif active is not None:
                     active = max(active, durable)
                 if active == 0:
+                    break
+                # An in-process active counter can outlive its completed queue
+                # effect after a disconnected client or wedged response writer.
+                # The durable scheduler is the mutation authority: once it has
+                # no accepted effect, a bounded drain retires that orphaned
+                # process tree instead of keeping custody on stale source
+                # indefinitely. Never force retirement while durable effects
+                # remain or when their state cannot be read.
+                if (durable == 0 and active is not None
+                        and time.monotonic() - drain_started >= orphan_grace):
+                    print(f"SDK service {options.script} retiring {active} "
+                          "orphaned in-process sends after durable completion",
+                          flush=True)
                     break
                 if time.monotonic() - last_report >= 60:
                     print(f"SDK service {options.script} generation held: "

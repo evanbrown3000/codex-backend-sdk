@@ -171,6 +171,7 @@ services:
       COGNILODE_HTTP_GATE_FALLBACK_LOG: /runtime/http-gate/fallback.jsonl
       COGNILODE_HTTP_GATE_POLICY_FILE: /runtime/http-gate/policy.json
       COGNILODE_PROVIDER_SOCKET: /runtime/provider.sock
+      COGNILODE_CHATMODE_WORK_ROOT: /home/worker/.local/share/cognilode/b4pt0r-chatmode
       COGNILODE_RETURNED_PRODUCT_ADMISSIONS: /home/worker/.local/share/cognilode/returned-products/admission-intents
       COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
       COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}

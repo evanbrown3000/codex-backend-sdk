@@ -24,11 +24,15 @@ from codex_backend_sdk.provider_actuation_client import ProviderActuationClient
 from codex_backend_sdk.provider_scheduler_client import scheduler_call
 
 STOP = False
+DRAINING = False
 
 
 def stop(*_args: object) -> None:
-    global STOP
-    STOP = True
+    global DRAINING
+    # A synchronized source revision is not permission to interrupt a live
+    # hosted-agent turn. Stop claiming new work, retain the incumbent runtime,
+    # and let already-started provider operations reach terminal state.
+    DRAINING = True
 
 
 def fence(job: Mapping[str, Any]) -> dict[str, Any]:
@@ -312,6 +316,12 @@ def main() -> int:
         threading.Thread(target=run, daemon=True, name="provider-" + job_id[:24]).start()
 
     while not STOP:
+        if DRAINING:
+            with lock:
+                if not active:
+                    break
+            time.sleep(1.0)
+            continue
         try:
             account = "central-custody" if args.provider == "chatgpt.com" else "primary"
             with lock:
@@ -356,7 +366,7 @@ def main() -> int:
         except Exception as exc:
             print(json.dumps({"kind": "provider_actuator_retry", "provider": args.provider,
                               "error": type(exc).__name__ + ":" + str(exc)[:300]}), flush=True)
-        if not STOP:
+        if not STOP and not DRAINING:
             time.sleep(max(1.0, args.interval))
     # A source-generation handoff must not strand jobs after begin_effect.
     # Provider transports are deliberately isolated in daemon threads so the

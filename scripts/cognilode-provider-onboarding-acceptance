@@ -345,8 +345,12 @@ def main() -> int:
                     project="unified-provider-actuation", role="provider-implementation-worker",
                     source="area1-sequential-onboarding", prompt_authority="taskflow_plan",
                     priority=ACCEPTANCE_PRIORITY,
-                    model="gpt-5.6-sol" if provider == "chatgpt.com" else None,
-                    effort="max" if provider == "chatgpt.com" else None, collect_artifacts=True,
+                    # The recovered successful attached-file mini-loop used
+                    # gpt-5-6-thinking with requested ``high`` mapped by the
+                    # provider to ``extended``.  Preserve that known working
+                    # mode rather than substituting a quick xhigh turn.
+                    model="gpt-5-6-thinking" if provider == "chatgpt.com" else None,
+                    effort="high" if provider == "chatgpt.com" else None, collect_artifacts=True,
                     parent_operation={"operation_id": "area1-four-provider-acceptance",
                                       "automation_order": 3, "kind": "taskflow_plan"},
                 )

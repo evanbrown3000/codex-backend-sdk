@@ -200,11 +200,17 @@ def main() -> int:
                     and service_python(active_generation[0]) is not None):
                 if pending_signature != active_generation[1]:
                     pending_signature = active_generation[1]
-                    pending_since = time.monotonic()
-                elif time.monotonic() - pending_since >= stability_seconds:
+                    # Coalesce a moving frontier, but do not let continuous
+                    # publication postpone custody fixes forever.  The first
+                    # complete divergent generation starts the bounded window;
+                    # later revisions replace the target without resetting it.
+                    if pending_since == 0.0:
+                        pending_since = time.monotonic()
+                if time.monotonic() - pending_since >= stability_seconds:
                     break
             else:
                 pending_signature = None
+                pending_since = 0.0
             time.sleep(2)
         if child.poll() is None:
             last_report = 0.0

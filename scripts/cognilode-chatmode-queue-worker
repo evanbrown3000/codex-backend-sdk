@@ -1280,10 +1280,16 @@ def validated_result(value: dict, job: dict | None = None) -> tuple[str, list[di
     if job is not None and job.get("prompt_author") == "rpe_run":
         proof = job.get("rpe_run_receipt") or {}
         answer = value.get("terminal_assistant_text") or ""
+        # D1 fences the original plan bytes; the existing Chat-mode sender
+        # calls strip() before POST and central admission. Verify both forms.
+        raw_prompt = str(job.get("prompt") or "")
         if (proof.get("schema") != "cognilode.rpe.model_request.v1"
                 or job.get("id") != f"rpe-{proof.get('request_id')}"
                 or value.get("queue_job_id") != job.get("id")
-                or central.get("central_prompt_sha256") != job.get("prompt_sha256")
+                or hashlib.sha256(raw_prompt.encode("utf-8")).hexdigest()
+                   != job.get("prompt_sha256")
+                or central.get("central_prompt_sha256")
+                   != hashlib.sha256(raw_prompt.strip().encode("utf-8")).hexdigest()
                 or not isinstance(answer, str) or not answer.strip()
                 or hashlib.sha256(answer.encode("utf-8")).hexdigest()
                    != central.get("central_response_sha256")):
@@ -1593,12 +1599,16 @@ def recover(job: dict, device_id: str = DEVICE_ID) -> None:
         central = value.get("central_conversation_store") or {}
         proof = job.get("rpe_run_receipt") or {}
         answer = value.get("terminal_assistant_text") or ""
+        raw_prompt = str(job.get("prompt") or "")
         checks = {
             "rpe_authority": job.get("prompt_author") == "rpe_run",
             "rpe_receipt": proof.get("schema") == "cognilode.rpe.model_request.v1"
                            and job.get("id") == f"rpe-{proof.get('request_id')}",
             "queue_identity": value.get("queue_job_id") == job.get("id"),
-            "prompt_hash": central.get("central_prompt_sha256") == job.get("prompt_sha256"),
+            "prompt_hash": (hashlib.sha256(raw_prompt.encode("utf-8")).hexdigest()
+                            == job.get("prompt_sha256")
+                            and central.get("central_prompt_sha256")
+                            == hashlib.sha256(raw_prompt.strip().encode("utf-8")).hexdigest()),
             "response_hash": isinstance(answer, str) and bool(answer.strip())
                              and hashlib.sha256(answer.encode("utf-8")).hexdigest()
                                  == central.get("central_response_sha256"),

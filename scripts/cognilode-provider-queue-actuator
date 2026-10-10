@@ -265,9 +265,61 @@ def recover_terminal(job: Mapping[str, Any]) -> bool:
     Agent Memory readback.  A successor generation can therefore finish the
     same scheduler fence without repeating the provider mutation.
     """
-    if str(job.get("provider") or "") != "chatgpt.com":
-        return False
+    provider = str(job.get("provider") or "")
     job_id = str(job.get("id") or "")
+    if provider != "chatgpt.com":
+        # ComputerUseX writes one immutable receipt only after the provider
+        # response is terminal and returned-file collection has finished.  A
+        # source-generation handoff can happen after that write but before the
+        # broker acknowledges scheduler completion.  Bind the receipt to the
+        # immutable prompt plus the currently fenced effect window and finish
+        # the same operation instead of sending the prompt again.
+        profile = provider.removesuffix(".com")
+        runtime_root = Path(os.environ.get(
+            "COMPUTERUSEX_RUNTIME_ROOT", "/runtime/worker/computerusex",
+        ))
+        receipt_root = runtime_root / "durable" / "web_agents" / profile
+        prompt_sha = hashlib.sha256(str(job.get("prompt") or "").encode()).hexdigest()
+        effect_started = float(job.get("effect_started_at") or 0)
+        candidates: list[tuple[int, Path, Mapping[str, Any]]] = []
+        for path in receipt_root.glob(f"web-agent-{profile}-*.json"):
+            try:
+                row = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if (str(row.get("provider") or "") != provider
+                    or str(row.get("prompt_sha256") or "") != prompt_sha
+                    or row.get("ok") is not True
+                    or str(row.get("status") or "") != "response_collected"
+                    or float(row.get("completed_at") or 0) < effect_started):
+                continue
+            candidates.append((path.stat().st_mtime_ns, path, row))
+        if not candidates:
+            return False
+        _, path, receipt = max(candidates, key=lambda item: item[0])
+        artifacts = receipt.get("response_downloaded_files") or receipt.get("downloadable_files") or []
+        result = {
+            "accepted": bool((receipt.get("submission") or {}).get("provider_visible_reconciliation")),
+            "terminal": True,
+            "conversation_id": receipt.get("observed_url") or (receipt.get("discovered_conversation_urls") or [None])[-1],
+            "user_message_id": receipt.get("user_message_id"),
+            "assistant_message_id": receipt.get("assistant_message_id"),
+            "assistant_text": receipt.get("response") or "",
+            "artifacts": artifacts,
+            "provider_receipt": dict(receipt),
+            "recovered_from_receipt": str(path),
+            "queue_job_id": job_id,
+        }
+        if not result["accepted"]:
+            return False
+        complete_job({
+            "operation": "complete_job", **fence(job),
+            "conversation_id": result.get("conversation_id"),
+            "effect_evidence": evidence(result),
+            "artifacts": artifacts,
+            "normalized_provider_result": result,
+        })
+        return True
     # A source cutover can release the scheduler lease after the provider has
     # already written its terminal receipt.  The next claim has a newer fence,
     # but repeating the same provider mutation is wrong.  Queue identity binds
@@ -319,6 +371,56 @@ def recover_terminal(job: Mapping[str, Any]) -> bool:
         "normalized_provider_result": result,
     })
     return True
+
+
+def recover_provider_error(job: Mapping[str, Any]) -> bool:
+    """Release an exact failed attempt whose broker died after publication.
+
+    The unified actuator publishes ``provider_error`` before returning to the
+    queue worker.  Generation turnover in that small acknowledgement window
+    must not leave an effect fence pinned for an hour.  This reads only the
+    local append-only operation ledger; it never observes provider history.
+    """
+    operation_id = f"{job.get('id')}:lease:{int(job.get('lease_generation') or 0)}"
+    path = Path(os.environ.get(
+        "COGNILODE_PROVIDER_EVENT_OUTBOX", "/runtime/provider-events/outbox.jsonl",
+    ))
+    if not path.is_file():
+        return False
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - 8 * 1024 * 1024))
+            rows = stream.read().splitlines()
+    except OSError:
+        return False
+    effect_started = float(job.get("effect_started_at") or 0)
+    for raw in reversed(rows):
+        try:
+            event = json.loads(raw)
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if (str(event.get("operation_id") or "") != operation_id
+                or str(event.get("state") or "") != "provider_error"):
+            continue
+        observed = event.get("observed_at")
+        try:
+            observed_at = (float(observed) if isinstance(observed, (int, float))
+                           else datetime.fromisoformat(str(observed).replace("Z", "+00:00")).timestamp())
+        except (TypeError, ValueError):
+            observed_at = 0
+        if observed_at < effect_started:
+            continue
+        payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
+        scheduler_call({
+            "operation": "release_job", **fence(job),
+            "provider_state": "provider_error",
+            "reason": str(payload.get("code") or "provider_error") + ":" + str(payload.get("message") or "")[:500],
+            "retry_after_seconds": 1,
+        })
+        return True
+    return False
 
 
 def chatgpt_transport(job: Mapping[str, Any], attachments: tuple[str, ...]) -> dict[str, Any]:
@@ -787,7 +889,7 @@ def main() -> int:
                             continue
                         seen.add(job.get("id"))
                         if state == "effect_pending":
-                            recovered = recover_terminal(job)
+                            recovered = recover_terminal(job) or recover_provider_error(job)
                             with lock:
                                 still_active = str(job.get("id") or "") in active
                             if (not recovered and not still_active

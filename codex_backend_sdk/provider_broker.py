@@ -259,11 +259,19 @@ def execute(payload: Mapping[str, Any]) -> Any:
     operation = str(payload.get("operation") or "")
     if operation == "provider_capabilities":
         authority = _lease_authority()
-        capabilities = _actuator(authority).publish_capabilities()
+        actuator = _actuator(authority)
+        capabilities = actuator.capabilities()
         capabilities["accounts"] = {
             provider: authority.accounts(provider)
             for provider in ("chatgpt.com", "gemini.com", "claude.com", "anthropic.com")
         }
+        capabilities["agent_memory"] = actuator.publisher._publish({
+            **capabilities,
+            "observation_kind": "provider_capability_inventory",
+            "conversation_id": "inventory:provider-capabilities",
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "source": {"type": "b4pt0r_provider_custody", "provenance": "runtime_capabilities"},
+        })
         return capabilities
     if operation == "provider_lease_issue":
         lease = _lease_authority().issue(

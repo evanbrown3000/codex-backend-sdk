@@ -230,7 +230,7 @@ def codex_builder_compiling(project: str) -> bool:
 
 
 def reconcile_host_managed_codex(project: str, runtime: Path) -> None:
-    """Adopt the exact immutable release installed for the selected container.
+    """Adopt an immutable release installed for the selected source tree.
 
     The host has no AWS credentials and does not build a second binary. It
     copies the already checksum-verified company-volume release via Docker,
@@ -244,27 +244,48 @@ def reconcile_host_managed_codex(project: str, runtime: Path) -> None:
         return
     if not (len(pin) == 40 and all(ch in "0123456789abcdef" for ch in pin)):
         return
+    tree = subprocess.run(["git", "-c", "safe.directory=*", "-C", str(source),
+                           "rev-parse", "HEAD:codex-rs"], capture_output=True, text=True,
+                          check=False, timeout=20).stdout.strip()
+    if not tree:
+        return
     container = f"{project}-codex-builder-1"
-    installed = subprocess.run(
+    # Source can advance for managed-control/packaging-only changes while its
+    # Rust tree and verified CLI binary remain identical. Prefer an exact
+    # release; otherwise adopt only a locally checksum-verifiable release with
+    # the exact selected codex-rs tree. Never build or fetch on the host.
+    listed = subprocess.run(
         ["docker", "exec", container, "sh", "-lc",
-         f"test -f /codex/releases/{pin}/source-commit && "
-         f"test -x /codex/releases/{pin}/managed-codex"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=15)
-    if installed.returncode:
+         "for d in /codex/releases/*; do "
+         "[ -x \"$d/codex\" ] && [ -x \"$d/managed-codex\" ] && "
+         "[ -f \"$d/source-commit\" ] && [ -f \"$d/rust-tree\" ] && "
+         "[ -f \"$d/SHA256SUMS\" ] && "
+         "(cd \"$d\" && sha256sum -c SHA256SUMS >/dev/null 2>&1) && "
+         "printf '%s %s\\n' \"$(cat \"$d/source-commit\")\" \"$(cat \"$d/rust-tree\")\"; "
+         "done"], capture_output=True, text=True, check=False, timeout=60)
+    if listed.returncode:
+        return
+    candidates: list[str] = []
+    for line in listed.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and len(parts[0]) == 40 and parts[1] == tree:
+            candidates.append(parts[0])
+    release_pin = pin if pin in candidates else (candidates[-1] if candidates else "")
+    if not release_pin:
         return
     root = Path(os.environ.get("MODIFIED_CODEX_INSTALL_ROOT",
                               str(Path.home() / ".local/share/cognilode/modified-codex")))
-    release = root / "releases" / pin
+    release = root / "releases" / release_pin
     if not release.is_dir():
         root.joinpath("releases").mkdir(parents=True, exist_ok=True)
         with __import__("tempfile").TemporaryDirectory(prefix=".managed-codex-", dir=root / "releases") as temp:
-            result = subprocess.run(["docker", "cp", f"{container}:/codex/releases/{pin}/.", temp],
+            result = subprocess.run(["docker", "cp", f"{container}:/codex/releases/{release_pin}/.", temp],
                                     capture_output=True, text=True, check=False, timeout=300)
             if result.returncode:
                 print(f"host managed Codex copy pending: {result.stderr[-300:]}", flush=True)
                 return
             stage = Path(temp)
-            if ((stage / "source-commit").read_text().strip() != pin or
+            if ((stage / "source-commit").read_text().strip() != release_pin or
                     not (stage / "SHA256SUMS").is_file() or
                     subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=stage,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -274,7 +295,7 @@ def reconcile_host_managed_codex(project: str, runtime: Path) -> None:
                 print("host managed Codex copy rejected: release identity/checksum mismatch", flush=True)
                 return
             shutil.copytree(stage, release)
-    expected = f"../releases/{pin}/"
+    expected = f"../releases/{release_pin}/"
     links = {"codex-bin": expected + "codex", "codex": expected + "launcher",
              "codex-code-mode-host": expected + "codex-code-mode-host",
              "central-rollouts": expected + "central-rollouts",
@@ -290,11 +311,12 @@ def reconcile_host_managed_codex(project: str, runtime: Path) -> None:
                              capture_output=True, text=True, check=False, timeout=30)
     if version.returncode:
         raise RuntimeError("host managed Codex launcher failed version readback")
-    event_id = f"evanpc-host:{pin}:linux-x86_64"
+    event_id = f"evanpc-host:{release_pin}:linux-x86_64"
     ledger = runtime / "shared/source/events/source-convergence.jsonl"
     event = {"schema": "cognilode.source_installation.v1", "event_id": event_id,
              "authority": "evanbrown3000/cognilode-codex", "name": "codex-managed-host",
-             "revision": pin, "previous_revision": None, "environment_id": "evanpc-host",
+             "revision": release_pin, "selected_source_revision": pin,
+             "rust_tree": tree, "previous_revision": None, "environment_id": "evanpc-host",
              "installed_at": time.time(), "kind": "managed_codex_runtime_installation",
              "target": "linux-x86_64", "entrypoints": ["codex", "managed-codex"],
              "codex_version": version.stdout.strip()}
@@ -308,7 +330,8 @@ def reconcile_host_managed_codex(project: str, runtime: Path) -> None:
             stream.write(json.dumps(event, sort_keys=True) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
-    print(f"host managed Codex release active: {pin} ({version.stdout.strip()})", flush=True)
+    print(f"host managed Codex release active: {release_pin} for selected source {pin} "
+          f"({version.stdout.strip()})", flush=True)
 
 
 def save_service_hashes(path: Path, hashes: dict[str, str]) -> None:

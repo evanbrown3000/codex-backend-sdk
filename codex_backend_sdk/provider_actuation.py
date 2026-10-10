@@ -351,6 +351,51 @@ class ComputerUseXProviderAdapter:
             raise RuntimeError("ComputerUseX returned a non-object result")
         return result
 
+    def _modified_codex_recovery(self, request: ProviderPromptRequest,
+                                 error: BaseException) -> dict[str, Any]:
+        """Resume one durable ComputerUseX operator after native actuation fails."""
+        source = Path(os.environ.get(
+            "COMPUTERUSEX_SOURCE", "/runtime/source/current/automation-computeruse-vision/src"
+        ))
+        for candidate in (source, Path("/workspace/cognilode/source/current/automation-computeruse-vision/src")):
+            if candidate.is_dir() and str(candidate) not in sys.path:
+                sys.path.insert(0, str(candidate))
+        dispatch = importlib.import_module("computerusex.agent_dispatch").dispatch_agent
+        recovery_root = Path(os.environ.get(
+            "COMPUTERUSEX_RECOVERY_ROOT",
+            "/home/worker/.local/share/cognilode/computerusex/provider-recovery",
+        ))
+        recovery_root.mkdir(parents=True, exist_ok=True)
+        response_file = recovery_root / f"{request.operation_id}.json"
+        attachments = "\n".join(f"- {path}" for path in request.attachments) or "- none"
+        goal = (
+            "Use the installed ComputerUseX tools to complete this provider operation. "
+            "Do not merely describe how to do it. Open the provider, submit the exact prompt, "
+            "wait for the terminal response, collect returned files, and write the complete "
+            f"ComputerUseX provider receipt as JSON to {response_file}.\n"
+            f"Provider: {self.provider}\nMode: {request.mode}\n"
+            f"Conversation: {request.conversation_id or 'new'}\n"
+            f"Native adapter failure: {type(error).__name__}: {error}\n"
+            f"Attachments:\n{attachments}\nExact prompt follows:\n{request.prompt}"
+        )
+        recovery = dispatch(
+            provider_kind="modified_codex", prompt=goal,
+            request_id=f"computerusex-provider-recovery:{request.operation_id}",
+            role="provider_operator",
+            attachment=str(request.attachments[0]) if request.attachments else "",
+            response_file=str(response_file),
+            timeout_seconds=int(request.metadata.get("recovery_timeout_seconds", 2100)),
+        )
+        if response_file.is_file():
+            parsed = json.loads(response_file.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict):
+                parsed.setdefault("recovery", recovery)
+                parsed.setdefault("recovery_transport", "computerusex_modified_codex")
+                return parsed
+        return {**recovery, "ok": False,
+                "status": "modified_codex_recovery_missing_provider_receipt",
+                "recovery_transport": "computerusex_modified_codex"}
+
     def capabilities(self) -> Mapping[str, Any]:
         return {
             "provider": self.provider, "create": True, "continue": True,
@@ -382,20 +427,28 @@ class ComputerUseXProviderAdapter:
                 if candidate.is_dir() and str(candidate) not in sys.path:
                     sys.path.insert(0, str(candidate))
             runtime = importlib.import_module("computerusex.web_agent_runtime")
-            result = runtime.run_web_agent(
-                self.provider,
-                request.prompt,
-                attachment=list(request.attachments),
-                timeout_seconds=float(request.metadata.get("timeout_seconds", 900)),
-                stable_seconds=float(request.metadata.get("stable_seconds", 2.5)),
-                mutation_authority={
-                    "route": "b4pt0r-unified-provider",
-                    "operation_id": request.operation_id,
-                    "custody_ref": custody["custody_ref"],
-                    "account_id": custody["account_id"],
-                    "lease_id": custody["lease_id"],
-                },
-            )
+            try:
+                result = runtime.run_web_agent(
+                    self.provider,
+                    request.prompt,
+                    attachment=list(request.attachments),
+                    timeout_seconds=float(request.metadata.get("timeout_seconds", 900)),
+                    stable_seconds=float(request.metadata.get("stable_seconds", 2.5)),
+                    mutation_authority={
+                        "route": "b4pt0r-unified-provider",
+                        "operation_id": request.operation_id,
+                        "custody_ref": custody["custody_ref"],
+                        "account_id": custody["account_id"],
+                        "lease_id": custody["lease_id"],
+                    },
+                )
+            except Exception as exc:
+                return self._modified_codex_recovery(request, exc)
+            if result.get("ok") is False:
+                return self._modified_codex_recovery(
+                    request,
+                    RuntimeError(str(result.get("status") or result.get("error") or "native provider failure")),
+                )
             urls = list(result.get("discovered_conversation_urls") or [])
             observed_url = str(result.get("observed_url") or "")
             exact_url = next((str(value) for value in reversed(urls) if value), observed_url)

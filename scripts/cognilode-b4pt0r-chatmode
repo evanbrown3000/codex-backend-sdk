@@ -1003,7 +1003,12 @@ def sentinel_headers(session, auth: dict, *, device_id: str) -> dict[str, str]:
             ["node", str(SENTINEL_VM), str(turn["dx"]), key],
             text=True,
             capture_output=True,
-            timeout=30,
+            # The provider's native Turnstile VM routinely exceeds thirty
+            # seconds under container CPU limits.  Timing it out before the
+            # mutation produces an endless series of safe-but-useless retries.
+            # This remains bounded and centrally tunable without changing the
+            # provider protocol or weakening its challenge.
+            timeout=max(30, int(os.environ.get("COGNILODE_SENTINEL_VM_TIMEOUT_SECONDS", "180"))),
             check=False,
         )
         if proc.returncode:

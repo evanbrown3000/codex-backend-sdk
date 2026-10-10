@@ -99,7 +99,18 @@ services:
         durable=/custody/browser/profile
         profile=/run/provider-browser/profile
         mkdir -p "$$durable" "$$profile" /custody/browser/downloads
-        cp -a "$$durable/." "$$profile/"
+        # Materialize only authentication/session state. Provider caches,
+        # models, histories and metrics can be gigabytes and previously kept
+        # Chrome in uninterruptible volume I/O long enough to miss queue slots.
+        for item in 'Local State' Default/Cookies Default/Cookies-journal \
+          Default/Network Default/'Local Storage' Default/'Session Storage' \
+          Default/IndexedDB Default/Preferences Default/'Secure Preferences' \
+          Default/'Web Data' Default/'Web Data-journal'; do
+          if test -e "$$durable/$$item"; then
+            mkdir -p "$$profile/$$(dirname "$$item")"
+            cp -a "$$durable/$$item" "$$profile/$$item"
+          fi
+        done
         find "$$profile" -maxdepth 1 -name 'Singleton*' -delete
         chrome=$$(find /root/.cache/ms-playwright -path '*/chrome-linux64/chrome' -type f -perm -111 | head -n 1)
         test -n "$$chrome"
@@ -109,7 +120,18 @@ services:
           --no-sandbox --headless=new --disable-features=UsePortalFilePicker \
           --window-size=1600,1000 https://gemini.google.com/app &
         child=$$!
-        trap 'kill -TERM "$$child" 2>/dev/null || true; wait "$$child" || true; cp -a "$$profile/." "$$durable/"' TERM INT
+        persist() {
+          for item in 'Local State' Default/Cookies Default/Cookies-journal \
+            Default/Network Default/'Local Storage' Default/'Session Storage' \
+            Default/IndexedDB Default/Preferences Default/'Secure Preferences' \
+            Default/'Web Data' Default/'Web Data-journal'; do
+            if test -e "$$profile/$$item"; then
+              mkdir -p "$$durable/$$(dirname "$$item")"
+              cp -a "$$profile/$$item" "$$durable/$$item"
+            fi
+          done
+        }
+        trap 'kill -TERM "$$child" 2>/dev/null || true; wait "$$child" || true; persist' TERM INT
         while ! python3 -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:9333/json/version",timeout=2).read()'; do
           kill -0 "$$child"
           sleep 1
@@ -128,7 +150,7 @@ services:
           c,_=s.accept(); threading.Thread(target=serve,args=(c,),daemon=True).start()' & relay=$$!
         wait "$$child"
         kill -TERM "$$relay" 2>/dev/null || true
-        cp -a "$$profile/." "$$durable/"
+        persist
     volumes:
       - company_browser:/custody/browser
 

@@ -21,9 +21,10 @@ import requests
 
 from .attachment_custody import commit_bytes, commit_path
 from .operator_auth import operator_token
+from .provider_scheduler_client import scheduler_available, scheduler_call
 
 
-TERMINAL_STATES = {"completed", "failed", "cancelled", "held", "dead_letter"}
+TERMINAL_STATES = {"complete", "completed", "provider_complete", "failed", "cancelled", "held", "dead_letter"}
 PROVIDER_QUEUES = {
     "chatgpt": "chatgpt.com", "chatgpt.com": "chatgpt.com",
     "gemini": "gemini.com", "gemini.com": "gemini.com",
@@ -96,6 +97,15 @@ class ProviderCommandClient:
         return result
 
     def _queue_call(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        # The Python second-order scheduler is the exclusive mutation and
+        # queue-state route.  Agent Memory remains the conversation authority.
+        if scheduler_available():
+            return scheduler_call(payload, timeout=min(self.timeout, 240))
+        if str(payload.get("operation") or "") in {
+            "enqueue_job", "begin_effect", "complete_job", "list_jobs",
+            "rhythm_read", "rhythm_tick", "rhythm_device_heartbeat",
+        }:
+            raise RuntimeError("central provider scheduler is unavailable")
         if not self.token and self.command:
             value = self.call("agent_memory_request", {
                 "method": "POST", "url": self.endpoint, "body": dict(payload), "params": {}
@@ -127,6 +137,13 @@ class ProviderCommandClient:
             "prompt_authority": authority,
             "source": source,
             "request_id": request_id,
+            "parent_operation": dict(payload.get("parent_operation") or {
+                "operation_id": request_id,
+                "automation_order": {
+                    "taskflow_plan": 3, "rpe_run": 4, "decisionx": 5,
+                }.get(authority, 2),
+                "kind": authority if authority != "interactive_operator" else "human_interactive_queue_admission",
+            }),
         }
         try:
             value = self._queue_call(request)
@@ -182,7 +199,7 @@ class ProviderCommandClient:
             # Older queue rows can retain effect_pending after the terminal
             # provider result was collected.  The completed timestamp plus a
             # provider-conversation effect is the durable completion receipt.
-            completed = state == "completed" or bool(job.get("completed_at") and conversation_id)
+            completed = state in {"complete", "completed", "provider_complete"} or bool(job.get("completed_at") and conversation_id)
             if completed or state in TERMINAL_STATES:
                 return {
                     "ok": completed,
@@ -247,6 +264,7 @@ class ProviderCommandClient:
         prompt_authority: str = "interactive_operator",
         priority: int | None = None,
         decisionx: Mapping[str, Any] | None = None,
+        parent_operation: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self.send_provider(
             provider="chatgpt.com",
@@ -307,6 +325,7 @@ class ProviderCommandClient:
             "prompt_authority": prompt_authority,
             "priority": priority,
             "decisionx": dict(decisionx) if decisionx is not None else None,
+            "parent_operation": dict(parent_operation) if parent_operation is not None else None,
         })
 
     def queue_status(self, provider: str = "chatgpt.com") -> dict[str, Any]:

@@ -124,6 +124,57 @@ def evidence(result: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [row for row in rows if row["ref"]]
 
 
+def recover_terminal(job: Mapping[str, Any]) -> bool:
+    """Finish a fenced job from its durable local stream receipt after cutover.
+
+    This is not provider observation or history hydration.  The original sender
+    writes the terminal receipt only after artifact collection and central
+    Agent Memory readback.  A successor generation can therefore finish the
+    same scheduler fence without repeating the provider mutation.
+    """
+    if str(job.get("provider") or "") != "chatgpt.com":
+        return False
+    job_id = str(job.get("id") or "")
+    generation = int(job.get("lease_generation") or (job.get("lease") or {}).get("generation") or 0)
+    prefix = f"{job_id}:queue-lease:{generation}:"
+    root = Path(os.environ.get("COGNILODE_CHATMODE_WORK_ROOT", "/runtime/worker/b4pt0r-chatmode"))
+    candidates: list[tuple[int, Path, Mapping[str, Any]]] = []
+    for path in root.glob("**/*.sse.receipt.json"):
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if str(row.get("queue_job_id") or "").startswith(prefix):
+            candidates.append((path.stat().st_mtime_ns, path, row))
+    if not candidates:
+        return False
+    _, path, receipt = max(candidates, key=lambda item: item[0])
+    central = receipt.get("central_conversation_store") if isinstance(receipt.get("central_conversation_store"), Mapping) else {}
+    if (receipt.get("assistant_terminal") is not True
+            or receipt.get("provider_acceptance_observed") is not True
+            or central.get("central_readback_verified") is not True):
+        return False
+    result = {
+        "accepted": True, "terminal": True,
+        "conversation_id": receipt.get("conversation_id"),
+        "user_message_id": receipt.get("user_message_id"),
+        "assistant_message_id": receipt.get("terminal_assistant_message_id"),
+        "assistant_text": receipt.get("terminal_assistant_text") or "",
+        "artifacts": receipt.get("downloaded_files") or [],
+        "provider_receipt": dict(receipt),
+        "recovered_from_receipt": str(path),
+        "queue_job_id": job_id,
+    }
+    scheduler_call({
+        "operation": "complete_job", **fence(job),
+        "conversation_id": result.get("conversation_id"),
+        "effect_evidence": evidence(result),
+        "artifacts": result.get("artifacts") or [],
+        "normalized_provider_result": result,
+    })
+    return True
+
+
 def chatgpt_transport(job: Mapping[str, Any], attachments: tuple[str, ...]) -> dict[str, Any]:
     job_id = str(job["id"])
     prompt_root = Path("/runtime/provider-inputs")
@@ -355,14 +406,19 @@ def main() -> int:
                 device_ids.append(args.device_id)
             seen = set()
             for assigned_device in device_ids:
-                listed = scheduler_call({
-                    "operation": "list_jobs", "provider": args.provider,
-                    "state": "claimed", "assigned_device": assigned_device, "limit": 10,
-                })
-                for job in listed.get("jobs") or []:
-                    if isinstance(job, Mapping) and job.get("id") not in seen:
+                for state in ("effect_pending", "claimed"):
+                    listed = scheduler_call({
+                        "operation": "list_jobs", "provider": args.provider,
+                        "state": state, "assigned_device": assigned_device, "limit": 10,
+                    })
+                    for job in listed.get("jobs") or []:
+                        if not isinstance(job, Mapping) or job.get("id") in seen:
+                            continue
                         seen.add(job.get("id"))
-                        launch(job)
+                        if state == "effect_pending":
+                            recover_terminal(job)
+                        else:
+                            launch(job)
         except Exception as exc:
             print(json.dumps({"kind": "provider_actuator_retry", "provider": args.provider,
                               "error": type(exc).__name__ + ":" + str(exc)[:300]}), flush=True)

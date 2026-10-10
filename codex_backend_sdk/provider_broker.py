@@ -76,7 +76,7 @@ def _send(payload: Mapping[str, Any]) -> dict[str, Any]:
             "turn": dict(turn),
         }
         try:
-            memory = AgentMemoryClient().ingest_chatgpt_turn(observation)
+            memory = AgentMemoryClient(use_broker=False).ingest_chatgpt_turn(observation)
         except Exception as exc:
             memory = {"ingested": False, "error": type(exc).__name__, "message": str(exc)}
         return {
@@ -132,7 +132,7 @@ def execute(payload: Mapping[str, Any]) -> Any:
         if payload.get("context_delivery") != "rendered_conversation_attachment":
             return {"ok": False, "error": "conversation continuation requires rendered attachment"}
         if not payload.get("rendered_conversation"):
-            memory = AgentMemoryClient()
+            memory = AgentMemoryClient(use_broker=False)
             payload = dict(payload)
             payload["rendered_conversation"] = memory.render_markdown(
                 str(payload.get("source_conversation_id") or "")

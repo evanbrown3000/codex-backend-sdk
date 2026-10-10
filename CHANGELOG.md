@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.8
+
+- Route ChatGPT sends, continuations, collection, and cross-provider transfers through the singular central prompt queue instead of direct interactive provider mutations.
+- Use the central conversation API for full-first and cursor-based subsequent reads without loading provider credentials into ordinary CLI or App Server processes.
+- Stage physical prompt attachments through Universe Storage so agents on any environment submit durable references rather than host-local paths.
+- Preserve DecisionX receipts and caller authority on queued prompts, and carry the selected remote-environment identity through shell execution calls.
+- Keep provider credentials inside the custody broker while allowing the broker to write completed turns into Agent Memory without recursively invoking itself.
+
 ## 0.6.4
 
 - Use a stable relay actor identity across bridge restarts and honor the

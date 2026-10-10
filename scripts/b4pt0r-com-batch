@@ -22,7 +22,12 @@ def run(cli: str, root: Path, item: dict) -> dict:
                "--model", str(item.get("model") or "gpt-5-6-thinking"),
                "--effort", str(item.get("effort") or "xhigh"),
                "--user-message-id", str(uuid.uuid5(uuid.NAMESPACE_URL, "b4pt0r-batch:" + job_id)),
-               "--artifact-dir", str(job / "artifacts")]
+               "--project", str(item.get("project") or "unified-b4pt0r"),
+               "--role", str(item.get("role") or "automated-provider-worker"),
+               "--source", str(item.get("source") or "b4pt0r-batch"),
+               "--prompt-authority", str(item.get("prompt_authority") or "interactive_operator")]
+    if isinstance(item.get("decisionx"), dict):
+        command.extend(("--decisionx", json.dumps(item["decisionx"], separators=(",", ":"))))
     for attachment in item.get("attachments") or []:
         command.extend(("--attach", str(Path(attachment).resolve())))
     environment = os.environ.copy()

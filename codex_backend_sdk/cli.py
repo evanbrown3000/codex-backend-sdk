@@ -11,7 +11,6 @@ from typing import Any
 from .agent_memory import AgentMemoryClient
 from .bridge_provider import ProviderCommandClient
 from .remote_shell import RemoteShellClient
-from .storage import load_tokens, token_needs_refresh
 
 
 def _emit(value: Any) -> None:
@@ -29,6 +28,17 @@ def _prompt(args: argparse.Namespace) -> str:
     raise ValueError("Provide --prompt, --prompt-file, or prompt text on stdin.")
 
 
+def _json_object(value: str | None) -> dict[str, Any] | None:
+    if not value:
+        return None
+    path = Path(value).expanduser()
+    raw = path.read_text(encoding="utf-8") if path.is_file() else value
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError("expected a JSON object or a path containing one")
+    return parsed
+
+
 def _chatgpt(args: argparse.Namespace) -> Any:
     memory = AgentMemoryClient()
     if args.chatgpt_command == "list":
@@ -36,12 +46,13 @@ def _chatgpt(args: argparse.Namespace) -> Any:
     if args.chatgpt_command == "search":
         return memory.search(args.query, provider="chatgpt.com")
     if args.chatgpt_command == "read":
-        return memory.get(args.conversation_id)
+        return memory.read(
+            args.conversation_id, reader_id=args.reader_id, after=args.after,
+            full=args.full, peek=args.peek, projection=args.projection,
+        )
     if args.chatgpt_command == "upload":
-        return {
-            "accepted": False,
-            "reason": "attachments are staged atomically by chatgpt send; standalone provider uploads are disabled",
-        }
+        provider = ProviderCommandClient()
+        return {"attachment_refs": [provider.stage_file(path) for path in args.path]}
     if args.chatgpt_command == "send":
         provider = ProviderCommandClient()
         queued = provider.send_chatgpt(
@@ -51,6 +62,13 @@ def _chatgpt(args: argparse.Namespace) -> Any:
             model=args.model,
             effort=args.effort,
             attachments=args.attach,
+            request_id=args.user_message_id,
+            project=args.project,
+            role=args.role,
+            source=args.source,
+            prompt_authority=args.prompt_authority,
+            priority=args.priority,
+            decisionx=_json_object(args.decisionx),
         )
         if args.no_readback:
             return queued
@@ -61,7 +79,7 @@ def _chatgpt(args: argparse.Namespace) -> Any:
             "conversation": memory.get(conversation_id) if completed.get("ok") and conversation_id else None,
         }
     if args.chatgpt_command == "collect":
-        return memory.get(args.conversation_id)
+        return ProviderCommandClient().wait(args.job_id)
     raise ValueError(f"Unknown ChatGPT command: {args.chatgpt_command}")
 
 
@@ -114,15 +132,7 @@ def _memory(args: argparse.Namespace) -> Any:
 
 def _auth(args: argparse.Namespace) -> Any:
     del args
-    store = load_tokens()
-    if store is None:
-        return {"authenticated": False}
-    return {
-        "authenticated": True,
-        "account_id": store.account_id,
-        "plan_type": store.plan_type,
-        "refresh_required": token_needs_refresh(store),
-    }
+    return ProviderCommandClient().queue_status()
 
 
 def _transfer(args: argparse.Namespace) -> Any:
@@ -155,6 +165,11 @@ def parser() -> argparse.ArgumentParser:
     searching.add_argument("query")
     reading = chat.add_parser("read")
     reading.add_argument("conversation_id")
+    reading.add_argument("--reader-id", default="b4pt0r-cli")
+    reading.add_argument("--after")
+    reading.add_argument("--full", action="store_true")
+    reading.add_argument("--peek", action="store_true")
+    reading.add_argument("--projection", default="read-model")
     reading.add_argument("--no-memory-ingest", action="store_true")
     upload = chat.add_parser("upload")
     upload.add_argument("path", nargs="+")
@@ -166,15 +181,16 @@ def parser() -> argparse.ArgumentParser:
     send.add_argument("--model", default="gpt-5-6-thinking")
     send.add_argument("--effort", choices=("medium", "high", "xhigh"), default="high")
     send.add_argument("--attach", action="append", default=[])
-    send.add_argument("--connector", action="append", default=[])
     send.add_argument("--user-message-id")
-    send.add_argument("--artifact-dir")
+    send.add_argument("--project", default="unified-b4pt0r")
+    send.add_argument("--role", default="interactive-operator")
+    send.add_argument("--source", default="b4pt0r-unified-cli")
+    send.add_argument("--prompt-authority", default="interactive_operator")
+    send.add_argument("--priority", type=int)
+    send.add_argument("--decisionx", help="DecisionX receipt JSON or file path")
     send.add_argument("--no-readback", action="store_true")
-    send.add_argument("--no-memory-ingest", action="store_true")
     collect = chat.add_parser("collect")
-    collect.add_argument("conversation_id")
-    collect.add_argument("user_message_id")
-    collect.add_argument("--artifact-dir")
+    collect.add_argument("job_id")
 
     remote = providers.add_parser("remote")
     remote.add_argument("--actor-id", default="default")
@@ -222,7 +238,6 @@ def parser() -> argparse.ArgumentParser:
     transfer.add_argument("--prompt-file")
     transfer.add_argument("--model", default="gpt-5-6-thinking")
     transfer.add_argument("--effort", choices=("medium", "high", "xhigh"), default="high")
-    transfer.add_argument("--artifact-dir")
     return root
 
 

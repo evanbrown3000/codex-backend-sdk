@@ -163,7 +163,7 @@ def _onboarding_ready(program: list[str]) -> bool:
     return all(prior in completed for prior in order[:order.index(provider)])
 
 
-def _provider_effect_in_flight(program: list[str]) -> bool:
+def _provider_effect_in_flight(program: list[str], process_pid: int | None = None) -> bool:
     """Keep an actuator's complete process tree intact during provider work."""
     if "--provider" not in program:
         return False
@@ -171,6 +171,22 @@ def _provider_effect_in_flight(program: list[str]) -> bool:
     path = Path(os.environ.get(
         "COGNILODE_PROVIDER_SCHEDULER_DB", "/runtime/provider-scheduler/scheduler.sqlite3"
     ))
+    if process_pid:
+        frontier=[int(process_pid)];seen=set();broker_child=False
+        while frontier:
+            pid=frontier.pop()
+            if pid in seen:continue
+            seen.add(pid)
+            try:
+                command=(Path('/proc')/str(pid)/'cmdline').read_bytes().replace(b'\0',b' ').decode(errors='replace')
+                children=(Path('/proc')/str(pid)/'task'/str(pid)/'children').read_text().split()
+            except OSError:
+                continue
+            if 'codex_backend_sdk.provider_broker' in command:
+                broker_child=True;break
+            frontier.extend(int(value) for value in children if value.isdigit())
+        if not broker_child:
+            return False
     try:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2) as connection:
             row = connection.execute(
@@ -219,7 +235,7 @@ def supervise(program: list[str], extra_environment: dict[str, str] | None = Non
                 worker_name = Path(selected[1]).name if len(selected) > 1 else "external"
                 if (worker_name in {
                     "cognilode-provider-queue-actuator", "cognilode-chatmode-queue-worker",
-                } and _provider_effect_in_flight(program)):
+                } and _provider_effect_in_flight(program, process.pid)):
                     time.sleep(1)
                     continue
                 break
@@ -228,7 +244,7 @@ def supervise(program: list[str], extra_environment: dict[str, str] | None = Non
             mutation_worker = worker_name in {
                 "cognilode-provider-queue-actuator", "cognilode-chatmode-queue-worker",
             }
-            if mutation_worker and _provider_effect_in_flight(program):
+            if mutation_worker and _provider_effect_in_flight(program, process.pid):
                 # Accepted/in-turn provider effects outlive source generations.
                 # Keep this supervisor alive until the worker has recorded a
                 # terminal receipt; a fixed drain timeout would kill daemon

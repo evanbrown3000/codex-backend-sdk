@@ -6,6 +6,8 @@ import hashlib
 import mimetypes
 import os
 from pathlib import Path
+import subprocess
+import tempfile
 from typing import Any
 from urllib.parse import quote
 
@@ -21,15 +23,35 @@ def _password() -> str:
 
 
 def commit_bytes(name: str, data: bytes) -> dict[str, Any]:
+    endpoint = os.environ.get("UNIVERSE_STORAGE_ENDPOINT", "").strip()
+    root = os.environ.get("COGNILODE_PROMPT_ATTACHMENT_ROOT", "").rstrip("/")
+    digest = hashlib.sha256(data).hexdigest()
+    if not endpoint or not root:
+        bucket = os.environ.get(
+            "COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET",
+            "cognilode-ephemeral-artifacts-362928919715-us-west-2",
+        ).strip()
+        if not bucket:
+            raise RuntimeError("unified prompt attachment storage is not configured")
+        key = f"taskflow-artifacts/sha256/{digest}.zip"
+        with tempfile.NamedTemporaryFile() as source:
+            source.write(data)
+            source.flush()
+            completed = subprocess.run(
+                [os.environ.get("COGNILODE_AWS_CLI", "aws"), "s3api", "put-object",
+                 "--bucket", bucket, "--key", key, "--body", source.name,
+                 "--metadata", f"sha256={digest}", "--content-type",
+                 mimetypes.guess_type(name)[0] or "application/octet-stream"],
+                capture_output=True, text=True, timeout=180, check=False,
+            )
+        if completed.returncode:
+            raise RuntimeError("unified attachment launchpad write failed: " + completed.stderr[-500:])
+        return {"ref": f"s3://{bucket}/{key}", "sha256": digest,
+                "name": name, "size": len(data)}
     try:
         from universe_storage.client import UniverseStorageClient
     except ImportError as exc:
         raise RuntimeError("universe-storage client is required for attachment custody") from exc
-    endpoint = os.environ.get("UNIVERSE_STORAGE_ENDPOINT", "").strip()
-    root = os.environ.get("COGNILODE_PROMPT_ATTACHMENT_ROOT", "").rstrip("/")
-    if not endpoint or not root:
-        raise RuntimeError("unified prompt attachment storage is not configured")
-    digest = hashlib.sha256(data).hexdigest()
     locator = f"{root}/sha256/{digest}/{quote(name, safe='._-')}"
     stored = UniverseStorageClient(
         endpoint, operator_password=_password(), timeout=180

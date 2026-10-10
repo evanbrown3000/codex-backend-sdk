@@ -249,7 +249,14 @@ def heartbeat():
                     codex_ready=True
             except OSError:
                 codex_ready=False
-            body=json.dumps({'node_id':NODE_ID,'environment_id':ENVIRONMENT_ID,'image':'company-docker','codex_exec_server':codex_ready,'aws_broker':Path(AWS_BROKER_SOCKET).is_socket(),'network_public':True,'network_local':True}).encode()
+            body=json.dumps({'node_id':NODE_ID,'environment_id':ENVIRONMENT_ID,
+                'image':'company-docker','container_profile':'company-container-v1',
+                'container_limits':{'cpus':2,'pids':512,'memory':'4g',
+                    'workspace':'/runtime/worker','privileged':False,
+                    'host_mounts':0,'mount_scope':'company-only'},
+                'codex_exec_server':codex_ready,
+                'aws_broker':Path(AWS_BROKER_SOCKET).is_socket(),
+                'network_public':True,'network_local':True}).encode()
             req=urllib.request.Request(CENTRAL+'/api/operator/remote-shell/heartbeat',data=body,method='POST',headers={'Authorization':'Bearer '+NODE_TOKEN,'Content-Type':'application/json','User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36','Accept':'application/json,text/plain,*/*','Origin':CENTRAL,'Referer':CENTRAL+'/'})
             with urllib.request.urlopen(req,timeout=12) as r:
                 write_hb(200<=r.status<300,http_status=r.status)

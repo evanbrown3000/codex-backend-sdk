@@ -393,12 +393,19 @@ def main() -> int:
               else args.device_id + ":b4pt0r:" + args.provider)
     active: dict[str, Mapping[str, Any]] = {}
     lock = threading.Lock()
+    # One custody/account/browser lane executes one mutation at a time.
+    # Different providers remain concurrent because each owns its own
+    # actuator. A restart therefore cannot fan recovered leases into parallel
+    # turns on one account.
+    max_concurrency = max(1, int(os.environ.get(
+        "COGNILODE_PROVIDER_ACCOUNT_CONCURRENCY", "1"
+    )))
 
-    def launch(job: Mapping[str, Any]) -> None:
+    def launch(job: Mapping[str, Any]) -> bool:
         job_id = str(job.get("id") or "")
         with lock:
-            if not job_id or job_id in active:
-                return
+            if not job_id or job_id in active or len(active) >= max_concurrency:
+                return False
             active[job_id] = job
 
         def run() -> None:
@@ -430,6 +437,7 @@ def main() -> int:
                     active.pop(job_id, None)
 
         threading.Thread(target=run, daemon=True, name="provider-" + job_id[:24]).start()
+        return True
 
     while not STOP:
         if DRAINING:
@@ -446,7 +454,7 @@ def main() -> int:
                 "operation": "rhythm_device_heartbeat",
                 "device": {
                     "id": device, "available": True, "active_turns": active_count,
-                    "max_concurrency": 2_147_483_647,
+                    "max_concurrency": max_concurrency,
                     "environment_id": args.device_id,
                     "capabilities": {
                         "environment": args.device_id, "accounts": [account],
@@ -457,7 +465,7 @@ def main() -> int:
                                         "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "auto"]
                                        if args.provider == "chatgpt.com" else []),
                             "reasoning_modes": ["low", "medium", "high", "xhigh", "max", "extended"],
-                            "max_concurrency": 2_147_483_647,
+                            "max_concurrency": max_concurrency,
                         }},
                     },
                 },

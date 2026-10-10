@@ -97,7 +97,7 @@ class AgentMemoryClient:
         projection: str = "app-server-summary",
         **filters: Any,
     ) -> Any:
-        params = {"limit": limit, **filters}
+        params = {"limit": limit, "projection": projection, **filters}
         if cursor:
             params["offset"] = cursor
         return self._request("GET", self.endpoint, params=params)
@@ -106,21 +106,20 @@ class AgentMemoryClient:
         return self.list(limit=limit, **filters)
 
     def search(self, query: str, *, limit: int = 50, cursor: str | None = None, projection: str = "app-server-summary", **filters: Any) -> Any:
-        params = {"q": query, "limit": limit, **filters}
+        params = {"q": query, "limit": limit, "projection": projection, **filters}
         if cursor:
             params["offset"] = cursor
         return self._request("GET", self.endpoint, params=params)
 
     def get(self, conversation_id: str, **options: Any) -> Any:
         params = dict(options)
-        params.pop("projection", None)
         return self._request("GET", f"{self.endpoint}/{quote(conversation_id, safe='')}", params=params)
 
     def thread(self, conversation_id: str, **options: Any) -> Any:
         return self.get(conversation_id, **options)
 
     def project_thread(self, conversation_id: str, *, projection: str = "app-server") -> Any:
-        return self.get(conversation_id)
+        return self.get(conversation_id, projection=projection)
 
     def changes(self, conversation_id: str, *, after: str | None = None, **options: Any) -> Any:
         return self.get(conversation_id, cursor=after, **options)
@@ -140,6 +139,7 @@ class AgentMemoryClient:
             cursor=None if full else after,
             reader_id=reader_id,
             peek=str(peek).lower(),
+            projection=projection,
         )
 
     def render_markdown(self, conversation_id: str) -> str:

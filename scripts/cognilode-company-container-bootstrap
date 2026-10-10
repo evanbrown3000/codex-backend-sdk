@@ -543,10 +543,23 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
                                         "memory", "source-vacuum"],
                                        env=env, check=True, timeout=180)
                     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-                        print(f"memory composition restart pending: {exc}", flush=True)
-                        notify_service("WATCHDOG=1")
-                        time.sleep(30)
-                        continue
+                        # Docker Compose can report a rename conflict after it
+                        # has already installed and started the new canonical
+                        # container. Treat that source-driven replacement as
+                        # applied only when both requested services now exist
+                        # and are running; otherwise retain the retry frontier.
+                        running = all(subprocess.run(
+                            ["docker", "inspect", "-f", "{{.State.Running}}",
+                             f"{project}-{service}-1"],
+                            capture_output=True, text=True, check=False, timeout=30,
+                        ).stdout.strip().casefold() == "true"
+                            for service in ("memory", "source-vacuum"))
+                        if not running:
+                            print(f"memory composition restart pending: {exc}", flush=True)
+                            notify_service("WATCHDOG=1")
+                            time.sleep(30)
+                            continue
+                        print("memory composition adopted after completed Docker replacement", flush=True)
                     temporary_compose = memory_compose_applied.with_suffix(".tmp")
                     temporary_compose.write_text(compose_digest + "\n", encoding="utf-8")
                     temporary_compose.replace(memory_compose_applied)

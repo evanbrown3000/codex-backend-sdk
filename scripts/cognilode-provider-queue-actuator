@@ -14,6 +14,7 @@ from pathlib import Path
 import signal
 import socket
 import sys
+import threading
 import time
 from typing import Any, Mapping
 
@@ -186,21 +187,45 @@ def main() -> int:
     # independent concurrency.
     device = (args.device_id if args.provider == "chatgpt.com"
               else args.device_id + ":b4pt0r:" + args.provider)
-    client = ProviderActuationClient([sys.executable, "-m", "codex_backend_sdk.provider_broker"], timeout=2400)
+    active: set[str] = set()
+    lock = threading.Lock()
+
+    def launch(job: Mapping[str, Any]) -> None:
+        job_id = str(job.get("id") or "")
+        with lock:
+            if not job_id or job_id in active:
+                return
+            active.add(job_id)
+
+        def run() -> None:
+            try:
+                client = ProviderActuationClient(
+                    [sys.executable, "-m", "codex_backend_sdk.provider_broker"], timeout=2400
+                )
+                process(job, client)
+            finally:
+                with lock:
+                    active.discard(job_id)
+
+        threading.Thread(target=run, daemon=True, name="provider-" + job_id[:24]).start()
+
     while not STOP:
         try:
             account = "central-custody" if args.provider == "chatgpt.com" else "primary"
+            with lock:
+                active_count = len(active)
             scheduler_call({
                 "operation": "rhythm_device_heartbeat",
                 "device": {
-                    "id": device, "available": True, "active_turns": 0, "max_concurrency": 1,
+                    "id": device, "available": True, "active_turns": active_count,
+                    "max_concurrency": 2_147_483_647,
                     "environment_id": args.device_id,
                     "capabilities": {
                         "environment": args.device_id, "accounts": [account],
                         "providers": {args.provider: {
                             "enabled": True, "authentication": "both", "attachments": True,
                             "artifact_downloads": True, "continuation": True,
-                            "models": [], "reasoning_modes": [], "max_concurrency": 1,
+                            "models": [], "reasoning_modes": [], "max_concurrency": 2_147_483_647,
                         }},
                     },
                 },
@@ -221,7 +246,7 @@ def main() -> int:
                 for job in listed.get("jobs") or []:
                     if isinstance(job, Mapping) and job.get("id") not in seen:
                         seen.add(job.get("id"))
-                        process(job, client)
+                        launch(job)
         except Exception as exc:
             print(json.dumps({"kind": "provider_actuator_retry", "provider": args.provider,
                               "error": type(exc).__name__ + ":" + str(exc)[:300]}), flush=True)

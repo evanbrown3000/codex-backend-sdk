@@ -94,7 +94,8 @@ def handle(payload):
         return {'ok': False, 'state': 'held', 'error': 'drive_writer_pending',
                 'retry_after_seconds': result.get('retry_after_seconds', 60)}
     if state == 'ambiguous':
-        return {'ok': False, 'state': 'ambiguous', 'error': 'drive_effect_pending'}
+        return {'ok': False, 'state': 'ambiguous', 'error': 'drive_effect_pending',
+                'retry_after_seconds': result.get('retry_after_seconds', 60)}
     if state != 'committed':
         return {'ok': False, 'state': 'error', 'error': 'drive_writer_unavailable'}
     semantic_duplicate = operation == 'write' and result.get('semantic_duplicate') is True

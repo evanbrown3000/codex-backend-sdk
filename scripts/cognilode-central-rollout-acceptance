@@ -172,8 +172,11 @@ if __name__ == '__main__':
             break
         except Exception as error:
             detail = str(error)[:220]
+            advice = re.search(r'retry_after_seconds=(\d+)', detail)
+            retry_after = min(86400, int(advice.group(1))) if advice else 0
             print(json.dumps({'ok': False, 'state': 'pending' if daemon else 'failed',
-                'error': type(error).__name__, 'detail': detail},
+                'error': type(error).__name__, 'detail': detail,
+                'retry_after_seconds': retry_after},
                 separators=(',', ':')), flush=True)
             if not daemon:
                 sys.exit(1)
@@ -183,5 +186,5 @@ if __name__ == '__main__':
                 'thread identity mismatch' in detail or \
                 'Model provider `` not found' in detail:
                 sys.exit(1)
-            time.sleep(delay)
+            time.sleep(max(delay, retry_after))
             delay = min(900, delay * 2)

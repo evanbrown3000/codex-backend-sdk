@@ -7,7 +7,7 @@ from typing import Any, Mapping, Optional
 
 import requests
 
-from ._transport import request_with_retries
+from ._transport import _require_central_http_gate, request_with_retries
 from ._utils import _UNSET, _is_given
 from .storage import TokenStore, load_tokens, save_tokens, token_needs_refresh
 
@@ -266,8 +266,10 @@ class CodexClient:
 
     def _probe_auth(self, store: TokenStore) -> bool:
         try:
+            url = f"{WHAM_BASE_URL}/wham/usage"
+            _require_central_http_gate("GET", url)
             response = requests.get(
-                f"{WHAM_BASE_URL}/wham/usage",
+                url,
                 headers={
                     "Authorization": f"Bearer {store.access_token}",
                     "originator": ORIGINATOR,

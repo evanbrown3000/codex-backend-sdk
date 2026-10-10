@@ -20,6 +20,7 @@ from typing import Callable, Optional
 
 import requests
 
+from ._transport import _require_central_http_gate
 from .pkce import PkceCodes, generate_pkce, generate_state
 from .storage import TokenStore, save_tokens
 
@@ -29,6 +30,11 @@ CALLBACK_PORT = 1455
 REDIRECT_URI = f"http://localhost:{CALLBACK_PORT}/auth/callback"
 SCOPES = "openid profile email offline_access api.connectors.read api.connectors.invoke"
 ORIGINATOR = "codex_cli_rs"
+
+
+def _post(url: str, **kwargs):
+    _require_central_http_gate("POST", url)
+    return requests.post(url, **kwargs)
 
 
 @dataclass(frozen=True)
@@ -148,7 +154,7 @@ def _make_handler(pkce: PkceCodes, state: str):
 
 def _exchange_code(code: str, pkce: PkceCodes) -> dict:
     """POST authorization code to token endpoint, return raw JSON."""
-    resp = requests.post(
+    resp = _post(
         f"{ISSUER}/oauth/token",
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         data={
@@ -166,7 +172,7 @@ def _exchange_code(code: str, pkce: PkceCodes) -> dict:
 
 def obtain_api_key(id_token: str) -> str:
     """Exchange a fresh ChatGPT ID token for the API key used by Realtime."""
-    resp = requests.post(
+    resp = _post(
         f"{ISSUER}/oauth/token",
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         data={
@@ -187,7 +193,7 @@ def refresh_access_token(refresh_token: str) -> dict:
     Use a refresh token to get a new access_token (and optionally a new refresh_token).
     Returns the raw JSON response from the token endpoint.
     """
-    resp = requests.post(
+    resp = _post(
         f"{ISSUER}/oauth/token",
         headers={"Content-Type": "application/json"},
         json={
@@ -215,7 +221,7 @@ def revoke_oauth_token(
     payload = {"token": value, "token_type_hint": token_type_hint}
     if token_type_hint == "refresh_token":
         payload["client_id"] = _required_text(client_id, "client_id")
-    response = requests.post(
+    response = _post(
         f"{_auth_issuer(issuer)}/oauth/revoke",
         headers={"Content-Type": "application/json"},
         json=payload,
@@ -230,7 +236,7 @@ def request_device_code(
     """Start Codex's official headless/device authorization flow."""
     base = _auth_issuer(issuer)
     client = _required_text(client_id, "client_id")
-    response = requests.post(
+    response = _post(
         f"{base}/api/accounts/deviceauth/usercode",
         json={"client_id": client},
         timeout=30,
@@ -276,7 +282,7 @@ def complete_device_code_login(
     started = _monotonic()
     poll_url = f"{device_code.issuer}/api/accounts/deviceauth/token"
     while True:
-        response = requests.post(
+        response = _post(
             poll_url,
             json={
                 "device_auth_id": device_code.device_auth_id,
@@ -299,7 +305,7 @@ def complete_device_code_login(
     authorization_code = _required_payload_text(authorization, "authorization_code")
     code_verifier = _required_payload_text(authorization, "code_verifier")
     _required_payload_text(authorization, "code_challenge")
-    token_response = requests.post(
+    token_response = _post(
         f"{device_code.issuer}/oauth/token",
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         data={

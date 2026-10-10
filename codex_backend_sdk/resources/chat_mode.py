@@ -274,12 +274,31 @@ class ChatModeOperations:
             "attachments": attachments,
             "stream": streamed,
         }
-        if readback and resolved_conversation_id:
-            result["turn"] = self.collect(
-                resolved_conversation_id,
-                message_id,
-                artifact_directory=artifact_directory,
+        if readback:
+            if not streamed.get("assistant_end_turn"):
+                raise RuntimeError(
+                    "ChatGPT stream ended without a terminal assistant turn; "
+                    "the queue must retry the operation rather than issue observability reads."
+                )
+            assistant_text = str(streamed.get("terminal_assistant_text") or "")
+            assistant_message_id = str(
+                streamed.get("terminal_assistant_message_id") or ""
             )
+            turn: dict[str, Any] = {
+                "conversation_id": resolved_conversation_id or None,
+                "user_message_id": message_id,
+                "assistant_message_id": assistant_message_id or None,
+                "assistant_text": assistant_text,
+                "terminal": True,
+            }
+            if artifact_directory is not None and resolved_conversation_id and assistant_message_id:
+                turn["artifacts"] = self.download_artifacts(
+                    resolved_conversation_id,
+                    assistant_message_id,
+                    assistant_text,
+                    artifact_directory,
+                )
+            result["turn"] = turn
         return result
 
     def collect(

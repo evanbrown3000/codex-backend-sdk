@@ -7,6 +7,7 @@ callers submit typed actions; bearer capabilities remain in that container.
 from __future__ import annotations
 import json, os, sys, urllib.request
 from pathlib import Path
+from urllib.parse import quote, urlencode
 
 BASE=os.environ.get('COGNILODE_OPERATOR_URL','https://cognilode.com').rstrip('/')
 TOKEN_FILE=Path(os.environ.get('COGNILODE_OPERATOR_TOKEN_FILE','/home/worker/.config/cognilode/operator-bearer'))
@@ -30,23 +31,32 @@ def run(payload):
     actor=str(payload.get('actor_id') or 'default')
     if len(actor)>160: raise ValueError('actor_id_too_long')
     if action in {'conversation_list','conversation_search','conversation_read'}:
-        custody=json.loads(CUSTODY.read_text())
-        body={'action':action.removeprefix('conversation_')}
+        body={}
         if action=='conversation_list':
-            body.update(limit=max(1,min(100,int(args.get('limit',50)))),provider=str(args.get('provider') or 'chatgpt.com'))
-            if args.get('cursor'): body['cursor']=str(args['cursor'])
+            body={'limit':max(1,min(100,int(args.get('limit',50)))),
+                  'projection':str(args.get('projection') or 'app-server-summary'),
+                  'provider':str(args.get('provider') or 'chatgpt.com')}
+            if args.get('cursor'): body['offset']=str(args['cursor'])
+            endpoint='http://127.0.0.1:8098/v1/conversations?'+urlencode(body)
         elif action=='conversation_search':
             query=str(args.get('query') or '').strip()
             if not query: raise ValueError('conversation_search_query_required')
-            body.update(query=query,limit=max(1,min(100,int(args.get('limit',50)))),provider=str(args.get('provider') or 'chatgpt.com'))
+            body={'q':query,'limit':max(1,min(100,int(args.get('limit',50)))),
+                  'projection':str(args.get('projection') or 'app-server-summary'),
+                  'provider':str(args.get('provider') or 'chatgpt.com')}
+            endpoint='http://127.0.0.1:8098/v1/conversations?'+urlencode(body)
         else:
             cid=str(args.get('conversation_id') or '').strip()
             if not cid: raise ValueError('conversation_read_id_required')
-            body.update(conversation_id=cid,reader_id=str(args.get('reader_id') or actor),
-                        after=args.get('after'),full=bool(args.get('full')),peek=bool(args.get('peek')),
-                        projection=str(args.get('projection') or 'read-model'))
-        value=post('http://127.0.0.1:8899/conversations',str(custody['mcp_bearer']),body)
+            body={'reader_id':str(args.get('reader_id') or actor),
+                  'peek':str(bool(args.get('peek'))).lower(),
+                  'projection':str(args.get('projection') or 'read-model')}
+            if args.get('after') and not args.get('full'): body['cursor']=str(args['after'])
+            endpoint='http://127.0.0.1:8098/v1/conversations/'+quote(cid,safe='')+'?'+urlencode(body)
+        with urllib.request.urlopen(endpoint,timeout=50) as response:
+            value=json.load(response)
         if value.get('ok') is not True: raise RuntimeError('central_conversation_read_failed')
+        if isinstance(value.get('result'),dict): value=value['result']
         return {'ok':True,'action':action,'result':value}
     if action in {'environment_list','environment_current','environment_select'}:
         name={'environment_list':'environment_list','environment_current':'environment_current',

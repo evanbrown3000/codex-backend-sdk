@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,12 +12,79 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 
 SENDER = Path(__file__).with_name("cognilode-b4pt0r-chatmode")
 COLLECTOR = Path(__file__).with_name("cognilode-b4pt0r-collect")
 COUNTER_LOCK = threading.Lock()
 ACTIVE_SENDS = 0
 DRAINING = False
+
+
+def runtime_python() -> Path:
+    root = Path.home() / ".local/share/cognilode/b4pt0r-chatmode"
+    for candidate in sorted(root.glob("venv-python*/bin/python")):
+        environment = candidate.parent.parent
+        if any(environment.glob("lib/python*/site-packages/curl_cffi")):
+            return candidate
+    raise RuntimeError("B4PT0R custody runtime unavailable")
+
+
+def option(args: list[str], name: str, default: str = "") -> str:
+    try:
+        return args[args.index(name) + 1]
+    except (ValueError, IndexError):
+        return default
+
+
+def b4pt0r_send(args: list[str]) -> dict:
+    prompt_file = Path(option(args, "--prompt-file"))
+    job_id = option(args, "--queue-job-id")
+    if not prompt_file.is_file() or not job_id:
+        return {"exit_code": 64, "stderr": "queued prompt input unavailable"}
+    artifact_root = Path.home() / ".local/share/cognilode/b4pt0r-chatmode" / (
+        "b4pt0r-chatmode-job-" + hashlib.sha256(job_id.encode()).hexdigest()[:24] + ".files"
+    )
+    attachments = [args[index + 1] for index, value in enumerate(args[:-1]) if value == "--attach"]
+    payload = {
+        "operation": "chatgpt_continue",
+        "prompt": prompt_file.read_text(encoding="utf-8"),
+        "conversation_id": option(args, "--conversation-id") or None,
+        "parent_message_id": option(args, "--parent-message-id") or None,
+        "model": option(args, "--model", "gpt-5-6-thinking"),
+        "effort": option(args, "--effort", "xhigh"),
+        "attachments": attachments,
+        "user_message_id": str(uuid.uuid5(uuid.NAMESPACE_URL, "cognilode-chatmode-queue:" + job_id)),
+        "artifact_directory": str(artifact_root),
+    }
+    completed = subprocess.run(
+        [str(runtime_python()), "-m", "codex_backend_sdk.provider_broker"],
+        input=json.dumps(payload, separators=(",", ":")) + "\n", text=True,
+        capture_output=True, timeout=1900, check=False, env=os.environ.copy(),
+    )
+    try:
+        value = json.loads(completed.stdout.splitlines()[-1])
+    except (ValueError, IndexError):
+        return {"exit_code": completed.returncode or 70, "stdout": completed.stdout[-1048576:],
+                "stderr": completed.stderr[-1048576:]}
+    if value.get("ok") is not True:
+        return {"exit_code": completed.returncode or 70,
+                "stdout": json.dumps(value, separators=(",", ":")),
+                "stderr": completed.stderr[-1048576:]}
+    normalized = {
+        "ok": True,
+        "state": "collected",
+        "provider_acceptance_observed": True,
+        "assistant_terminal": True,
+        "conversation_id": value.get("conversation_id"),
+        "user_message_id": value.get("user_message_id"),
+        "terminal_assistant_message_id": value.get("assistant_message_id"),
+        "terminal_assistant_text": value.get("assistant_text") or "",
+        "provider_model_receipt": value.get("provider_receipt") or {},
+        "downloaded_files": value.get("artifacts") or [],
+        "central_conversation_store": value.get("agent_memory") or {},
+    }
+    return {"exit_code": 0, "stdout": json.dumps(normalized, separators=(",", ":")), "stderr": ""}
 
 
 def transport(args: list[str], send_fence: dict | None = None) -> dict:
@@ -30,6 +98,10 @@ def transport(args: list[str], send_fence: dict | None = None) -> dict:
         return {"exit_code": 64, "stdout": json.dumps({"ok": False,
                 "state": "provider_observability_disabled",
                 "provider_acceptance_observed": False})}
+    if verb == "health":
+        ready = runtime_python().is_file() and (Path.home() / ".codex/auth.json").is_file()
+        return {"exit_code": 0 if ready else 69,
+                "stdout": json.dumps({"ok": ready, "state": "ready" if ready else "credential_unavailable"})}
     if verb == "send" and (not isinstance(send_fence, dict) or
             not all(send_fence.get(key) for key in
                     ("job_id", "worker_id", "lease_token", "lease_generation", "device_id"))):
@@ -46,11 +118,9 @@ def transport(args: list[str], send_fence: dict | None = None) -> dict:
             child_env = os.environ.copy()
             if send_fence:
                 child_env["COGNILODE_CHATMODE_SEND_FENCE"] = json.dumps(send_fence, separators=(",", ":"))
-            result = subprocess.run([sys.executable, str(SENDER), *args], env=child_env,
-                                    capture_output=True, text=True,
-                                    timeout=1900 if verb == "send" else 300, check=False)
-            return {"exit_code": result.returncode, "stdout": result.stdout[-1048576:],
-                    "stderr": result.stderr[-1048576:]}
+            if verb == "send":
+                return b4pt0r_send(args)
+            return {"exit_code": 64, "stderr": "unsupported provider operation"}
         except subprocess.TimeoutExpired:
             return {"exit_code": 124, "stderr": "provider transport deadline exceeded; reconcile exact mutation"}
     finally:

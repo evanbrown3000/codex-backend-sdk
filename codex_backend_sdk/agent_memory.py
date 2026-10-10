@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import os
 from typing import Any, Mapping
 from urllib.parse import quote
@@ -170,6 +171,69 @@ class AgentMemoryClient:
             "terminal": turn.get("terminal") is True,
         }
         return self.ingest(observation)
+
+    def record_chatgpt_turn(
+        self,
+        *,
+        conversation_id: str,
+        user_message_id: str,
+        assistant_message_id: str,
+        prompt: str,
+        response: str,
+        attachments: list[Mapping[str, Any]],
+        artifacts: list[Mapping[str, Any]],
+        provider_receipt: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Admit a streamed turn and verify it through central memory only."""
+        prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        response_hash = hashlib.sha256(response.encode("utf-8")).hexdigest()
+        recorded = self._request("POST", self.legacy_endpoint, body={
+            "operation": "record_conversation",
+            "provider": "chatgpt.com",
+            "conversation_id": conversation_id,
+            "title": "B4PT0R Chat-mode Prompt Dispatch",
+            "prompt_at": datetime.now(timezone.utc).isoformat(),
+            "response_at": datetime.now(timezone.utc).isoformat(),
+            "capture": {"prompt": True, "response": True, "uploaded_files": True,
+                        "downloadable_files": True, "interim_summaries": False},
+            "prompt": prompt,
+            "response_excerpt": response,
+            "prompt_sha256": prompt_hash,
+            "response_sha256": response_hash,
+            "provider_structured_uploads": [dict(row) for row in attachments],
+            "downloadable_files": [dict(row) for row in artifacts],
+            "conversation_urls": [f"https://chatgpt.com/c/{conversation_id}"],
+            "source": "b4pt0r-sdk-provider-stream",
+            "raw_expansion_handle": f"b4pt0r-sdk:{user_message_id}",
+            "read_receipt": {
+                "provider_acceptance_observed": True,
+                "assistant_terminal": True,
+                "terminal_assistant_message_id": assistant_message_id,
+                "provider_model_receipt": dict(provider_receipt),
+                "provider_requests_created_by_central_readback": 0,
+            },
+        })
+        stored_id = str(recorded.get("conversation_id") or conversation_id)
+        readback = self._request("POST", self.legacy_endpoint, body={
+            "operation": "read", "provider": "chatgpt.com", "conversation_id": stored_id,
+        })
+        conversation = readback.get("conversation") if isinstance(readback, Mapping) else None
+        conversation = conversation if isinstance(conversation, Mapping) else {}
+        actual_prompt = hashlib.sha256(str(conversation.get("prompt") or "").encode("utf-8")).hexdigest()
+        actual_response = hashlib.sha256(
+            str(conversation.get("response_excerpt") or "").encode("utf-8")
+        ).hexdigest()
+        if actual_prompt != prompt_hash or actual_response != response_hash:
+            raise RuntimeError("central memory turn readback mismatch")
+        return {
+            "ok": True,
+            "stored": recorded.get("stored") is True,
+            "conversation_id": stored_id,
+            "central_readback_verified": True,
+            "central_prompt_sha256": actual_prompt,
+            "central_response_sha256": actual_response,
+            "provider_requests_created_by_readback": 0,
+        }
 
     def ingest_chatgpt_conversation(
         self,

@@ -70,13 +70,17 @@ def _send(payload: Mapping[str, Any]) -> dict[str, Any]:
             artifact_directory=payload.get("artifact_directory") or root / "artifacts",
         )
         turn = result.get("turn") if isinstance(result.get("turn"), Mapping) else {}
-        observation = {
-            "conversation_id": result.get("conversation_id"),
-            "user_message_id": result.get("user_message_id"),
-            "turn": dict(turn),
-        }
         try:
-            memory = AgentMemoryClient(use_broker=False).ingest_chatgpt_turn(observation)
+            memory = AgentMemoryClient(use_broker=False).record_chatgpt_turn(
+                conversation_id=str(result.get("conversation_id") or ""),
+                user_message_id=str(result.get("user_message_id") or ""),
+                assistant_message_id=str(turn.get("assistant_message_id") or ""),
+                prompt=prompt,
+                response=str(turn.get("assistant_text") or ""),
+                attachments=[dict(row) for row in result.get("attachments") or []],
+                artifacts=_artifact_rows(turn),
+                provider_receipt=turn.get("model_receipt") or result.get("stream") or {},
+            )
         except Exception as exc:
             memory = {"ingested": False, "error": type(exc).__name__, "message": str(exc)}
         return {

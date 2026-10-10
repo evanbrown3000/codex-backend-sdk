@@ -97,7 +97,7 @@ def complete_job(payload: Mapping[str, Any]) -> dict[str, Any]:
     """
     try:
         return scheduler_call(payload)
-    except json.JSONDecodeError:
+    except Exception:
         job_id = str(payload.get("job_id") or "")
         for attempt in range(20):
             try:
@@ -662,9 +662,11 @@ def main() -> int:
                     "job_id": job_id, "error_type": type(exc).__name__,
                     "error": str(exc)[:4000],
                 }, sort_keys=True), flush=True)
-                # A crashed thread must never strand a claimed lease.  The
-                # scheduler remains the sole retry authority and preserves the
-                # same fenced job identity for the next permitted attempt.
+                # Completion may already be durable even when a subsequent
+                # local operation (most notably JSON reply decoding) failed.
+                # Reconcile the scheduler read model before requesting any
+                # retry.  If the read itself is unavailable, leave the lease
+                # fenced rather than risk replaying an accepted mutation.
                 print(json.dumps({
                     "kind": "provider_actuator_exception",
                     "provider": args.provider,
@@ -672,6 +674,17 @@ def main() -> int:
                     "error": type(exc).__name__ + ":" + str(exc)[:2000],
                 }), flush=True)
                 try:
+                    observed = scheduler_call({"operation": "get_job", "job_id": job_id})
+                    durable = (observed.get("job")
+                               if isinstance(observed.get("job"), Mapping) else {})
+                    durable_state = str(durable.get("state") or "")
+                    if durable_state in {"complete", "rejected", "cancelled"}:
+                        print(json.dumps({
+                            "kind": "provider_actuator_terminal_preserved",
+                            "provider": args.provider, "job_id": job_id,
+                            "state": durable_state,
+                        }, sort_keys=True), flush=True)
+                        return
                     scheduler_call({
                         "operation": "release_job", **fence(job),
                         "provider_state": "provider_error",

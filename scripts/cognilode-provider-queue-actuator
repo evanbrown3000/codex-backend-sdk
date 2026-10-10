@@ -528,7 +528,13 @@ def main() -> int:
                                     "retry_after_seconds": 1,
                                 })
                         else:
-                            launch(job)
+                            # A prior generation may have finished the exact
+                            # provider mutation after its old lease expired.
+                            # The freshly claimed fence is the first safe
+                            # opportunity to commit that durable receipt; do
+                            # so before authorizing any replay.
+                            if not recover_terminal(job):
+                                launch(job)
         except Exception as exc:
             print(json.dumps({"kind": "provider_actuator_retry", "provider": args.provider,
                               "error": type(exc).__name__ + ":" + str(exc)[:300]}), flush=True)

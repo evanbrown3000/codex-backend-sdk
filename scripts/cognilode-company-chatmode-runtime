@@ -101,6 +101,25 @@ def launch(source: Path) -> subprocess.Popen:
     return launch_prepared(*release_for(source))
 
 
+def latest_complete_cli() -> Path | None:
+    """Return an already published CLI so cold starts keep custody live.
+
+    Building the moving source frontier can take minutes.  A container restart
+    must not leave the provider queue without an actuator during that build.
+    Completed immutable releases are safe bootstrap executables; the normal
+    frontier preparation below replaces them after the current release exists.
+    """
+    root = Path(os.environ.get(
+        "COGNILODE_B4PT0R_RELEASE_ROOT", "/runtime/b4pt0r-releases/locked-v2"
+    ))
+    candidates = []
+    for marker in root.glob("*/.complete"):
+        cli = marker.parent / "bin" / "b4pt0r"
+        if cli.is_file():
+            candidates.append((marker.stat().st_mtime_ns, cli))
+    return max(candidates, default=(0, None))[1]
+
+
 def prepare_frontier() -> tuple[Path, Path, Path]:
     """Build toward the moving source frontier without stopping provider work.
 
@@ -138,8 +157,19 @@ def drain(process: subprocess.Popen) -> None:
 def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    source, runner, cli = prepare_frontier()
-    process = launch_prepared(runner, cli)
+    source = active_source()
+    bootstrap_cli = latest_complete_cli()
+    target_cli = Path(os.environ.get(
+        "COGNILODE_B4PT0R_RELEASE_ROOT", "/runtime/b4pt0r-releases/locked-v2"
+    )) / source.name / "bin" / "b4pt0r"
+    if bootstrap_cli is not None and not target_cli.is_file():
+        process = launch_prepared(source / "scripts" / "b4pt0r-com-batch-daemon", bootstrap_cli)
+        source, runner, cli = prepare_frontier()
+        drain(process)
+        process = launch_prepared(runner, cli)
+    else:
+        source, runner, cli = prepare_frontier()
+        process = launch_prepared(runner, cli)
     while not STOP:
         if process.poll() is not None:
             source, runner, cli = prepare_frontier()

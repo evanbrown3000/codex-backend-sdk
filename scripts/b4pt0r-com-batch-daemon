@@ -221,14 +221,9 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
         if value.strip()
     }
     workers: list[tuple[list[str], dict[str, str]]] = []
-    # The rhythm clock is a queue concern, not a provider-worker concern.  Run
-    # exactly one clock driver beside the provider actuators so a container
-    # restart cannot leave healthy workers permanently idle with due jobs.
-    floor_watcher = HERE / "cognilode-chatmode-floor-watcher"
-    if floor_watcher.is_file():
-        workers.append(([
-            str(CLI.rsplit("/", 1)[0] + "/python"), str(floor_watcher),
-        ], {}))
+    # The central provider scheduler is the singular biological-clock owner.
+    # Provider actuators advertise capacity and consume leases only; starting
+    # the historical floor watcher here would create a second clock caller.
     event_publisher = HERE / "cognilode-provider-event-publisher"
     if event_publisher.is_file():
         workers.append(([str(CLI.rsplit("/", 1)[0] + "/python"), str(event_publisher)], {}))

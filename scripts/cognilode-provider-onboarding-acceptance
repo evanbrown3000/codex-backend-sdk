@@ -98,13 +98,25 @@ def main() -> int:
         authored = prompt_for(provider, following)
         request_id = "area1-sequential-proof-" + provider.split(".")[0] + "-v1"
         # Preserve the first already-admitted ChatGPT operation rather than
-        # creating a second mutation solely because acceptance became durable.
+        # accepting its known-short result.  The v2 identity requires the
+        # requested model/effort and gives the native worker an unambiguous
+        # five-minute execution contract.
+        model = None
+        effort = None
         if provider == "chatgpt.com":
-            request_id = "area1-onboard-chatgpt-v1"
-            authored = (root / "chatgpt-objective.md").read_text(encoding="utf-8")
+            request_id = "area1-onboard-chatgpt-v2"
+            model = "gpt-5.6-sol"
+            effort = "max"
+            authored = prompt_for(provider, following) + (
+                " Perform no fewer than three implementation passes: source and interface audit, "
+                "complete implementation, then integration hardening and artifact verification. "
+                "Do not submit the terminal answer until at least 300 seconds have elapsed since "
+                "provider-side work began; use all remaining time for substantive source work."
+            )
         parent_id = request_id if provider == "chatgpt.com" else "area1-four-provider-acceptance"
         queued = client.send_provider(
             provider=provider, prompt=authored, attachments=tuple(inherited),
+            model=model, effort=effort,
             request_id=request_id, project="unified-provider-actuation",
             role="provider-implementation-worker", source="area1-sequential-onboarding",
             prompt_authority="taskflow_plan", priority=100000, collect_artifacts=True,

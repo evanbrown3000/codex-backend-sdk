@@ -88,6 +88,8 @@ services:
     image: ${COGNILODE_BROWSER_IMAGE:-362928919715.dkr.ecr.us-west-2.amazonaws.com/cognilode-always-on-node:20261002-v2}
     restart: unless-stopped
     shm_size: 1gb
+    ports:
+      - "127.0.0.1:9334:9334"
     entrypoint: [sh, -c]
     command:
       - |
@@ -164,7 +166,7 @@ services:
       # host reconciliation defers its replacement until all effect leases
       # reach terminal receipt or their real scheduler expiry.
       COGNILODE_PROVIDER_SCHEDULER_DB: /runtime/provider-scheduler/scheduler.sqlite3
-      COMPUTERUSEX_CDP_ENDPOINT: ${COMPUTERUSEX_CDP_ENDPOINT:-http://provider-browser:9334}
+      COMPUTERUSEX_CDP_ENDPOINT: ${COMPUTERUSEX_CDP_ENDPOINT:-http://127.0.0.1:9334}
       AGENT_MEMORY_ENDPOINT: http://127.0.0.1:8098/v1/conversations
       AGENT_MEMORY_INGEST_ENDPOINT: http://127.0.0.1:8098/v1/conversations/ingest
       AGENT_MEMORY_INVENTORY_ENDPOINT: http://127.0.0.1:8098/v1/inventory/events

@@ -392,6 +392,14 @@ class ProviderCommandClient:
     def queue_status(self, provider: str = "chatgpt.com") -> dict[str, Any]:
         return self._queue_call({"operation": "rhythm_read", "provider": provider})
 
+    def reconcile_parent_intents(self, *, selected_job_id: str,
+                                 parent_operation_id: str) -> dict[str, Any]:
+        return self._queue_call({
+            "operation": "reconcile_parent_intents",
+            "selected_job_id": selected_job_id,
+            "parent_operation_id": parent_operation_id,
+        })
+
     def queue_ledger(self, *, after_sequence: int = 0, limit: int = 200) -> dict[str, Any]:
         return self._queue_call({"operation": "queue_ledger", "after_sequence": after_sequence, "limit": limit})
 

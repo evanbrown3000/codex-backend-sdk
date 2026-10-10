@@ -41,6 +41,7 @@ def purpose(method: str, url: str) -> tuple[str, str, str]:
         # no trailing slash, so it must not inherit the observability gate.
         if method in {"POST", "PUT", "PATCH"} and (
             path == "/backend-api/files" or path.startswith("/backend-api/files/")
+            or (method == "POST" and path == "/backend-api/sentinel/chat-requirements/prepare")
             or "/conversation" in path or "/uploads" in path
         ):
             return "chatmode_prompt_or_upload", host, path

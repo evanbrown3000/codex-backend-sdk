@@ -392,7 +392,10 @@ services:
   remote-shell:
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
-    network_mode: bridge
+    # The named tunnel needs the host's egress route to Cloudflare edge :7844.
+    # The process remains in Docker and binds loopback only; the authenticated
+    # tunnel is its sole inbound route.
+    network_mode: host
     cpus: 2
     pids_limit: 512
     mem_limit: 4g
@@ -409,6 +412,7 @@ services:
       CODEX_HOME: /home/worker/.codex
       COGNILODE_WORKSPACE: /runtime/source/current
       COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
+      COGNILODE_MCP_BIND_HOST: 127.0.0.1
       COGNILODE_RELAY_NODE_FILE: /relay/node.json
       COGNILODE_HEARTBEAT_STATUS: /runtime/relay/heartbeat.json
       COGNILODE_ROLLOUT_SOCKET: /runtime/drive-rollouts/rollouts.sock
@@ -434,7 +438,7 @@ services:
   codex-exec-server:
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
-    network_mode: "service:remote-shell"
+    network_mode: host
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
     working_dir: /runtime/source/current
     entrypoint: [sh, -c, "until test -x /codex/bin/codex; do sleep 10; done; exec /codex/bin/codex exec-server --listen ws://127.0.0.1:8799"]
@@ -508,7 +512,7 @@ services:
   remote-shell-tunnel:
     image: cloudflare/cloudflared:2026.9.0@sha256:ff69a2225ad7c6f85ed84fbd5f3087df46202426b2388ec60214098e0adf05e9
     restart: unless-stopped
-    network_mode: "service:remote-shell"
+    network_mode: host
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
     # This environment has no usable UDP route to the edge; QUIC loops on
     # network-unreachable while the registered node appears healthy locally.

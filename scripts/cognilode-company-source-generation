@@ -48,13 +48,9 @@ def service_python(source: Path) -> Path | None:
             if path.is_dir() and path != configured
         )
     repository = source.parent.parent
-    try:
-        revision = subprocess.check_output(
-            ["git", "-C", str(repository), "rev-parse", "HEAD"],
-            text=True, timeout=15,
-        ).strip()
-    except (OSError, subprocess.SubprocessError):
-        revision = repository.name
+    # The source frontier is an immutable revision-named checkout.  Its git
+    # metadata can point at a shared moving branch and is not its identity.
+    revision = repository.name
     for root in roots:
         release = root / revision
         interpreter = release / "bin/python"

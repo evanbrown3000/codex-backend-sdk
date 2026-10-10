@@ -55,7 +55,9 @@ def watch_provider(sender, provider: str, status_root: Path) -> None:
     """Each provider has an independent clock and retry cadence."""
     next_status_at = 0.0
     last_event = None
+    retry_delay = 10.0
     while True:
+        sleep_for = 30.0
         try:
             observed = live_sender_count() if provider == "chatgpt.com" else None
             include_status = time.monotonic() >= next_status_at
@@ -96,16 +98,32 @@ def watch_provider(sender, provider: str, status_root: Path) -> None:
                      job_id=job.get("id"))
                 next_status_at = 0.0  # The next scheduled tick captures the new frontier.
             last_event = event_key
+            retry_delay = 10.0
+            due = result.get("due_at") or ((result.get("clock") or {}).get("pacing") or {}).get("next_due_at")
+            if due and result.get("status") == "not_due":
+                from datetime import datetime
+                try:
+                    due_epoch = datetime.fromisoformat(str(due).replace("Z", "+00:00")).timestamp()
+                    sleep_for = max(5.0, min(60.0, due_epoch - time.time()))
+                except ValueError:
+                    sleep_for = 30.0
+            elif result.get("status") in {"deferred", "no_ready_job"}:
+                sleep_for = 60.0
+            elif result.get("status") in {"claimed", "reassigned"}:
+                sleep_for = 10.0
         except Exception as exc:
             emit("hosted_queue_tick_retry", provider=provider,
                  error=f"{type(exc).__name__}:{str(exc)[:200]}")
-        time.sleep(10)
+            sleep_for = retry_delay
+            retry_delay = min(300.0, retry_delay * 2)
+        time.sleep(sleep_for)
 
 
 def main() -> int:
     here = Path(__file__).resolve().parent
     sender = load(here / "cognilode-b4pt0r-chatmode", "cognilode_floor_sender")
-    requested = os.environ.get("COGNILODE_HOSTED_RHYTHM_PROVIDERS", "chatgpt.com")
+    requested = os.environ.get("COGNILODE_HOSTED_RHYTHM_PROVIDERS",
+                               "chatgpt.com,gemini.com,claude.com,anthropic.com")
     providers = tuple(dict.fromkeys(value.strip() for value in requested.split(",") if value.strip()))
     allowed = {"chatgpt.com", "gemini.com", "claude.com", "anthropic.com"}
     if not providers or any(provider not in allowed for provider in providers):

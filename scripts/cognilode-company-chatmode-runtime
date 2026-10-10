@@ -93,6 +93,7 @@ def release_for(source: Path) -> tuple[Path, Path]:
 def launch_prepared(runner: Path, cli: Path) -> subprocess.Popen:
     environment = os.environ.copy()
     environment["B4PT0R_CLI"] = str(cli)
+    environment["COMPUTERUSEX_SKIP_IMPORT_GUARDS"] = "1"
     return subprocess.Popen(
         [sys.executable, str(runner)], env=environment, start_new_session=True
     )

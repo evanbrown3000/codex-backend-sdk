@@ -154,7 +154,20 @@ class ProviderCommandClient:
             # after its first admission response was lost.  Resolve only the
             # central queue identity (never provider history), and accept it
             # only when the immutable work identity still matches.
-            existing_value = self._queue_call({"operation": "get_job", "job_id": request_id})
+            parent = request.get("parent_operation") if isinstance(
+                request.get("parent_operation"), Mapping
+            ) else {}
+            parent_id = str(parent.get("operation_id") or request_id)
+            provider = str(request.get("provider") or "")
+            # The scheduler's durable identity is derived from provider,
+            # parent operation, and caller request identity; it is not the
+            # request identity itself.  Reconstruct that public identity so a
+            # restarted higher-order caller can resume its admitted operation
+            # instead of looping forever on a false missing-job conflict.
+            existing_job_id = "provider-" + hashlib.sha256(
+                "|".join((provider, parent_id, request_id)).encode("utf-8")
+            ).hexdigest()[:32]
+            existing_value = self._queue_call({"operation": "get_job", "job_id": existing_job_id})
             existing = existing_value.get("job") if isinstance(existing_value.get("job"), Mapping) else {}
             prompt_hash = hashlib.sha256(str(request.get("prompt") or "").encode("utf-8")).hexdigest()
             expected_attachments = sorted(

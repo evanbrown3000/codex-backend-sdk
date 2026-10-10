@@ -175,7 +175,7 @@ services:
       COGNILODE_SOURCE_SYNC_GENERATION: full-history-v1
       COGNILODE_AWS_PURPOSE: secrets-read
       COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
-      COGNILODE_CODEX_SOURCE_COMMIT: 58d3c213c5fb9926d55cbf1a3ec754a988f821d2
+      COGNILODE_CODEX_SOURCE_COMMIT: b8a7ada964a0dd8a730870185aae863e611f3e9e
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
@@ -195,7 +195,7 @@ services:
       AWS_CONFIG_FILE: /root/.aws/config
       AWS_SHARED_CREDENTIALS_FILE: /root/.aws/credentials
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
-      COGNILODE_CODEX_SOURCE_COMMIT: 58d3c213c5fb9926d55cbf1a3ec754a988f821d2
+      COGNILODE_CODEX_SOURCE_COMMIT: b8a7ada964a0dd8a730870185aae863e611f3e9e
       COGNILODE_CODEX_INSTALL_ROOT: /codex
       COGNILODE_CODEX_RELEASE_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
       COGNILODE_AWS_CLI: /usr/bin/aws

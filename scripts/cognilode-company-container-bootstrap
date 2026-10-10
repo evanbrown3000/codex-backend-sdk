@@ -414,12 +414,12 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
                                       capture_output=True, text=True, check=False).stdout.strip()
             synced_main = subprocess.run(["git", "-C", str(synced), "rev-parse", "origin/main"],
                                          capture_output=True, text=True, check=False).stdout.strip()
-            known_main = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "origin/main"],
-                                        capture_output=True, text=True, check=False).stdout.strip()
-            current_enough = (known_main and subprocess.run(
-                ["git", "-C", str(synced), "merge-base", "--is-ancestor", known_main, selected],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0)
-            if selected and selected == synced_main and current_enough:
+            # Source convergence publishes a shallow, immutable checkout and
+            # advances ``current`` only after its selected revision equals that
+            # checkout's origin/main. Requiring Git ancestry against the old
+            # shallow runtime makes every later revision incomparable and
+            # permanently pins this daemon to its bootstrap generation.
+            if selected and selected == synced_main:
                 synced_starter = synced / "scripts/cognilode-company-container-bootstrap"
                 loaded_revision = os.environ.get("COGNILODE_BOOTSTRAP_LOADED_REVISION", "")
                 if (synced_starter.is_file() and
@@ -602,14 +602,7 @@ def main() -> int:
                                       capture_output=True, text=True, check=False).stdout.strip()
             remote_main = subprocess.run(["git", "-C", str(synced), "rev-parse", "origin/main"],
                                          capture_output=True, text=True, check=False).stdout.strip()
-            # A promoted checkout can lag a newer origin/main already known to
-            # this starter. Never hand startup back to that stale checkout.
-            known_main = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "origin/main"],
-                                        capture_output=True, text=True, check=False).stdout.strip()
-            current_enough = (known_main and selected and subprocess.run(
-                ["git", "-C", str(synced), "merge-base", "--is-ancestor", known_main, selected],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0)
-            if (current and selected and selected == remote_main and current_enough
+            if (current and selected and selected == remote_main
                     and selected != current
                     and candidate.resolve() != Path(__file__).resolve()):
                 os.execve(sys.executable, [sys.executable, str(candidate)],

@@ -218,6 +218,10 @@ services:
       # reach terminal receipt or their real scheduler expiry.
       COGNILODE_PROVIDER_SCHEDULER_DB: /runtime/provider-scheduler/scheduler.sqlite3
       COMPUTERUSEX_CDP_ENDPOINT: ${COMPUTERUSEX_CDP_ENDPOINT:-http://127.0.0.1:9334}
+      # Provider receipts, network captures and returned physical artifacts
+      # must survive immutable chatmode container rotation.  ComputerUseX's
+      # default ~/.local/state path is not a custody mount in this service.
+      COMPUTERUSEX_RUNTIME_ROOT: /home/worker/.local/share/cognilode/computerusex
       AGENT_MEMORY_ENDPOINT: http://127.0.0.1:8098/v1/conversations
       AGENT_MEMORY_INGEST_ENDPOINT: http://127.0.0.1:8098/v1/conversations/ingest
       AGENT_MEMORY_INVENTORY_ENDPOINT: http://127.0.0.1:8098/v1/inventory/events

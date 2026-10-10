@@ -166,12 +166,21 @@ def complete_insufficient_chatgpt(job: Mapping[str, Any], result: Mapping[str, A
 
 
 def provider_execution_seconds(result: Mapping[str, Any]) -> float | None:
-    receipt = result.get("provider_receipt")
-    candidates = [result]
-    if isinstance(receipt, Mapping):
-        candidates.append(receipt)
-        nested = receipt.get("provider_receipt")
-        if isinstance(nested, Mapping):
+    # The unified ChatGPT path intentionally wraps the native model receipt:
+    # normalized result -> provider_receipt -> provider_model_receipt.  Walk
+    # the bounded receipt envelope rather than treating that valid shape as a
+    # sub-five-minute turn and rejecting an accepted terminal artifact.
+    candidates: list[Mapping[str, Any]] = [result]
+    for candidate in list(candidates):
+        for key in ("provider_receipt", "provider_model_receipt"):
+            nested = candidate.get(key)
+            if isinstance(nested, Mapping) and nested not in candidates:
+                candidates.append(nested)
+    # The first pass can append provider_receipt; visit that wrapper once to
+    # reach its provider_model_receipt without permitting unbounded traversal.
+    for candidate in list(candidates[1:]):
+        nested = candidate.get("provider_model_receipt")
+        if isinstance(nested, Mapping) and nested not in candidates:
             candidates.append(nested)
     for candidate in candidates:
         elapsed = candidate.get("elapsed_seconds")

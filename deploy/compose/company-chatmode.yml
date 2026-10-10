@@ -180,7 +180,10 @@ services:
       # Provider populations have independent clocks and workers.  Keep every
       # native fallback available so a broken ChatGPT route cannot prevent
       # Gemini, Claude, or Anthropic from repairing it.
-      COGNILODE_HOSTED_RHYTHM_PROVIDERS: ${COGNILODE_HOSTED_RHYTHM_PROVIDERS:-chatgpt.com,gemini.com,claude.com,anthropic.com}
+      # The provider population is desired state, not a host bootstrap option.
+      # A stale host override previously collapsed this back to ChatGPT-only
+      # and made the independent Gemini/Claude/Anthropic queues inert.
+      COGNILODE_HOSTED_RHYTHM_PROVIDERS: "chatgpt.com,gemini.com,claude.com,anthropic.com"
       # The centrally-custodied provider browser is attached to the company
       # network; provider actuators must never fall back to a host/personal
       # browser on the unrelated Docker bridge.

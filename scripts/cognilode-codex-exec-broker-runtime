@@ -90,9 +90,12 @@ def ensure_bubblewrap() -> None:
 
 def probe_bubblewrap() -> None:
     """Prove the actual unprivileged broker can read its mounted work context."""
+    # Codex preflights a fresh procfs mount and falls back to the inherited
+    # read-only procfs in restrictive containers. The readiness probe checks
+    # that same fallback while retaining user, network, and PID isolation.
     result = subprocess.run([str(BWRAP), "--die-with-parent", "--unshare-user",
                              "--unshare-net", "--unshare-pid", "--ro-bind", "/", "/",
-                             "--proc", "/proc", "--dev-bind", "/dev", "/dev",
+                             "--dev-bind", "/dev", "/dev",
                              "/bin/sh", "-c",
                              "test -r /runtime/worker && test -r /codex/bin/codex"],
                             capture_output=True, text=True, timeout=20, check=False)

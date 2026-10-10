@@ -70,11 +70,12 @@ def candidate(pin: str) -> tuple[str, str]:
     # index read cannot stage an object or hydrate a provider conversation.
     try:
         token = TOKEN_FILE.read_text().strip().removeprefix('Bearer ').strip()
-        committed = request_json(BASE, '/api/operator/codex-rollouts?limit=20',
+        committed = request_json(BASE, '/api/operator/codex-rollouts?limit=50',
             token, method='GET', timeout=30)
-    except (OSError, RuntimeError):
-        committed = {}
-    for item in (committed.get('items') or [])[:20]:
+    except (OSError, RuntimeError) as error:
+        raise RuntimeError('committed rollout index unavailable retry_after_seconds=300') from error
+    stock_failed = False
+    for item in (committed.get('items') or [])[:50]:
         provider_id = str(item.get('conversation_id') or '')
         if not UUID.fullmatch(provider_id):
             continue
@@ -83,29 +84,14 @@ def candidate(pin: str) -> tuple[str, str]:
                 'reader_id': 'codex-release-acceptance:' + pin[:12],
                 'limit': 1, 'peek': True})
         except RuntimeError:
+            stock_failed = True
             continue
         last_seq = preview.get('last_seq')
         if isinstance(last_seq, int) and 0 <= last_seq <= 500:
             return provider_id, str(preview.get('conversation', {}).get('thread_id') or '')
-    offset = 0
-    for _ in range(10):
-        page = stock({'action': 'list', 'provider': 'chatgpt', 'limit': 50,
-            'offset': offset})
-        for item in page.get('items') or []:
-            provider_id = str(item.get('provider_conversation_id') or '')
-            if not UUID.fullmatch(provider_id):
-                continue
-            selector = 'chatgpt:' + provider_id
-            preview = stock({'action': 'read', 'selector': selector,
-                'reader_id': 'codex-release-acceptance:' + pin[:12],
-                'limit': 1, 'peek': True})
-            last_seq = preview.get('last_seq')
-            if isinstance(last_seq, int) and 0 <= last_seq <= 500:
-                return provider_id, str(preview.get('conversation', {}).get('thread_id') or '')
-        if page.get('next_offset') is None:
-            break
-        offset = int(page['next_offset'])
-    raise RuntimeError('no bounded ChatGPT conversation in indexed stock')
+    if stock_failed:
+        raise RuntimeError('committed rollout stock preview unavailable retry_after_seconds=300')
+    raise RuntimeError('no bounded committed ChatGPT rollout retry_after_seconds=900')
 
 
 def rpc(process: subprocess.Popen, request_id: int, method: str, params: dict,
@@ -168,17 +154,25 @@ def run() -> dict:
     if marker.is_file():
         return json.loads(marker.read_text())
     pending = pending_state(pin)
+    if pending and pending.get('candidate_source') not in \
+            ('committed-index', 'committed-index-pending'):
+        # Earlier acceptance could select an uncommitted stock conversation.
+        # Keep its writer outbox intact but stop demanding it as a test input.
+        pending = {'source_pin': pin, 'candidate_source': 'committed-index-pending'}
+        save_pending(pin, pending)
     deadline = pending.get('retry_at', 0)
     wait = math.ceil(deadline - time.time()) if isinstance(deadline, (int, float)) else 0
     if wait > 0:
         raise RetryDeferred(wait)
-    if UUID.fullmatch(str(pending.get('conversation_id') or '')):
+    if pending.get('candidate_source') == 'committed-index' and \
+            UUID.fullmatch(str(pending.get('conversation_id') or '')):
         conversation_id = pending['conversation_id']
         stock_thread_id = str(pending.get('stock_thread_id') or '')
     else:
         conversation_id, stock_thread_id = candidate(pin)
         save_pending(pin, {'source_pin': pin, 'conversation_id': conversation_id,
-            'stock_thread_id': stock_thread_id, 'retry_at': 0})
+            'stock_thread_id': stock_thread_id, 'candidate_source': 'committed-index',
+            'retry_at': 0})
     # Keep imported ChatGPT rollouts outside the Codex-origin publisher's
     # session tree. This prevents a read-only acceptance from republishing an
     # external conversation as though it were a new Codex-authored thread.
@@ -262,6 +256,7 @@ if __name__ == '__main__':
                     pin = source_pin()
                     pending = pending_state(pin)
                     pending['source_pin'] = pin
+                    pending.setdefault('candidate_source', 'committed-index-pending')
                     pending['retry_at'] = time.time() + max(delay, retry_after)
                     save_pending(pin, pending)
                 except (OSError, RuntimeError, ValueError):

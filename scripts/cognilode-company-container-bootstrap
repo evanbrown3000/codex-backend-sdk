@@ -466,7 +466,19 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
                         if deferred:
                             changed.remove("codex-builder")
                             print("company Compose deferring active native Codex build", flush=True)
-                        mutation_services = {"chatmode", "provider-transport"}.intersection(changed)
+                        # Every service participating in an accepted provider
+                        # operation is part of the same custody boundary. In
+                        # particular, replacing the queue actuator while its
+                        # sender is awaiting a terminal receipt used to bypass
+                        # this fence: the transport/chatmode remained alive,
+                        # but the accepted job's owner was killed and its
+                        # receipt could not be durably joined. The scheduler
+                        # also owns the effect lease/receipt ledger, so its
+                        # replacement must wait for the same quiescent point.
+                        mutation_services = {
+                            "chatmode", "provider-transport",
+                            "provider-scheduler", "returned-product-actuator",
+                        }.intersection(changed)
                         active_mutations = (provider_mutations_active(runtime)
                                             if mutation_services else 0)
                         if mutation_services and active_mutations != 0:

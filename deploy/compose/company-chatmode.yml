@@ -265,9 +265,39 @@ services:
       COGNILODE_PROVIDER_SCHEDULER_DB: /runtime/provider-scheduler/scheduler.sqlite3
       COGNILODE_PROVIDER_SCHEDULER_LEDGER: /runtime/provider-events/outbox.jsonl
       COGNILODE_PROVIDER_RHYTHM_TAPE: /runtime/source/current/control-execution-runtime/data/provider_scheduler/historical_rhythm.uleb128
+      # Area 2 has one source-converged clock caller below.  Keep the scheduler
+      # as the authority while disabling its optional embedded clock thread.
+      COGNILODE_PROVIDER_CLOCK_DRIVER: external
     volumes:
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
     depends_on:
+      - source-sync
+
+  provider-clock:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /runtime/source/current/codex-backend-sdk
+    entrypoint: [sh, -c]
+    command:
+      - |
+        while ! test -f /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-source-generation; do sleep 2; done
+        exec python3 /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-source-generation \
+          --script cognilode-chatmode-floor-watcher --drain-socket /runtime/provider-clock.no-drain --no-drain
+    environment:
+      HOME: /home/worker
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+      COGNILODE_PROVIDER_SCHEDULER_SOCKET: /runtime/provider-scheduler.sock
+      COGNILODE_PROVIDER_SOCKET: /runtime/provider.sock
+      COGNILODE_RHYTHM_STATUS_ROOT: /runtime/rhythm-status
+      COGNILODE_HOSTED_RHYTHM_PROVIDERS: "chatgpt.com,gemini.com,claude.com,anthropic.com"
+      COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
+    volumes:
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+    depends_on:
+      - provider-scheduler
+      - provider-transport
       - source-sync
 
   chatmode:

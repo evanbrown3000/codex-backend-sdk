@@ -8,7 +8,7 @@ services:
     restart: unless-stopped
     network_mode: bridge
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
-    working_dir: /company/codex-backend-sdk
+    working_dir: /runtime/source/current/codex-backend-sdk
     entrypoint: [sh, -c]
     command:
       - |
@@ -88,7 +88,7 @@ services:
     cpus: 1
     mem_limit: 2g
     pids_limit: 192
-    working_dir: /company/codex-backend-sdk
+    working_dir: /runtime/source/current/codex-backend-sdk
     entrypoint: [sh, -c]
     command:
       - |
@@ -221,8 +221,8 @@ services:
     restart: unless-stopped
     network_mode: bridge
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
-    working_dir: /company/codex-backend-sdk
-    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-company-source-sync]
+    working_dir: /runtime/source/current/codex-backend-sdk
+    entrypoint: [python3, /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-source-sync]
     environment:
       HOME: /home/worker
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
@@ -245,7 +245,7 @@ services:
     restart: unless-stopped
     network_mode: bridge
     user: "0:0"
-    working_dir: /company/codex-backend-sdk
+    working_dir: /runtime/source/current/codex-backend-sdk
     entrypoint: [python3, /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-codex-release-custody-runtime]
     environment:
       HOME: /tmp/cognilode-codex-release-custody
@@ -270,7 +270,7 @@ services:
     restart: unless-stopped
     network_mode: bridge
     user: "0:0"
-    working_dir: /company/codex-backend-sdk
+    working_dir: /runtime/source/current/codex-backend-sdk
     entrypoint: [python3, /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-codex-builder]
     environment:
       HOME: /root
@@ -645,7 +645,7 @@ services:
       COGNILODE_RPE_PROVIDER: chatgpt.com
       COGNILODE_RPE_CRITICAL_PILOT_RUN_ID: rpe-cf35d031f25f907c907ec3f4
       COGNILODE_RPE_REPOSITORY_REF: company://repository/codex-backend-sdk
-      COGNILODE_TASKFLOW_DISPATCH_CLI: /company/codex-backend-sdk/scripts/cognilode-taskflow-dispatch
+      COGNILODE_TASKFLOW_DISPATCH_CLI: /runtime/source/current/codex-backend-sdk/scripts/cognilode-taskflow-dispatch
       COGNILODE_TASKFLOW_SECRETARY_COMMAND: python3 -m modified_codex.taskflow_secretary submit
       COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
       COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2

@@ -84,10 +84,15 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
     # turn to Agent Memory, reads it back centrally, and only then completes
     # the fenced job.  Keeping it under this supervisor makes source cutovers
     # cooperative without copying that implementation into this repository.
-    computerusex = Path(os.environ.get(
-        "COGNILODE_COMPUTERUSEX_SOURCE",
-        "/company/automation-computeruse-vision/src",
-    ))
+    configured_computerusex = os.environ.get("COGNILODE_COMPUTERUSEX_SOURCE", "").strip()
+    candidates = [Path(configured_computerusex)] if configured_computerusex else [
+        Path("/runtime/source/current/automation-computeruse-vision/src"),
+        Path("/company/automation-computeruse-vision/src"),
+    ]
+    computerusex = next(
+        (candidate for candidate in candidates if (candidate / "computerusex").is_dir()),
+        candidates[0],
+    )
     gemini_worker = computerusex / "computerusex" / "g3_gemini_agent_memory_worker.py"
     if "gemini.com" in requested and gemini_worker.is_file():
         pythonpath = str(computerusex)

@@ -221,11 +221,19 @@ def provider_mutations_active(runtime: Path, *, drain: bool = False) -> int | No
 
 def codex_builder_compiling(project: str) -> bool:
     """Defer a config-only builder replacement while its native build runs."""
-    result = subprocess.run(["docker", "top", f"{project}-codex-builder-1", "-eo", "comm"],
+    result = subprocess.run(["docker", "top", f"{project}-codex-builder-1", "-eo", "pid,comm"],
                             capture_output=True, text=True, check=False, timeout=15)
     if result.returncode:
-        return False  # A missing/stopped builder must be recreated.
-    names = {line.strip().split()[0] for line in result.stdout.splitlines()[1:] if line.strip()}
+        # If inspection itself failed, do not assume a live builder is idle.
+        # A definitively absent/stopped container may be recreated normally.
+        state = subprocess.run(["docker", "inspect", "--format", "{{.State.Running}}",
+                                f"{project}-codex-builder-1"], capture_output=True,
+                               text=True, check=False, timeout=10)
+        return state.returncode == 0 and state.stdout.strip() == "true"
+    # docker top prefixes the requested columns with its own PID/elapsed
+    # fields; the command is the final token, not the first.
+    names = {line.strip().split()[-1] for line in result.stdout.splitlines()[1:]
+             if line.strip()}
     return bool(names.intersection({"cargo", "rustc", "build-install-c"}))
 
 

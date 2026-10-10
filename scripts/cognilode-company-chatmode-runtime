@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import fcntl
 from pathlib import Path
 import signal
 import shutil
@@ -41,28 +42,30 @@ def release_for(source: Path) -> tuple[Path, Path]:
     release = release_root / source.name
     cli = release / "bin" / "b4pt0r"
     marker = release / ".complete"
-    if cli.is_file() and marker.is_file():
-        return source / "scripts" / "b4pt0r-com-batch-daemon", cli
     release_root.mkdir(parents=True, exist_ok=True)
-    temporary = release_root / (source.name + ".building")
-    if temporary.exists():
-        shutil.rmtree(temporary)
-    builder = Path(os.environ.get("COGNILODE_VENV_PYTHON", "/usr/local/bin/python3"))
-    if not builder.is_file():
-        builder = Path(sys.executable)
-    subprocess.run([str(builder), "-m", "venv", "--clear", str(temporary)],
-                   check=True, timeout=300)
-    install = [str(temporary / "bin" / "python"), "-m", "pip", "install", "--no-cache-dir", str(source)]
-    universe = Path(os.environ.get(
-        "COGNILODE_UNIVERSE_STORAGE_ROOT", "/runtime/source/current/universe-storage"
-    )).resolve()
-    if universe.is_dir():
-        install.append(str(universe))
-    subprocess.run(install, check=True, timeout=900)
-    (temporary / ".complete").write_text(source.name + "\n", encoding="utf-8")
-    if release.exists():
-        shutil.rmtree(release)
-    temporary.replace(release)
+    with (release_root / ".release-build.lock").open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if cli.is_file() and marker.is_file():
+            return source / "scripts" / "b4pt0r-com-batch-daemon", cli
+        temporary = release_root / (source.name + f".building-{os.getpid()}")
+        if temporary.exists():
+            shutil.rmtree(temporary)
+        builder = Path(os.environ.get("COGNILODE_VENV_PYTHON", "/usr/local/bin/python3"))
+        if not builder.is_file():
+            builder = Path(sys.executable)
+        subprocess.run([str(builder), "-m", "venv", "--clear", str(temporary)],
+                       check=True, timeout=300)
+        install = [str(temporary / "bin" / "python"), "-m", "pip", "install", "--no-cache-dir", str(source)]
+        universe = Path(os.environ.get(
+            "COGNILODE_UNIVERSE_STORAGE_ROOT", "/runtime/source/current/universe-storage"
+        )).resolve()
+        if universe.is_dir():
+            install.append(str(universe))
+        subprocess.run(install, check=True, timeout=900)
+        (temporary / ".complete").write_text(source.name + "\n", encoding="utf-8")
+        if release.exists():
+            shutil.rmtree(release)
+        temporary.replace(release)
     return source / "scripts" / "b4pt0r-com-batch-daemon", release / "bin" / "b4pt0r"
 
 

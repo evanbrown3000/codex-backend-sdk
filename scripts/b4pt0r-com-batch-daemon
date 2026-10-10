@@ -55,14 +55,9 @@ def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     ROOT.mkdir(parents=True, exist_ok=True)
-    children = [
-        [str(CLI.rsplit("/", 1)[0] + "/python"), str(HERE / "cognilode-chatmode-queue-worker"),
-         "--device-id", os.environ.get("COGNILODE_ENVIRONMENT_ID", "company-container"),
-         "--interval", "60"],
-        [str(CLI.rsplit("/", 1)[0] + "/python"), str(HERE / "cognilode-chatmode-floor-watcher")],
-    ]
-    for child in children:
-        threading.Thread(target=supervise, args=(child,), daemon=True).start()
+    # Provider work is event-driven.  Queue/floor polling belongs nowhere in
+    # this runtime; batches are durable local intake and the provider stream is
+    # the only network activity until a terminal response or artifact arrives.
     retry: dict[str, tuple[int, float]] = {}
     while not STOP:
         now = time.time()

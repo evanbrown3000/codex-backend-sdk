@@ -206,6 +206,7 @@ class Bridge:
         self._state_lock = threading.RLock()
         self._pending: dict[str, Pending] = {}
         self._selected_environment = self._initial_environment()
+        self._native_confirmed = self._selected_environment == "local"
         self._transport: AppServerTransport | None = None
         self._start_transport(self._selected_environment)
 
@@ -259,6 +260,7 @@ class Bridge:
         with self._state_lock:
             prior = self._transport
             self._transport = None
+            self._selected_environment = environment_id
             if prior is not None:
                 prior.close()
             if environment_id == "local":
@@ -273,7 +275,6 @@ class Bridge:
                     handler=self._native_message,
                     stderr_handler=self.stderr,
                 )
-            self._selected_environment = environment_id
 
     def native_send(self, value: Mapping[str, Any]) -> None:
         with self._state_lock:
@@ -282,6 +283,13 @@ class Bridge:
             self._transport.send(value)
 
     def _native_message(self, message: dict[str, Any]) -> None:
+        if self._selected_environment != "local" and not self._native_confirmed:
+            self._native_confirmed = True
+            self.emit({"method": "cognilode/environment/status", "params": {
+                "environmentId": self._selected_environment,
+                "nativeCodexAvailable": True,
+                "nativeCodexState": "running",
+            }})
         message_id = message.get("id")
         if isinstance(message_id, str) and message_id in self._pending:
             pending = self._pending.pop(message_id)
@@ -496,8 +504,9 @@ class Bridge:
             raise ValueError("environmentId is required")
         if environment_id != "local":
             self.remote.select(environment_id)
-        native_available = True
+        native_available: bool | None = True if environment_id == "local" else None
         native_error = None
+        self._native_confirmed = environment_id == "local"
         try:
             self._start_transport(environment_id)
         except Exception as exc:
@@ -512,7 +521,10 @@ class Bridge:
             "environmentId": environment_id,
             "selected": True,
             "nativeCodexAvailable": native_available,
-            "nativeCodexState": "running" if native_available else "installation_pending",
+            "nativeCodexState": (
+                "running" if native_available is True else
+                "installation_pending" if native_available is False else "starting"
+            ),
             **({"nativeCodexError": native_error} if native_error else {}),
         }})
 

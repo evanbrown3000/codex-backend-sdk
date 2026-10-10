@@ -360,6 +360,9 @@ class ComputerUseXProviderAdapter:
         os.environ.setdefault("XDG_DATA_HOME", "/runtime/worker/xdg-data")
         os.environ.setdefault("XDG_STATE_HOME", "/runtime/worker/xdg-state")
         os.environ.setdefault("XDG_CACHE_HOME", "/runtime/worker/xdg-cache")
+        # A .com provider adapter must never consume Codex quota as a hidden
+        # recovery path. Queue-authorized retries remain provider-native.
+        os.environ["COGNILODE_PROVIDER_CODEX_RECOVERY"] = "0"
         source = Path(os.environ.get(
             "COMPUTERUSEX_SOURCE", "/runtime/source/current/automation-computeruse-vision/src"
         ))

@@ -180,7 +180,12 @@ def main() -> int:
     args = parser.parse_args()
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    device = args.device_id + ":b4pt0r:" + args.provider
+    # Preserve the established ChatGPT device identity so already-fenced
+    # scheduler leases survive the migration from the legacy worker to this
+    # provider-neutral actuator. Other providers retain distinct devices and
+    # independent concurrency.
+    device = (args.device_id if args.provider == "chatgpt.com"
+              else args.device_id + ":b4pt0r:" + args.provider)
     client = ProviderActuationClient([sys.executable, "-m", "codex_backend_sdk.provider_broker"], timeout=2400)
     while not STOP:
         try:

@@ -34,7 +34,20 @@ class ProviderActuationClient:
             detail = completed.stderr.strip()[-2000:]
             raise RuntimeError("credential custody broker returned no result" +
                                ((": " + detail) if detail else ""))
-        result = json.loads(rows[-1])
+        # Native browser adapters may emit diagnostics from imported provider
+        # libraries after the broker's receipt.  The transport contract is the
+        # last JSON object, not the last arbitrary stdout line.
+        result = None
+        for row in reversed(rows):
+            try:
+                candidate = json.loads(row)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict):
+                result = candidate
+                break
+        if result is None:
+            raise RuntimeError("credential custody broker returned no JSON object")
         if not isinstance(result, dict):
             raise RuntimeError("credential custody broker returned a non-object result")
         if completed.returncode and result.get("state") != "provider_error":

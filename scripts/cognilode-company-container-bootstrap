@@ -350,6 +350,13 @@ def stage_managed_codex_release(container: str, release_pin: str, tree: str,
         if ((stage / "source-commit").read_text().strip() != release_pin or
                 (stage / "rust-tree").read_text().strip() != tree):
             raise ValueError("staged release identity does not match selected source tree")
+        for name in ("codex", "codex-code-mode-host", "central-rollouts", "launcher",
+                     "managed-codex"):
+            (stage / name).chmod(0o755)
+        (stage / "code-mode-host-ready.json").chmod(0o644)
+        for name in ("source-commit", "rust-tree", "binary-source-commit", "SHA256SUMS"):
+            if (stage / name).exists():
+                (stage / name).chmod(0o644)
         return True
     except (OSError, ValueError, subprocess.CalledProcessError,
             subprocess.TimeoutExpired) as exc:
@@ -410,6 +417,44 @@ def reconcile_host_managed_codex(project: str, runtime: Path) -> None:
         if not stage_managed_codex_release(container, release_pin, tree, stage):
             return
         stage.replace(release)
+    else:
+        # A previous interrupted install may have streamed exact file bytes
+        # but not retained executable mode bits. Verify its immutable manifest
+        # once, restore package modes, then record a durable local verification
+        # receipt so normal supervisor polls do not re-read the 1 GiB binary.
+        try:
+            if ((release / "source-commit").read_text().strip() != release_pin or
+                    (release / "rust-tree").read_text().strip() != tree):
+                print("host managed Codex existing release identity mismatch", flush=True)
+                return
+            manifest_hash = hashlib.sha256((release / "SHA256SUMS").read_bytes()).hexdigest()
+            receipt_dir = root / "receipts"
+            receipt = receipt_dir / f"{release_pin}.json"
+            expected_receipt = {"source_commit": release_pin, "rust_tree": tree,
+                                "manifest_sha256": manifest_hash}
+            try:
+                verified = json.loads(receipt.read_text(encoding="utf-8")) == expected_receipt
+            except (OSError, ValueError):
+                verified = False
+            if not verified:
+                checked = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=release,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                         check=False, timeout=900)
+                if checked.returncode:
+                    print("host managed Codex existing release checksum mismatch", flush=True)
+                    return
+                receipt_dir.mkdir(parents=True, exist_ok=True)
+                temporary_receipt = receipt.with_suffix(".tmp")
+                temporary_receipt.write_text(json.dumps(expected_receipt, sort_keys=True) + "\n",
+                                             encoding="utf-8")
+                temporary_receipt.replace(receipt)
+            for name in ("codex", "codex-code-mode-host", "central-rollouts", "launcher",
+                         "managed-codex"):
+                (release / name).chmod(0o755)
+            (release / "code-mode-host-ready.json").chmod(0o644)
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            print(f"host managed Codex existing release validation pending: {exc}", flush=True)
+            return
     expected = f"../releases/{release_pin}/"
     links = {"codex-bin": expected + "codex", "codex": expected + "launcher",
              "codex-code-mode-host": expected + "codex-code-mode-host",

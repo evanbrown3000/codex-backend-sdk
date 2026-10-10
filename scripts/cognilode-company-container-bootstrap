@@ -433,16 +433,23 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             print(f"standalone adopter retirement pending: {exc}", flush=True)
         notify_service("WATCHDOG=1")
-        memory_source = runtime / "shared/source/current/memory-stock-canonical"
-        if (memory_source / ".git").exists():
+        memory_source = runtime / "shared/source/current/agent-memory"
+        memory_compose = memory_source / "deploy/compose/agent-memory.yml"
+        if (memory_source / ".git").exists() and memory_compose.is_file():
             revision = subprocess.run(["git", "-c", "safe.directory=*", "-C", str(memory_source),
                                        "rev-parse", "HEAD"], capture_output=True, text=True,
                                       check=False).stdout.strip()
             previous = memory_applied.read_text(encoding="utf-8").strip() if memory_applied.is_file() else ""
             if revision and revision != previous:
                 try:
+                    # Agent Memory owns its source mounts and companion source
+                    # vacuum. Reconcile its domain composition rather than
+                    # restarting the obsolete memory definition embedded in
+                    # the provider stack. This applies new WAL/storage mounts
+                    # and environment contracts, not only Python source.
                     subprocess.run(["docker", "compose", "--project-name", project,
-                                    "-f", str(applied_compose), "restart", "memory"],
+                                    "-f", str(memory_compose), "up", "-d", "--no-deps",
+                                    "memory", "source-vacuum"],
                                    env=env, check=True, timeout=180)
                 except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
                     print(f"memory source restart pending: {exc}", flush=True)

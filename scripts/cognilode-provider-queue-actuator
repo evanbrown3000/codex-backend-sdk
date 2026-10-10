@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import sys
 import time
 from typing import Any, Mapping
@@ -61,6 +62,9 @@ def evidence(result: Mapping[str, Any]) -> list[dict[str, Any]]:
             )})
     receipt = result.get("provider_receipt") if isinstance(result.get("provider_receipt"), Mapping) else {}
     uploads = receipt.get("attachments") or ([receipt.get("attachment")] if receipt.get("attachment") else [])
+    model_receipt = receipt.get("provider_model_receipt") if isinstance(receipt.get("provider_model_receipt"), Mapping) else {}
+    if model_receipt.get("attached_context_files"):
+        uploads = list(uploads if isinstance(uploads, list) else []) + list(model_receipt["attached_context_files"])
     for upload in uploads if isinstance(uploads, list) else []:
         if isinstance(upload, Mapping):
             item = upload.get("attachment") if isinstance(upload.get("attachment"), Mapping) else upload
@@ -69,12 +73,72 @@ def evidence(result: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [row for row in rows if row["ref"]]
 
 
+def chatgpt_transport(job: Mapping[str, Any]) -> dict[str, Any]:
+    job_id = str(job["id"])
+    prompt_root = Path("/runtime/provider-inputs")
+    prompt_root.mkdir(parents=True, exist_ok=True)
+    prompt_file = prompt_root / (job_id + ".txt")
+    prompt_file.write_text(str(job.get("prompt") or ""), encoding="utf-8")
+    args = [
+        "--auth-source", "codex", "send", "--prompt-file", str(prompt_file),
+        "--queue-job-id", job_id,
+        "--model", str(job.get("model") or "gpt-5-6-thinking"),
+        "--effort", str(job.get("reasoning_effort") or "xhigh"),
+        "--timeout", "1800", "--provider-attempt", str(job.get("lease_generation") or 1),
+        "--provider-account-id", "central-custody",
+    ]
+    if job.get("conversation_id"):
+        args.extend(["--conversation-id", str(job["conversation_id"])])
+    if job.get("parent_message_id"):
+        args.extend(["--parent-message-id", str(job["parent_message_id"])])
+    for row in job.get("attachment_refs") or ():
+        args.extend(["--attach", local_attachment(row)])
+    parent = job.get("parent_operation") if isinstance(job.get("parent_operation"), Mapping) else {}
+    request = {"operation": "transport", "args": args, "send_fence": {
+        **fence(job), "provider_attempt": int(job.get("lease_generation") or 1),
+        "parent_operation_id": str(parent.get("operation_id") or job.get("parent_operation_id") or job_id),
+        "automation_order": int(parent.get("automation_order") or job.get("parent_automation_order") or 2),
+        "origin": str(parent.get("kind") or job.get("parent_kind") or "provider_queue"),
+        "taskflow_node": parent.get("taskflow_node"),
+    }}
+    path = os.environ.get("COGNILODE_PROVIDER_SOCKET", "/runtime/provider.sock")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(2400); connection.connect(path)
+        connection.sendall((json.dumps(request, separators=(",", ":")) + "\n").encode())
+        connection.shutdown(socket.SHUT_WR)
+        chunks = []
+        while True:
+            chunk = connection.recv(65536)
+            if not chunk: break
+            chunks.append(chunk)
+    outer = json.loads(b"".join(chunks).decode())
+    stdout = str(outer.get("stdout") or "")
+    values = []
+    for line in stdout.splitlines():
+        try: values.append(json.loads(line))
+        except json.JSONDecodeError: pass
+    raw = values[-1] if values else {}
+    return {
+        "accepted": raw.get("provider_acceptance_observed") is True,
+        "terminal": raw.get("assistant_terminal") is True,
+        "conversation_id": raw.get("conversation_id"),
+        "user_message_id": raw.get("user_message_id"),
+        "assistant_message_id": raw.get("terminal_assistant_message_id"),
+        "assistant_text": raw.get("terminal_assistant_text") or "",
+        "artifacts": raw.get("downloaded_files") or [],
+        "provider_receipt": raw,
+        "provider_error": None if int(outer.get("exit_code") or 0) == 0 else {
+            "code": "chatgpt_transport_error", "message": str(outer.get("stderr") or "")[:500]
+        },
+    }
+
+
 def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
     boundary = scheduler_call({"operation": "begin_effect", **fence(job)})
     if boundary.get("send_authorized") is not True:
         return
     parent = job.get("parent_operation") if isinstance(job.get("parent_operation"), Mapping) else {}
-    result = client.prompt(
+    result = chatgpt_transport(job) if job["provider"] == "chatgpt.com" else client.prompt(
         str(job["provider"]),
         str(job.get("conversation_id") or "") or None,
         str(job.get("prompt") or ""),
@@ -110,7 +174,7 @@ def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--provider", required=True, choices=("gemini.com", "claude.com", "anthropic.com"))
+    parser.add_argument("--provider", required=True, choices=("chatgpt.com", "gemini.com", "claude.com", "anthropic.com"))
     parser.add_argument("--device-id", default=os.environ.get("COGNILODE_ENVIRONMENT_ID", "company-container"))
     parser.add_argument("--interval", type=float, default=10)
     args = parser.parse_args()
@@ -120,13 +184,14 @@ def main() -> int:
     client = ProviderActuationClient([sys.executable, "-m", "codex_backend_sdk.provider_broker"], timeout=2400)
     while not STOP:
         try:
+            account = "central-custody" if args.provider == "chatgpt.com" else "primary"
             scheduler_call({
                 "operation": "rhythm_device_heartbeat",
                 "device": {
                     "id": device, "available": True, "active_turns": 0, "max_concurrency": 1,
                     "environment_id": args.device_id,
                     "capabilities": {
-                        "environment": args.device_id, "accounts": ["primary"],
+                        "environment": args.device_id, "accounts": [account],
                         "providers": {args.provider: {
                             "enabled": True, "authentication": "both", "attachments": True,
                             "artifact_downloads": True, "continuation": True,

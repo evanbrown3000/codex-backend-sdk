@@ -130,14 +130,6 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
     )) / "area1-provider-source.zip"
     if acceptance.is_file() and acceptance_seed.is_file():
         workers.append(([str(CLI.rsplit("/", 1)[0] + "/python"), str(acceptance)], {}))
-    if "chatgpt.com" in requested:
-        workers.append(([
-            str(CLI.rsplit("/", 1)[0] + "/python"),
-            str(HERE / "cognilode-chatmode-queue-worker"),
-            "--device-id", os.environ.get("COGNILODE_ENVIRONMENT_ID", "company-container"),
-            "--interval", "60",
-        ], {}))
-
     # ComputerUseX remains the domain-owned browser adapter.  B4PT0R owns the
     # singular queue-to-actuator boundary for every non-ChatGPT .com provider,
     # so the same lease, result envelope, artifact custody, and memory events
@@ -157,7 +149,7 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
         inherited = os.environ.get("PYTHONPATH", "")
         if inherited:
             pythonpath += os.pathsep + inherited
-        for provider in ("gemini.com", "claude.com", "anthropic.com"):
+        for provider in ("chatgpt.com", "gemini.com", "claude.com", "anthropic.com"):
             if provider in requested:
                 workers.append(([
                     str(CLI.rsplit("/", 1)[0] + "/python"), str(provider_worker),

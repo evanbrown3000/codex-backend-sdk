@@ -170,8 +170,14 @@ def main() -> int:
             time.sleep(2)
             continue
         print(f"SDK service {options.script} source generation {selected}", flush=True)
+        # Each immutable generation is a process tree: the batch runtime owns
+        # queue actuators and the transport owns custody brokers.  A source
+        # handoff that signals only the immediate Python process leaks the old
+        # generation's children, leaving multiple queue consumers alive.  Own
+        # the generation as one process group so the already-drained handoff
+        # retires the whole tree atomically.
         child = subprocess.Popen([str(interpreter), str(selected), *child_args],
-                                 env=os.environ.copy())
+                                 env=os.environ.copy(), start_new_session=True)
         while child.poll() is None and not STOP:
             active_generation = content_generation(current)
             if active_generation is None:
@@ -196,13 +202,13 @@ def main() -> int:
                     last_report = time.monotonic()
                 time.sleep(2)
             if child.poll() is None:
-                child.terminate()
+                os.killpg(child.pid, signal.SIGTERM)
                 try:
                     child.wait(timeout=30)
                 except subprocess.TimeoutExpired:
                     # The drain contract has already barred new sends and
                     # reported zero active sends. Do not leave stale custody.
-                    child.kill()
+                    os.killpg(child.pid, signal.SIGKILL)
                     child.wait()
         if not STOP:
             time.sleep(2)

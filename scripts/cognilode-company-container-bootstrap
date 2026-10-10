@@ -375,7 +375,7 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
                         changed = sorted(name for name, value in current_hashes.items()
                                          if previous_hashes.get(name) != value)
                         if changed:
-                            if "chatmode" in changed:
+                            if "provider-transport" in changed:
                                 ensure_chatmode_node(
                                     project, runtime,
                                     env.get("COGNILODE_WORKSPACE_IMAGE",

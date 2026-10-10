@@ -149,7 +149,6 @@ services:
     restart: unless-stopped
     networks:
       - company-universe
-      - host-bridge
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
     cpus: 1
     mem_limit: 2g
@@ -729,10 +728,6 @@ networks:
   company-universe:
     external: true
     name: cognilode-company-runtime_default
-  host-bridge:
-    external: true
-    name: bridge
-
 volumes:
   company_auth:
   company_browser:

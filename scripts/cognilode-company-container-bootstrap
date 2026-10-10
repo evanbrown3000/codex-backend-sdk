@@ -661,7 +661,7 @@ exit 2
                     if control_ok(conversations) else None)
         readback = (control_call("conversations", "read", str(conversation_id),
                                  "--reader-id", "evanpc-managed-control-readback")
-                    if searched and searched.get("ok") is True and isinstance(conversation_id, str)
+                    if control_ok(searched) and isinstance(conversation_id, str)
                     else None)
         environments = (control_call("environments", "list")
                         if readback and not readback.get("error") else None)

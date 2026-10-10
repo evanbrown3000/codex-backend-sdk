@@ -265,6 +265,7 @@ class ProviderCommandClient:
         priority: int | None = None,
         decisionx: Mapping[str, Any] | None = None,
         parent_operation: Mapping[str, Any] | None = None,
+        collect_artifacts: bool = False,
     ) -> dict[str, Any]:
         return self.send_provider(
             provider="chatgpt.com",
@@ -282,6 +283,7 @@ class ProviderCommandClient:
             priority=priority,
             decisionx=decisionx,
             parent_operation=parent_operation,
+            collect_artifacts=collect_artifacts,
         )
 
     def send_provider(
@@ -303,6 +305,7 @@ class ProviderCommandClient:
         priority: int | None = None,
         decisionx: Mapping[str, Any] | None = None,
         parent_operation: Mapping[str, Any] | None = None,
+        collect_artifacts: bool = False,
     ) -> dict[str, Any]:
         """Admit any supported agent turn through one provider-neutral API.
 
@@ -328,6 +331,7 @@ class ProviderCommandClient:
             "priority": priority,
             "decisionx": dict(decisionx) if decisionx is not None else None,
             "parent_operation": dict(parent_operation) if parent_operation is not None else None,
+            "collect_artifacts": bool(collect_artifacts),
         })
 
     def queue_status(self, provider: str = "chatgpt.com") -> dict[str, Any]:

@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Sequential, self-verifying acceptance of all subscription .com actuators.
+
+One durable run admits each turn through the unified queue, waits only on the
+queue ledger, rejects short/receipt-only work, and hands every prior physical
+result to the next provider.  It never inspects provider history or asks a
+foreground operator to ferry a prompt or file.
+"""
+from __future__ import annotations
+
+from datetime import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import time
+from typing import Any, Mapping
+
+from codex_backend_sdk.agent_memory import AgentMemoryClient
+from codex_backend_sdk.bridge_provider import ProviderCommandClient
+
+PROVIDERS = ("chatgpt.com", "gemini.com", "claude.com", "anthropic.com")
+MIN_PROVIDER_SECONDS = 300.0
+MIN_RESPONSE_CHARS = 1200
+MIN_ARTIFACT_BYTES = 4096
+
+
+def iso(value: object) -> float:
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+
+
+def physical_outputs(job: Mapping[str, Any]) -> list[str]:
+    found: list[str] = []
+    for row in list(job.get("artifacts") or []) + list(job.get("effect_evidence") or []):
+        if not isinstance(row, Mapping):
+            continue
+        candidates = [row.get("path")]
+        custody = row.get("custody") if isinstance(row.get("custody"), Mapping) else {}
+        candidates.extend(custody.get("storage_locations") or [])
+        for value in candidates:
+            text = str(value or "")
+            if text.startswith("file:"):
+                text = text[5:]
+            path = Path(text)
+            if path.is_file() and path.stat().st_size >= MIN_ARTIFACT_BYTES:
+                found.append(str(path))
+    return list(dict.fromkeys(found))
+
+
+def response(memory: AgentMemoryClient, conversation_id: str) -> str:
+    return memory.render_markdown(conversation_id)
+
+
+def prompt_for(provider: str, following: str | None) -> str:
+    if following:
+        objective = (
+            f"Use the attached source and every prior provider work product to complete the production "
+            f"actuation implementation for {following}. Preserve and improve all prior provider work."
+        )
+        artifact = following.split(".")[0] + "-adapter.zip"
+    else:
+        objective = (
+            "Integrate and harden the complete four-provider actuation substrate as a release-ready "
+            "implementation, preserving exact identities, terminal collection, physical uploads and downloads, "
+            "central memory publication, and exclusive credential leases."
+        )
+        artifact = "unified-provider-actuation.zip"
+    return (
+        f"You are the {provider} implementation worker in a sequential four-provider onboarding. "
+        "Read every attached file in full. Perform at least five minutes of substantive provider-side reasoning "
+        "and implementation; a receipt, short answer, outline, or status report is invalid. " + objective + " "
+        f"Return a physical ZIP named {artifact} containing production-ready repository-relative files and an "
+        "APPLY_MANIFEST.json. The response and ZIP must be substantial enough to exceed what a five-minute "
+        "GPT-5.6-terra Codex implementation turn could produce."
+    )
+
+
+def main() -> int:
+    root = Path(os.environ.get("COGNILODE_PROVIDER_ACCEPTANCE_ROOT", "/runtime/area1-acceptance"))
+    seed = root / "area1-provider-source.zip"
+    if not seed.is_file():
+        raise SystemExit("acceptance seed packet is unavailable")
+    root.mkdir(parents=True, exist_ok=True)
+    state_path = root / "four-provider-proof.json"
+    proof: dict[str, Any] = json.loads(state_path.read_text()) if state_path.is_file() else {
+        "schema": "cognilode.four_provider_acceptance.v1", "providers": []
+    }
+    completed = {row["provider"]: row for row in proof["providers"]}
+    inherited = [str(seed)]
+    for row in proof["providers"]:
+        inherited.extend(path for path in row.get("artifacts") or [] if Path(path).is_file())
+    client = ProviderCommandClient(timeout=24 * 3600, poll_interval=10)
+    memory = AgentMemoryClient()
+    for index, provider in enumerate(PROVIDERS):
+        if provider in completed:
+            continue
+        following = PROVIDERS[index + 1] if index + 1 < len(PROVIDERS) else None
+        authored = prompt_for(provider, following)
+        request_id = "area1-sequential-proof-" + provider.split(".")[0] + "-v1"
+        # Preserve the first already-admitted ChatGPT operation rather than
+        # creating a second mutation solely because acceptance became durable.
+        if provider == "chatgpt.com":
+            request_id = "area1-onboard-chatgpt-v1"
+            authored = (root / "chatgpt-objective.md").read_text(encoding="utf-8")
+        parent_id = request_id if provider == "chatgpt.com" else "area1-four-provider-acceptance"
+        queued = client.send_provider(
+            provider=provider, prompt=authored, attachments=tuple(inherited),
+            request_id=request_id, project="unified-provider-actuation",
+            role="provider-implementation-worker", source="area1-sequential-onboarding",
+            prompt_authority="taskflow_plan", priority=100000, collect_artifacts=True,
+            parent_operation={"operation_id": parent_id, "automation_order": 3,
+                              "kind": "taskflow_plan"},
+        )
+        result = client.wait(str(queued.get("job_id") or queued.get("job", {}).get("id") or request_id))
+        job = result.get("job") if isinstance(result.get("job"), Mapping) else {}
+        if result.get("ok") is not True:
+            raise RuntimeError(provider + " did not reach queue-recorded terminal completion")
+        duration = iso(job.get("completed_at")) - iso(job.get("effect_started_at"))
+        if duration < MIN_PROVIDER_SECONDS:
+            raise RuntimeError(provider + " provider execution was shorter than five minutes")
+        conversation_id = str(result.get("conversation_id") or "")
+        rendered = response(memory, conversation_id)
+        if len(rendered.strip()) < MIN_RESPONSE_CHARS:
+            raise RuntimeError(provider + " returned a superficial response")
+        artifacts = physical_outputs(job)
+        if not artifacts:
+            raise RuntimeError(provider + " returned no collected physical work product")
+        upload_proof = [row for row in job.get("effect_evidence") or []
+                        if isinstance(row, Mapping) and row.get("kind") in
+                        {"provider_uploaded_attachment", "provider_structured_upload", "provider_tool_evidence"}]
+        if not upload_proof:
+            raise RuntimeError(provider + " has no provider-side physical upload evidence")
+        record = {
+            "provider": provider, "job_id": job.get("id"), "conversation_id": conversation_id,
+            "prompt_sha256": hashlib.sha256(authored.encode()).hexdigest(),
+            "response_sha256": hashlib.sha256(rendered.encode()).hexdigest(),
+            "response": rendered, "provider_seconds": duration,
+            "uploaded_attachments": upload_proof, "artifacts": artifacts,
+        }
+        proof["providers"].append(record)
+        state_path.write_text(json.dumps(proof, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        inherited.extend(artifacts)
+    proof["complete"] = len(proof["providers"]) == len(PROVIDERS)
+    proof["completed_at"] = time.time()
+    state_path.write_text(json.dumps(proof, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(proof, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -59,6 +59,13 @@ def evidence(result: Mapping[str, Any]) -> list[dict[str, Any]]:
             rows.append({"kind": "provider_returned_artifact", "ref": str(
                 custody.get("artifact_id") or custody.get("sha256") or artifact.get("sha256") or artifact.get("path") or ""
             )})
+    receipt = result.get("provider_receipt") if isinstance(result.get("provider_receipt"), Mapping) else {}
+    uploads = receipt.get("attachments") or ([receipt.get("attachment")] if receipt.get("attachment") else [])
+    for upload in uploads if isinstance(uploads, list) else []:
+        if isinstance(upload, Mapping):
+            item = upload.get("attachment") if isinstance(upload.get("attachment"), Mapping) else upload
+            if item.get("included") or item.get("sha256"):
+                rows.append({"kind": "provider_uploaded_attachment", "ref": str(item.get("sha256") or item.get("path") or "")})
     return [row for row in rows if row["ref"]]
 
 

@@ -69,6 +69,7 @@ def _chatgpt(args: argparse.Namespace) -> Any:
             prompt_authority=args.prompt_authority,
             priority=args.priority,
             decisionx=_json_object(args.decisionx),
+            collect_artifacts=args.collect_artifacts,
         )
         if args.no_readback:
             return queued
@@ -102,6 +103,7 @@ def _prompting(args: argparse.Namespace) -> Any:
             prompt_authority=args.prompt_authority,
             priority=args.priority,
             decisionx=_json_object(args.decisionx),
+            collect_artifacts=args.collect_artifacts,
         )
         return queued if args.no_readback else provider.wait(str(queued["job_id"]))
     if args.prompting_command == "collect":
@@ -238,6 +240,7 @@ def parser() -> argparse.ArgumentParser:
     send.add_argument("--prompt-authority", default="interactive_operator")
     send.add_argument("--priority", type=int)
     send.add_argument("--decisionx", help="DecisionX receipt JSON or file path")
+    send.add_argument("--collect-artifacts", action="store_true")
     send.add_argument("--no-readback", action="store_true")
     collect = chat.add_parser("collect")
     collect.add_argument("job_id")
@@ -265,6 +268,7 @@ def parser() -> argparse.ArgumentParser:
     unified_send.add_argument("--prompt-authority", default="interactive_operator")
     unified_send.add_argument("--priority", type=int)
     unified_send.add_argument("--decisionx")
+    unified_send.add_argument("--collect-artifacts", action="store_true")
     unified_send.add_argument("--no-readback", action="store_true")
     unified_collect = prompt_ops.add_parser("collect")
     unified_collect.add_argument("job_id")

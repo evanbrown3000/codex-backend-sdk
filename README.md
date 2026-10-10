@@ -86,6 +86,7 @@ another relay:
 ```bash
 b4pt0r remote list
 b4pt0r remote select ENVIRONMENT_ID
+b4pt0r remote current
 b4pt0r remote exec 'codex exec "continue the assigned work"'
 ```
 
@@ -118,10 +119,17 @@ threads into the first `thread/list` page and projects ChatGPT threads through
 the existing `thread/read`, `thread/resume`, `thread/turns/list`, and
 `turn/start` shapes consumed by Codex Desktop.
 
-Set `CODEX_NATIVE_EXECUTABLE` to the real installed Codex binary. This must not
-point back to the bridge executable. B4PT0R Electron can select the bridge with
-its existing `CODEX_EXECUTABLE` configuration; no replacement renderer or
-frontend provider logic is required.
+The bridge asks the relay for the environment persistently selected for
+`COGNILODE_ACTOR_ID`. When a selection exists, it launches the native Codex App
+Server there through the existing remote-shell process stream and carries its
+JSONL protocol back through the same bridge. With no remote selection it
+launches the local native App Server. `CODEX_REMOTE_WORKDIR` selects the remote
+working directory.
+
+Set `CODEX_NATIVE_EXECUTABLE` to the real installed Codex binary on the selected
+environment. This must not point back to the bridge executable. B4PT0R Electron
+can select the bridge with its existing `CODEX_EXECUTABLE` configuration; no
+replacement renderer or frontend provider logic is required.
 
 ## Choose the right surface
 

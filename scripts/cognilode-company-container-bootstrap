@@ -655,7 +655,8 @@ exit 2
         # Avoid an unbounded broad "Codex" query when the index is large.
         # Search for the exact identifier returned by this immediately
         # preceding list call; an empty match set is still a successful query.
-        query = conversation_id or conversation_row.get("title") or "Codex"
+        provider_id = str(conversation_row.get("provider_conversation_id") or "")
+        query = provider_id[:8] or str(conversation_id or "")[:16]
         searched = (control_call("conversations", "search", str(query), "--limit", "1")
                     if control_ok(conversations) else None)
         readback = (control_call("conversations", "read", str(conversation_id))

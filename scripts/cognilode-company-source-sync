@@ -31,12 +31,11 @@ def main() -> None:
     config = {
         "root": str(ROOT),
         "credential_ref": "/cognilode/agent-credentials/github/owner",
-        # This compatibility container receives a centrally refreshed AWS
-        # credential_process. It does not contain or copy a GitHub token.
+        # The credential-sync custodian materializes this descriptor into the
+        # shared custody volume. Source convergence never invokes AWS and does
+        # not discover credentials from an environment or home directory.
         "credential_command": [
-            "/usr/bin/aws", "secretsmanager", "get-secret-value", "--region", "us-west-2",
-            "--secret-id", "/cognilode/agent-credentials/github/owner",
-            "--query", "SecretString", "--output", "text",
+            "/bin/cat", "/home/worker/.config/cognilode/github-owner.json",
         ],
         "sources": manifest["sources"],
         "event_log": str(ROOT / "events/source-convergence.jsonl"),

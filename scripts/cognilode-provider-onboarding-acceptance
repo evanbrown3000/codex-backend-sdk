@@ -177,6 +177,7 @@ def memory_admitted(result: Mapping[str, Any]) -> bool:
 def wait_bootstrap_job(client: ProviderCommandClient, provider: str, job_id: str) -> dict[str, Any]:
     """Wait through queue-authorized retries without losing bootstrap pacing."""
     last_state = ""
+    last_fast_forward_at = 0.0
     while True:
         value = scheduler_call({"operation": "get_job", "job_id": job_id})
         job = value.get("job") if isinstance(value.get("job"), Mapping) else {}
@@ -190,8 +191,15 @@ def wait_bootstrap_job(client: ProviderCommandClient, provider: str, job_id: str
                     "automation_order": 3, "kind": "taskflow_plan",
                 },
             })
-        if state == "queued" and state != last_state:
+        due_value = job.get("due_at")
+        try:
+            due_ready = iso(due_value) <= time.time() if due_value is not None else True
+        except (TypeError, ValueError):
+            due_ready = True
+        if (state == "queued" and due_ready
+                and (state != last_state or time.time() - last_fast_forward_at >= 30)):
             scheduler_call({"operation": "rhythm_fast_forward", "provider": provider, "slots": 1})
+            last_fast_forward_at = time.time()
         conversation_id = client.conversation_id(job)
         provider_complete = (
             state in {"complete", "completed", "provider_complete"}

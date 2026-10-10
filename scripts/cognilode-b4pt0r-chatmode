@@ -1129,12 +1129,21 @@ def summarize_sse(raw: bytes, expected_user_message_id: str) -> dict:
     assistant_end_turn = False
     assistant_started = False
     assistant_status = None
+    first_assistant_event_at = None
+    assistant_event_count = 0
 
     def absorb_message(message: dict) -> None:
         nonlocal terminal_text, terminal_message_id, assistant_end_turn, assistant_started, assistant_status
+        nonlocal first_assistant_event_at, assistant_event_count
         author = message.get("author") if isinstance(message.get("author"), dict) else {}
         if author.get("role") != "assistant":
             return
+        assistant_event_count += 1
+        created = message.get("create_time")
+        if isinstance(created, (int, float)) and (
+            first_assistant_event_at is None or float(created) < first_assistant_event_at
+        ):
+            first_assistant_event_at = float(created)
         assistant_started = True
         terminal_message_id = message.get("id") or terminal_message_id
         content = message.get("content") if isinstance(message.get("content"), dict) else {}
@@ -1209,6 +1218,8 @@ def summarize_sse(raw: bytes, expected_user_message_id: str) -> dict:
         "terminal_assistant_message_id": terminal_message_id,
         "conversation_id": conversation_id,
         "provider_errors": errors,
+        "first_assistant_event_at": first_assistant_event_at,
+        "assistant_event_count": assistant_event_count,
     }
 
 

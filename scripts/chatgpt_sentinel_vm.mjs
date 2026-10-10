@@ -36,7 +36,7 @@ function solve(payload, secret, deadline = Date.now() + 500) {
   let done = false;
 
   async function run() {
-    while (!halted && (state.get(F) || []).length > 0) {
+    while (!halted && Date.now() < deadline && (state.get(F) || []).length > 0) {
       const [op, ...args] = state.get(F).shift() || [];
       const result = state.get(op)?.(...args);
       if (result && typeof result.then === "function") await result;
@@ -44,6 +44,8 @@ function solve(payload, secret, deadline = Date.now() + 500) {
       if ((steps & 255) === 0) await new Promise(resolve => setImmediate(resolve));
     }
   }
+
+  if (Date.now() >= deadline) return Promise.resolve("0");
 
   state.set(H, value => solve(value, String(state.get(R)), deadline));
   state.set(U, (out,a) => state.set(out, xor(String(state.get(a)), String(state.get(R)))));

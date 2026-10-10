@@ -466,6 +466,12 @@ def reconcile_host_managed_codex(project: str, runtime: Path) -> None:
         temp_link.unlink(missing_ok=True)
         temp_link.symlink_to(target)
         temp_link.replace(root / "bin" / name)
+    # Keep the public active-release pointer in the same source-driven
+    # transaction as the entrypoints; consumers must never observe split pins.
+    active_next = root / ".active.next"
+    active_next.unlink(missing_ok=True)
+    active_next.symlink_to(f"releases/{release_pin}")
+    active_next.replace(root / "active")
     # Readback from the active vanilla launcher and managed-control entrypoint.
     version = subprocess.run([str(root / "bin/codex"), "--version"],
                              capture_output=True, text=True, check=False, timeout=30)
@@ -479,6 +485,7 @@ def reconcile_host_managed_codex(project: str, runtime: Path) -> None:
              "rust_tree": tree, "previous_revision": None, "environment_id": "evanpc-host",
              "installed_at": time.time(), "kind": "managed_codex_runtime_installation",
              "target": "linux-x86_64", "entrypoints": ["codex", "managed-codex"],
+             "active_release": str((root / "active").resolve()),
              "codex_version": version.stdout.strip()}
     runtime_event = {
         "schema": "cognilode.runtime_generation.v1",

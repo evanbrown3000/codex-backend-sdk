@@ -318,6 +318,14 @@ def main() -> int:
                 # Acceptance is an explicit bootstrap operation, not ordinary
                 # production cadence. Release one preserved biological slot.
                 scheduler_call({"operation": "rhythm_fast_forward", "provider": provider, "slots": 1})
+            priority_receipt = scheduler_call({
+                "operation": "reprioritize_job", "job_id": job_id,
+                "priority": 8_000_000_000_000_000,
+                "parent_operation": {"operation_id": "area1-four-provider-acceptance",
+                                     "automation_order": 3, "kind": "taskflow_plan"},
+            })
+            if priority_receipt.get("updated") is True:
+                scheduler_call({"operation": "rhythm_fast_forward", "provider": provider, "slots": 1})
             result = wait_bootstrap_job(client, provider, job_id)
             job = result.get("job") if isinstance(result.get("job"), Mapping) else {}
             proof["inflight"].pop(provider, None)

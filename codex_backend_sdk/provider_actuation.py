@@ -313,6 +313,10 @@ class ComputerUseXProviderAdapter:
         self.provider = normalize_provider(provider)
 
     def _call(self, name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        # This adapter imports only the provider-facing ComputerUseX surface.
+        # ChatGPT browser guard installation belongs to the ChatGPT actuator,
+        # not to Gemini/Claude actuation and pulls unrelated optional domains.
+        os.environ.setdefault("COMPUTERUSEX_SKIP_IMPORT_GUARDS", "1")
         source = Path(os.environ.get(
             "COMPUTERUSEX_SOURCE", "/runtime/source/current/automation-computeruse-vision/src"
         ))

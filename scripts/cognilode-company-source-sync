@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""Keep real Git checkouts current inside the company source volume.
+
+Workers need `.git` for external effects, so a tarball is insufficient. A
+revision is made visible only after its complete checkout is ready.
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import tempfile
+import time
+from urllib.request import Request, urlopen
+import subprocess
+
+
+ROOT = Path(os.environ.get("COGNILODE_COMPANY_SOURCE_ROOT", "/runtime/source"))
+REPOS = ("taskflow-orchestration-history", "research-plan-execute", "agent-memory",
+         "cognilode-cloudflare-pages-site", "codex-backend-sdk", "cognilode-codex")
+SECRET = "/cognilode/agent-credentials/github/owner"
+CODEX_PIN = os.environ.get("COGNILODE_CODEX_SOURCE_COMMIT", "")
+MEMORY_MINIMUM = "b4a4878d47abe142b75ab23c74f9b6dc1ce67cba"
+
+
+def credential() -> str:
+    record = subprocess.run(["/usr/bin/aws", "secretsmanager", "get-secret-value", "--region",
+                             "us-west-2", "--secret-id", SECRET, "--query", "SecretString",
+                             "--output", "text"], check=False, capture_output=True,
+                            text=True, timeout=30)
+    if record.returncode:
+        detail = record.stderr.lower()
+        if "read-only file system" in detail and "/.aws/cli/cache/" in detail:
+            reason = "aws_role_cache_not_writable"
+        elif "expiredtoken" in detail or "expired token" in detail:
+            reason = "aws_session_expired"
+        elif "accessdenied" in detail:
+            reason = "aws_secret_access_denied"
+        elif "could not connect" in detail or "connection" in detail:
+            reason = "aws_endpoint_unreachable"
+        else:
+            reason = "aws_secret_read_unavailable"
+        raise RuntimeError(reason)
+    value = json.loads(record.stdout)
+    token = value.get("api_key", "") if isinstance(value, dict) else ""
+    if not isinstance(token, str) or not token or len(token) > 4096:
+        raise RuntimeError("GitHub company credential unavailable")
+    return token
+
+
+def request(path: str, token: str) -> bytes:
+    headers = {"Authorization": "Bearer " + token, "Accept": "application/vnd.github+json",
+               "User-Agent": "cognilode-company-source-sync"}
+    with urlopen(Request("https://api.github.com" + path, headers=headers), timeout=90) as response:
+        return response.read(150_000_001)
+
+
+def install(repo: str, sha: str, token: str) -> None:
+    release = ROOT / "checkouts" / repo / sha
+    if not (release / ".git").is_dir():
+        release.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=f"{repo}-", dir=release.parent) as temporary:
+            stage = Path(temporary) / "checkout"
+            askpass = Path(temporary) / "askpass"
+            askpass.write_text("#!/bin/sh\ncase \"$1\" in *Username*) printf 'x-access-token' ;; *Password*) printf '%s' \"$COGNILODE_GITHUB_TOKEN\" ;; esac\n")
+            askpass.chmod(0o700)
+            env = os.environ.copy()
+            env.update({"GIT_ASKPASS": str(askpass), "GIT_TERMINAL_PROMPT": "0",
+                        "COGNILODE_GITHUB_TOKEN": token})
+            url = f"https://github.com/evanbrown3000/{repo}.git"
+            for command in (["git", "clone", "--filter=blob:none", "--no-checkout", url, str(stage)],
+                            ["git", "-C", str(stage), "fetch", "origin", sha],
+                            ["git", "-C", str(stage), "checkout", "--detach", sha]):
+                result = subprocess.run(command, env=env, capture_output=True, timeout=600)
+                if result.returncode:
+                    raise RuntimeError(f"Git checkout unavailable for {repo}")
+            actual = subprocess.run(["git", "-C", str(stage), "rev-parse", "HEAD"],
+                                    capture_output=True, text=True, check=True, timeout=30).stdout.strip()
+            if actual != sha:
+                raise RuntimeError(f"Git checkout identity mismatch for {repo}")
+            stage.rename(release)
+    current = ROOT / "current"
+    current.mkdir(parents=True, exist_ok=True)
+    link = current / repo
+    target = os.path.relpath(release, current)
+    temporary_link = current / (repo + ".next")
+    temporary_link.unlink(missing_ok=True)
+    temporary_link.symlink_to(target)
+    temporary_link.replace(link)
+
+
+def ensure_memory_ancestry(checkout: Path, token: str) -> None:
+    """Repair old shallow checkouts before the memory writer's cutover guard."""
+    def ready() -> bool:
+        return subprocess.run(["git", "-C", str(checkout), "merge-base", "--is-ancestor",
+                               MEMORY_MINIMUM, "HEAD"], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, check=False).returncode == 0
+    if ready():
+        return
+    with tempfile.TemporaryDirectory(prefix="memory-history-", dir=ROOT) as temporary:
+        askpass = Path(temporary) / "askpass"
+        askpass.write_text("#!/bin/sh\ncase \"$1\" in *Username*) printf 'x-access-token' ;; *Password*) printf '%s' \"$COGNILODE_GITHUB_TOKEN\" ;; esac\n")
+        askpass.chmod(0o700)
+        env = {**os.environ, "GIT_ASKPASS": str(askpass), "GIT_TERMINAL_PROMPT": "0",
+               "COGNILODE_GITHUB_TOKEN": token}
+        for _ in range(8):
+            result = subprocess.run(["git", "-C", str(checkout), "fetch", "--deepen", "64",
+                                     "origin", "main"], env=env, capture_output=True, timeout=600)
+            if result.returncode == 0 and ready():
+                print("memory source ancestry repaired", flush=True)
+                return
+            if result.returncode:
+                raise RuntimeError("memory source ancestry fetch unavailable")
+    raise RuntimeError("memory source ancestry remains unavailable")
+
+
+def sync_once() -> None:
+    token = credential()
+    for repo in REPOS:
+        try:
+            ref = CODEX_PIN if repo == "cognilode-codex" and CODEX_PIN else "main"
+            metadata = json.loads(request(f"/repos/evanbrown3000/{repo}/commits/{ref}", token))
+            sha = str(metadata.get("sha") or "")
+            if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
+                raise RuntimeError("GitHub returned invalid revision")
+            current = ROOT / "current" / repo
+            if (current.is_symlink() and current.resolve().name == sha and
+                    (current.resolve() / ".git").is_dir()):
+                if repo == "agent-memory":
+                    ensure_memory_ancestry(current.resolve(), token)
+                continue
+            install(repo, sha, token)
+            if repo == "agent-memory":
+                ensure_memory_ancestry((ROOT / "current" / repo).resolve(), token)
+            print(f"source ready {repo} {sha[:12]}", flush=True)
+        except Exception as error:
+            print(f"source pending {repo}: {type(error).__name__}: {error}", flush=True)
+
+
+if __name__ == "__main__":
+    retry = 300
+    while True:
+        try:
+            sync_once()
+            retry = 300
+            time.sleep(max(15, int(os.environ.get("COGNILODE_SOURCE_SYNC_INTERVAL", "30"))))
+        except Exception as error:
+            print(f"source sync pending: {type(error).__name__}: {error}", flush=True)
+            time.sleep(retry)
+            retry = min(900, retry * 2)

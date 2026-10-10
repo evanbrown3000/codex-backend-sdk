@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Run installed Codex inference inside the credential-bearing company container.
+
+The socket carries only a bounded Codex exec request. Callers retain scheduling,
+quota, and stable-intent fencing; this service does not create another queue.
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import re
+import socketserver
+import subprocess
+import threading
+
+
+SOCKET = Path(os.getenv("COGNILODE_CODEX_EXEC_SOCKET", "/codex-exec/broker.sock"))
+CODEX = Path(os.getenv("COGNILODE_CODEX_BIN", "/codex/bin/codex"))
+MAX_REQUEST = 8_000_000
+MAX_RESPONSE = 8_000_000
+ROOTS = (Path("/runtime"), Path("/company"), Path("/workspace/company"))
+ACTIVE_FILE = SOCKET.with_suffix(".active")
+DRAIN_FILE = SOCKET.with_suffix(".draining")
+ACTIVE_LOCK = threading.Lock()
+ACTIVE = 0
+
+
+class BrokerDraining(Exception):
+    pass
+
+
+def _active(change: int) -> None:
+    global ACTIVE
+    with ACTIVE_LOCK:
+        if change > 0 and DRAIN_FILE.exists():
+            raise BrokerDraining()
+        ACTIVE += change
+        ACTIVE_FILE.write_text(str(ACTIVE))
+
+
+def _within(path: str, *, output: bool = False) -> str:
+    target = Path(path).resolve()
+    roots = (Path("/runtime/worker"),) if output else ROOTS
+    if not any(target == root or root in target.parents for root in roots):
+        raise ValueError("Codex path outside company workspaces")
+    return str(target)
+
+
+def _argv(raw: object) -> list[str]:
+    if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+        raise ValueError("Codex arguments must be strings")
+    if not raw or len(raw) > 32 or sum(map(len, raw)) > 8_192:
+        raise ValueError("invalid Codex argument count")
+    args = list(raw)
+    if args[0] == str(CODEX) or Path(args[0]).name in {"codex", "cognilode-codex-client"}:
+        args.pop(0)
+    if args.count("exec") != 1 or args[-1] != "-":
+        raise ValueError("only noninteractive Codex exec is supported")
+    position = 0
+    while position < len(args):
+        word = args[position]
+        if word in {"-a", "-s", "-C", "-o", "-m", "-c"}:
+            if position + 1 >= len(args):
+                raise ValueError("missing Codex option value")
+            value = args[position + 1]
+            if word == "-a" and value != "never":
+                raise ValueError("interactive approval unavailable")
+            if word == "-s" and value not in {"read-only", "workspace-write"}:
+                raise ValueError("unsupported sandbox mode")
+            if word == "-C":
+                args[position + 1] = _within(value)
+            if word == "-o":
+                args[position + 1] = _within(value, output=True)
+            if word == "-c" and not value.startswith("model_reasoning_effort="):
+                raise ValueError("unsupported Codex configuration override")
+            position += 2
+        elif word in {"exec", "--skip-git-repo-check", "-"}:
+            position += 1
+        else:
+            raise ValueError("unsupported Codex argument")
+    if "-C" not in args or "-o" not in args or "-a" not in args:
+        raise ValueError("Codex workdir, output and approval mode required")
+    return [str(CODEX), *args]
+
+
+def execute(request: object) -> dict:
+    if not isinstance(request, dict) or request.get("schema") != "cognilode.codex-exec.v1":
+        raise ValueError("unsupported Codex broker request")
+    prompt = request.get("stdin")
+    if not isinstance(prompt, str) or len(prompt.encode()) > 6_000_000:
+        raise ValueError("Codex prompt too large")
+    timeout = request.get("timeout", 1200)
+    if not isinstance(timeout, int) or not 30 <= timeout <= 7200:
+        raise ValueError("invalid Codex timeout")
+    cwd = _within(str(request.get("cwd") or "/runtime"))
+    argv = _argv(request.get("argv"))
+    environment = str(request.get("execution_environment") or "")
+    if environment and not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", environment):
+        raise ValueError("invalid remote Codex environment")
+    child_env = dict(os.environ)
+    if environment:
+        child_env["COGNILODE_DEFAULT_REMOTE_ENVIRONMENT"] = environment
+    _active(1)
+    try:
+        result = subprocess.run(argv, input=prompt, text=True, capture_output=True,
+                                cwd=cwd, env=child_env, timeout=timeout, check=False)
+    finally:
+        _active(-1)
+    if len(result.stdout.encode()) + len(result.stderr.encode()) > MAX_RESPONSE - 4096:
+        raise ValueError("Codex stream exceeds broker response limit")
+    return {"ok": True, "returncode": result.returncode,
+            "stdout": result.stdout, "stderr": result.stderr}
+
+
+class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+
+class Handler(socketserver.BaseRequestHandler):
+    def handle(self):
+        try:
+            length = int.from_bytes(self._read(4), "big")
+            if not 1 <= length <= MAX_REQUEST:
+                raise ValueError("invalid Codex broker request length")
+            response = execute(json.loads(self._read(length)))
+        except subprocess.TimeoutExpired:
+            response = {"ok": False, "error": "codex_timeout_ambiguous"}
+        except BrokerDraining:
+            response = {"ok": False, "error": "broker_draining", "safe_to_retry": True}
+        except Exception as exc:
+            response = {"ok": False, "error": type(exc).__name__}
+        encoded = json.dumps(response, separators=(",", ":")).encode()
+        self.request.sendall(len(encoded).to_bytes(4, "big") + encoded)
+
+    def _read(self, length: int) -> bytes:
+        chunks = []
+        while length:
+            chunk = self.request.recv(min(length, 1048576))
+            if not chunk:
+                raise ConnectionError("incomplete Codex broker request")
+            chunks.append(chunk)
+            length -= len(chunk)
+        return b"".join(chunks)
+
+
+if __name__ == "__main__":
+    SOCKET.parent.mkdir(parents=True, exist_ok=True)
+    SOCKET.unlink(missing_ok=True)
+    DRAIN_FILE.unlink(missing_ok=True)
+    ACTIVE_FILE.write_text("0")
+    with Server(str(SOCKET), Handler) as server:
+        os.chmod(SOCKET, 0o600)
+        server.serve_forever()

@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""Codex exec CLI facade for containers without provider credentials."""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import socket
+import subprocess
+import sys
+import time
+
+
+SOCKET = Path(os.getenv("COGNILODE_CODEX_EXEC_SOCKET", "/codex-exec/broker.sock"))
+CODEX = Path(os.getenv("COGNILODE_CODEX_RELEASE_BIN", "/codex/bin/codex"))
+
+
+def read_exact(connection: socket.socket, length: int) -> bytes:
+    chunks = []
+    while length:
+        value = connection.recv(min(length, 1048576))
+        if not value:
+            raise ConnectionError("Codex broker closed before response")
+        chunks.append(value)
+        length -= len(value)
+    return b"".join(chunks)
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if args in (["--version"], ["-V"]):
+        return subprocess.run([str(CODEX), *args], check=False).returncode
+    if "exec" not in args:
+        print("Codex broker client supports noninteractive exec only", file=sys.stderr)
+        return 2
+    prompt = sys.stdin.read()
+    request = {"schema": "cognilode.codex-exec.v1", "argv": args,
+               "cwd": os.getcwd(), "stdin": prompt,
+               "timeout": int(os.getenv("COGNILODE_CODEX_EXEC_TIMEOUT", "1200")),
+               "execution_environment": os.getenv("COGNILODE_DEFAULT_REMOTE_ENVIRONMENT", "")}
+    encoded = json.dumps(request, separators=(",", ":")).encode()
+    deadline = time.monotonic() + 300
+    while True:
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(request["timeout"] + 30)
+                connection.connect(str(SOCKET))
+                connection.sendall(len(encoded).to_bytes(4, "big") + encoded)
+                length = int.from_bytes(read_exact(connection, 4), "big")
+                if not 1 <= length <= 8_000_000:
+                    raise ValueError("Codex broker response length invalid")
+                result = json.loads(read_exact(connection, length))
+        except (OSError, ConnectionError, TimeoutError, ValueError) as exc:
+            print("Codex broker unavailable or outcome ambiguous: " + type(exc).__name__,
+                  file=sys.stderr)
+            return 75
+        if result.get("safe_to_retry") is True and result.get("error") == "broker_draining":
+            if time.monotonic() >= deadline:
+                print("Codex broker remained draining before execution", file=sys.stderr)
+                return 75
+            time.sleep(5)
+            continue
+        break
+    if not result.get("ok"):
+        print("Codex broker did not return a terminal result: " +
+              str(result.get("error") or "unknown"), file=sys.stderr)
+        return 75
+    sys.stdout.write(str(result.get("stdout") or ""))
+    sys.stderr.write(str(result.get("stderr") or ""))
+    return int(result["returncode"])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

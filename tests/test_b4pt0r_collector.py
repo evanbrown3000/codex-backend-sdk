@@ -49,6 +49,39 @@ def test_exact_terminal_requires_final_assistant_after_exact_user():
     assert collector.exact_terminal(conversation, "missing") is None
 
 
+def test_saved_terminal_tmp_zip_is_downloaded_without_conversation_poll(monkeypatch, tmp_path):
+    stem = "b4pt0r-chatmode-tmp-link"
+    receipt = tmp_path / f"{stem}.sse.receipt.json"
+    receipt.write_text(json.dumps({"user_message_id": "user-id", "conversation_id": "conv-1"}))
+    text = "[Download work](sandbox:/tmp/result.zip)"
+    result = {"conversation_id": "conv-1", "assistant_terminal": True,
+              "terminal_assistant_message_id": "assistant-1", "terminal_assistant_text": text,
+              "downloaded_files": [], "central_conversation_store": {
+                  "ok": True, "central_readback_verified": True,
+                  "conversation_id": "conv-1", "central_tool_event_count": 0,
+                  "central_raw_sse_source": {"readback_verified": True}}}
+    record = {"prompt": "Produce a ZIP", "result": result}
+    (tmp_path / f"{stem}.json").write_text(json.dumps(record))
+    (tmp_path / f"{stem}.collected.json").write_text(json.dumps({**record, "complete": True}))
+    assert collector.sender.sandbox_artifact_paths(text) == ["/tmp/result.zip"]
+    monkeypatch.setattr(collector, "get_conversation", lambda *_args: pytest.fail("conversation poll"))
+    monkeypatch.setattr(collector.sender, "codex_identity", lambda: (object(), {}, "device"))
+    def download(*_args, **kwargs):
+        path = kwargs["output_dir"] / "result.zip"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"PK returned work")
+        return [{"name": "result.zip", "sandbox_path": "/tmp/result.zip",
+                 "path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}]
+    monkeypatch.setattr(collector.sender, "download_interpreter_artifacts", download)
+    monkeypatch.setattr(collector.sender, "admit_central_conversation", lambda **_kw: {
+        "ok": True, "central_readback_verified": True, "conversation_id": "conv-1",
+        "central_artifacts": [{"sha256": "returned"}]})
+    outcome = collector.collect(receipt, allow_provider_read=False)
+    assert outcome["state"] == "collected_from_local_terminal"
+    assert outcome["artifact_count"] == 1
+    assert json.loads((tmp_path / f"{stem}.collected.json").read_text())["result"]["downloaded_files"][0]["sandbox_path"] == "/tmp/result.zip"
+
+
 def test_local_terminal_with_central_readback_needs_no_provider_read(tmp_path, monkeypatch):
     stem = "b4pt0r-chatmode-fixture"
     receipt_path = tmp_path / f"{stem}.sse.receipt.json"

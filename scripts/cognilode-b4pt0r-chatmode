@@ -1562,6 +1562,17 @@ def _hydrated_model_receipt(message: dict) -> dict | None:
             "terminal_assistant_message_id": str(message.get("id") or ""), **fields}
 
 
+def sandbox_artifact_paths(assistant_text: str) -> list[str]:
+    """Return provider-linked files from the two bounded interpreter roots.
+
+    Chat-mode work can expose a real sandbox download under /tmp as well as
+    /mnt/data. Ignoring the former loses returned work despite a terminal turn.
+    """
+    return list(dict.fromkeys(re.findall(
+        r"sandbox:(/(?:mnt/data|tmp)/[^\s)>\]]+)", assistant_text
+    )))
+
+
 def download_interpreter_artifacts(
     session,
     auth: dict,
@@ -1575,15 +1586,28 @@ def download_interpreter_artifacts(
     downloads: list[dict] = []
     headers = app_headers(auth, device_id=device_id)
     used_destinations: set[Path] = set()
-    for sandbox_path in dict.fromkeys(re.findall(r"sandbox:(/mnt/data/[^\s)>\]]+)", assistant_text)):
+    for sandbox_path in sandbox_artifact_paths(assistant_text):
         name = Path(sandbox_path).name or "downloaded-artifact"
         destination = output_dir / name
         suffix_index = 2
-        while destination in used_destinations or destination.exists():
+        while destination in used_destinations:
             source_name = Path(name)
             destination = output_dir / f"{source_name.stem}-{suffix_index}{source_name.suffix}"
             suffix_index += 1
         used_destinations.add(destination)
+        # A completed transfer is atomically renamed into this per-turn
+        # directory. Reuse its bytes after a collector crash rather than
+        # requesting the same provider artifact again.
+        if destination.is_file() and 0 < destination.stat().st_size <= MAX_RETURNED_ARTIFACT_BYTES:
+            digest = hashlib.sha256()
+            with destination.open("rb") as saved:
+                for chunk in iter(lambda: saved.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            downloads.append({"name": destination.name, "source_name": name,
+                              "sandbox_path": sandbox_path, "path": str(destination),
+                              "size": destination.stat().st_size, "sha256": digest.hexdigest(),
+                              "source": "chatgpt_interpreter_download"})
+            continue
         metadata = request_json(
             session.get(
                 BASE + f"conversation/{conversation_id}/interpreter/download?" + urlencode({

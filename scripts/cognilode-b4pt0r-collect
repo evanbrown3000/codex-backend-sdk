@@ -145,6 +145,10 @@ def collect(receipt_path: Path, *, allow_provider_read: bool = False) -> dict:
             needs_tool_history = bool(prior_result.get("raw_sha256")) and (
                 prior_central.get("central_tool_event_count") is None or
                 source.get("readback_verified") is not True)
+            linked = set(sender.sandbox_artifact_paths(str(prior_result.get("terminal_assistant_text") or "")))
+            collected_links = {str(item.get("sandbox_path") or "") for item in files
+                               if artifact_matches(item)}
+            needs_linked_artifact = bool(linked - collected_links)
             if ((needs_tool_history or needs_artifact_custody) and existing.get("prompt") and
                     prior_result.get("terminal_assistant_text") and
                     (not needs_artifact_custody or all(artifact_matches(item) for item in files))):
@@ -158,7 +162,7 @@ def collect(receipt_path: Path, *, allow_provider_read: bool = False) -> dict:
                     if not allow_provider_read or has_collected_zip(upgraded_result):
                         return {"state": "central_custody_upgraded", "receipt": str(receipt_path),
                                 "tool_events": central.get("central_tool_event_count", 0), "central_ok": central.get("ok") is True}
-            if not allow_provider_read or has_collected_zip(prior_result):
+            if not needs_linked_artifact and (not allow_provider_read or has_collected_zip(prior_result)):
                 return {"state": "already_collected", "receipt": str(receipt_path)}
     record_path = receipt_path.with_name(stem + ".json")
     if record_path.is_file():
@@ -169,10 +173,36 @@ def collect(receipt_path: Path, *, allow_provider_read: bool = False) -> dict:
         local_result = local_record.get("result") if isinstance(local_record.get("result"), dict) else {}
         local_prompt = str(local_record.get("prompt") or "")
         local_text = str(local_result.get("terminal_assistant_text") or "")
-        links = set(re.findall(r"sandbox:(/mnt/data/[^\s)>\]]+)", local_text))
+        links = set(sender.sandbox_artifact_paths(local_text))
         files = list(local_result.get("downloaded_files") or [])
-        files_complete = not links or (len(files) >= len(links) and all(
-            artifact_matches(item) for item in files))
+        collected_links = {str(item.get("sandbox_path") or "") for item in files
+                           if isinstance(item, dict) and artifact_matches(item)}
+        files_complete = not (links - collected_links)
+        if local_prompt and local_text and local_result.get("assistant_terminal") and not files_complete:
+            conversation_id = str(local_result.get("conversation_id") or receipt.get("conversation_id") or "")
+            assistant_id = str(local_result.get("terminal_assistant_message_id") or "")
+            if not conversation_id or not assistant_id:
+                return {"state": "artifact_identity_pending", "receipt": str(receipt_path)}
+            try:
+                # The credential-bearing provider-transport collector performs
+                # only the exact linked-file GET. It does not hydrate or poll
+                # the conversation again after the saved SSE terminal.
+                session, auth, device_id = sender.codex_identity()
+                files = sender.download_interpreter_artifacts(
+                    session, auth, conversation_id=conversation_id,
+                    assistant_message_id=assistant_id, assistant_text=local_text,
+                    output_dir=receipt_path.with_name(stem + ".files"),
+                    device_id=device_id,
+                )
+            except Exception as exc:
+                return {"state": "artifact_download_pending", "receipt": str(receipt_path),
+                        "reason": f"{type(exc).__name__}: {str(exc)[:240]}"}
+            local_result["downloaded_files"] = files
+            local_record["result"] = local_result
+            atomic_json(record_path, local_record)
+            collected_links = {str(item.get("sandbox_path") or "") for item in files
+                               if isinstance(item, dict) and artifact_matches(item)}
+            files_complete = not (links - collected_links)
         if local_prompt and local_text and local_result.get("assistant_terminal") and files_complete and (has_collected_zip(local_result) or not allow_provider_read):
             central = local_result.get("central_conversation_store") or {}
             if not central.get("ok") or (files and not central.get("central_artifacts")):

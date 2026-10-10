@@ -320,7 +320,17 @@ class ChatGPTB4PT0RAdapter:
                 timeout=int(request.metadata.get("timeout_seconds") or 2100),
                 env=env, check=False,
             )
-            receipt = _last_json(completed.stdout, completed.stderr)
+            try:
+                receipt = _last_json(completed.stdout, completed.stderr)
+            except RuntimeError as error:
+                # Preserve the process outcome in the central queue event. A
+                # bare "no JSON receipt" erased the distinction between an
+                # internal exception, a source-generation signal, and a hard
+                # runtime exit, forcing repeated foreground diagnosis.
+                stderr_tail = completed.stderr[-1000:].replace("\n", " ")
+                raise RuntimeError(
+                    f"{error}; returncode={completed.returncode}; stderr={stderr_tail}"
+                ) from error
             if completed.returncode and not receipt.get("provider_acceptance_observed"):
                 receipt.setdefault("ok", False)
             return receipt

@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Atomically advance the three native release consumers to one immutable source.
+# The sole Compose reconciler and source-sync perform the build and installation.
+set -euo pipefail
+
+if [[ $# != 1 || ! $1 =~ ^[0-9a-f]{40}$ ]]; then
+  echo "usage: $0 FULL_CODEX_SOURCE_SHA" >&2
+  exit 64
+fi
+pin=$1
+repo=$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)
+
+for attempt in 1 2 3; do
+  git -C "$repo" fetch --quiet origin main
+  base=$(git -C "$repo" rev-parse origin/main)
+  worktree=$(mktemp -d "${TMPDIR:-/tmp}/cognilode-codex-pin.XXXXXXXX")
+  cleanup() {
+    git -C "$repo" worktree remove --force "$worktree" >/dev/null 2>&1 || true
+    rmdir "$worktree" >/dev/null 2>&1 || true
+  }
+  trap cleanup EXIT
+  git -C "$repo" worktree add --quiet --detach "$worktree" "$base"
+  PIN="$pin" WORKTREE="$worktree" python3 - <<'PY'
+import os
+import pathlib
+import re
+
+path = pathlib.Path(os.environ["WORKTREE"]) / "deploy/compose/company-chatmode.yml"
+source = path.read_text()
+pattern = r"(?m)^(\s*COGNILODE_CODEX_SOURCE_COMMIT:\s*)[0-9a-f]{40}(\s*)$"
+updated, count = re.subn(pattern, lambda m: m[1] + os.environ["PIN"] + m[2], source)
+if count != 3:
+    raise SystemExit(f"expected three release-consumer pins, found {count}")
+path.write_text(updated)
+PY
+  if git -C "$worktree" diff --quiet; then
+    echo "already_pinned source=$pin head=$base"
+    exit 0
+  fi
+  git -C "$worktree" add deploy/compose/company-chatmode.yml
+  git -C "$worktree" commit -q -m "Pin native Codex release source $pin"
+  promoted=$(git -C "$worktree" rev-parse HEAD)
+  if git -C "$worktree" push --quiet origin HEAD:refs/heads/main; then
+    echo "pinned source=$pin head=$promoted"
+    exit 0
+  fi
+  cleanup
+  trap - EXIT
+done
+echo "pin_raced source=$pin attempts=3" >&2
+exit 75

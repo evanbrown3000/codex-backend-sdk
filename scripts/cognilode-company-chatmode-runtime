@@ -182,6 +182,25 @@ def drain(process: subprocess.Popen) -> None:
         process.wait()
 
 
+def prepare_while_live(process: subprocess.Popen) -> tuple[Path, Path, Path]:
+    """Retry release preparation without sacrificing the incumbent actuator."""
+    while not STOP:
+        try:
+            return prepare_frontier()
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            print(f"provider release preparation retry: {type(exc).__name__}: {exc}",
+                  file=sys.stderr, flush=True)
+            if process.poll() is not None:
+                fallback = latest_complete_cli()
+                if fallback is None:
+                    raise
+                process = launch_prepared(
+                    active_source() / "scripts" / "b4pt0r-com-batch-daemon", fallback
+                )
+            time.sleep(15)
+    raise SystemExit(0)
+
+
 def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
@@ -192,7 +211,7 @@ def main() -> int:
     )) / source.name / "bin" / "b4pt0r"
     if bootstrap_cli is not None and not target_cli.is_file():
         process = launch_prepared(source / "scripts" / "b4pt0r-com-batch-daemon", bootstrap_cli)
-        source, runner, cli = prepare_frontier()
+        source, runner, cli = prepare_while_live(process)
         drain(process)
         process = launch_prepared(runner, cli)
     else:

@@ -248,47 +248,54 @@ class AgentMemoryClient:
         """Admit a streamed turn and verify it through central memory only."""
         prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         response_hash = hashlib.sha256(response.encode("utf-8")).hexdigest()
-        recorded = self._request("POST", self.legacy_endpoint, body={
-            "operation": "record_conversation",
+        recorded = self.ingest({
             "provider": "chatgpt.com",
+            "provider_conversation_id": conversation_id,
             "conversation_id": conversation_id,
             "title": "B4PT0R Chat-mode Prompt Dispatch",
-            "prompt_at": datetime.now(timezone.utc).isoformat(),
-            "response_at": datetime.now(timezone.utc).isoformat(),
-            "capture": {"prompt": True, "response": True, "uploaded_files": True,
-                        "downloadable_files": True, "interim_summaries": False},
-            "prompt": prompt,
-            "response_excerpt": response,
-            "prompt_sha256": prompt_hash,
-            "response_sha256": response_hash,
-            "provider_structured_uploads": [dict(row) for row in attachments],
-            "downloadable_files": [dict(row) for row in artifacts],
-            "conversation_urls": [f"https://chatgpt.com/c/{conversation_id}"],
-            "source": "b4pt0r-sdk-provider-stream",
-            "raw_expansion_handle": f"b4pt0r-sdk:{user_message_id}",
-            "read_receipt": {
-                "provider_acceptance_observed": True,
-                "assistant_terminal": True,
-                "terminal_assistant_message_id": assistant_message_id,
-                "provider_model_receipt": dict(provider_receipt),
-                "provider_requests_created_by_central_readback": 0,
+            "conversation_url": f"https://chatgpt.com/c/{conversation_id}",
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "source": {
+                "type": "b4pt0r_sdk_chat_mode",
+                "provenance": "provider_stream_terminal_without_provider_readback",
             },
+            "messages": [
+                {
+                    "id": user_message_id,
+                    "role": "user",
+                    "text": prompt,
+                    "metadata": {"attachments": [dict(row) for row in attachments]},
+                },
+                {
+                    "id": assistant_message_id,
+                    "parent": user_message_id,
+                    "role": "assistant",
+                    "text": response,
+                    "metadata": {"provider_receipt": dict(provider_receipt)},
+                },
+            ],
+            "attachments": [dict(row) for row in attachments],
+            "artifacts": [dict(row) for row in artifacts],
+            "terminal": True,
         })
-        stored_id = str(recorded.get("conversation_id") or conversation_id)
-        readback = self._request("POST", self.legacy_endpoint, body={
-            "operation": "read", "provider": "chatgpt.com", "conversation_id": stored_id,
-        })
-        conversation = readback.get("conversation") if isinstance(readback, Mapping) else None
-        conversation = conversation if isinstance(conversation, Mapping) else {}
-        actual_prompt = hashlib.sha256(str(conversation.get("prompt") or "").encode("utf-8")).hexdigest()
-        actual_response = hashlib.sha256(
-            str(conversation.get("response_excerpt") or "").encode("utf-8")
-        ).hexdigest()
+        result = recorded.get("result") if isinstance(recorded, Mapping) else None
+        result = result if isinstance(result, Mapping) else recorded
+        changed = result.get("conversations") if isinstance(result, Mapping) else []
+        stored_id = str(changed[0].get("conversation_id") or "") if changed else ""
+        if not stored_id:
+            raise RuntimeError("central memory ingestion omitted conversation identity")
+        readback = self.get(stored_id)
+        readback = readback.get("result") if isinstance(readback, Mapping) and isinstance(readback.get("result"), Mapping) else readback
+        events = list(readback.get("events") or []) if isinstance(readback, Mapping) else []
+        prompts = [str(row.get("text") or "") for row in events if isinstance(row, Mapping) and row.get("role") == "user"]
+        responses = [str(row.get("text") or "") for row in events if isinstance(row, Mapping) and row.get("role") == "assistant"]
+        actual_prompt = hashlib.sha256((prompts[-1] if prompts else "").encode("utf-8")).hexdigest()
+        actual_response = hashlib.sha256((responses[-1] if responses else "").encode("utf-8")).hexdigest()
         if actual_prompt != prompt_hash or actual_response != response_hash:
             raise RuntimeError("central memory turn readback mismatch")
         return {
             "ok": True,
-            "stored": recorded.get("stored") is True,
+            "stored": True,
             "conversation_id": stored_id,
             "central_readback_verified": True,
             "central_prompt_sha256": actual_prompt,

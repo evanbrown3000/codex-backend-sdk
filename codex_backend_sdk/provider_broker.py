@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 
 from . import OpenAI
 from .agent_memory import AgentMemoryClient
+from .attachment_custody import commit_returned_artifact
 
 
 def _operator_token() -> str:
@@ -45,7 +46,20 @@ def _relay_request(url: str, method: str, body: Any = None, params: Any = None) 
 
 def _artifact_rows(turn: Mapping[str, Any]) -> list[dict[str, Any]]:
     value = turn.get("artifacts")
-    return [dict(row) for row in value] if isinstance(value, list) else []
+    rows = [dict(row) for row in value] if isinstance(value, list) else []
+    for row in rows:
+        path = Path(str(row.get("path") or ""))
+        if row.get("ref") or not path.is_file():
+            continue
+        try:
+            receipt = commit_returned_artifact(path)
+        except Exception as exc:
+            row["custody_state"] = "pending"
+            row["custody_error"] = type(exc).__name__
+        else:
+            row.update(receipt)
+            row["custody_state"] = "committed"
+    return rows
 
 
 def _send(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -87,6 +101,7 @@ def _send(payload: Mapping[str, Any]) -> dict[str, Any]:
             artifact_directory=payload.get("artifact_directory") or root / "artifacts",
         )
         turn = result.get("turn") if isinstance(result.get("turn"), Mapping) else {}
+        artifact_rows = _artifact_rows(turn)
         try:
             memory_receipt = memory.record_chatgpt_turn(
                 conversation_id=str(result.get("conversation_id") or ""),
@@ -95,7 +110,7 @@ def _send(payload: Mapping[str, Any]) -> dict[str, Any]:
                 prompt=prompt,
                 response=str(turn.get("assistant_text") or ""),
                 attachments=[dict(row) for row in result.get("attachments") or []],
-                artifacts=_artifact_rows(turn),
+                artifacts=artifact_rows,
                 provider_receipt=turn.get("model_receipt") or result.get("stream") or {},
             )
         except Exception as exc:
@@ -107,7 +122,7 @@ def _send(payload: Mapping[str, Any]) -> dict[str, Any]:
             "assistant_message_id": turn.get("assistant_message_id"),
             "assistant_text": turn.get("assistant_text") or "",
             "provider_receipt": turn.get("model_receipt") or result.get("stream") or {},
-            "artifacts": _artifact_rows(turn),
+            "artifacts": artifact_rows,
             "agent_memory": memory_receipt,
             "memory_foreground": {
                 key: foreground.get(key)

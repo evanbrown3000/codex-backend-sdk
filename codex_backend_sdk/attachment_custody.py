@@ -22,9 +22,15 @@ def _password() -> str:
     return value
 
 
-def commit_bytes(name: str, data: bytes) -> dict[str, Any]:
+def commit_bytes(
+    name: str,
+    data: bytes,
+    *,
+    root_env: str = "COGNILODE_PROMPT_ATTACHMENT_ROOT",
+    purpose: str = "provider-prompt-attachment",
+) -> dict[str, Any]:
     endpoint = os.environ.get("UNIVERSE_STORAGE_ENDPOINT", "").strip()
-    root = os.environ.get("COGNILODE_PROMPT_ATTACHMENT_ROOT", "").rstrip("/")
+    root = os.environ.get(root_env, "").rstrip("/")
     digest = hashlib.sha256(data).hexdigest()
     if not endpoint or not root:
         bucket = os.environ.get(
@@ -59,7 +65,7 @@ def commit_bytes(name: str, data: bytes) -> dict[str, Any]:
         locator,
         data,
         media_type=mimetypes.guess_type(name)[0] or "application/octet-stream",
-        metadata={"sha256": digest, "name": name, "purpose": "provider-prompt-attachment"},
+        metadata={"sha256": digest, "name": name, "purpose": purpose},
     )
     return {
         "ref": stored.locator.to_uri(),
@@ -74,3 +80,15 @@ def commit_path(path: str | Path) -> dict[str, Any]:
     if not source.is_file():
         raise ValueError(f"attachment is not a regular file: {source}")
     return commit_bytes(source.name, source.read_bytes())
+
+
+def commit_returned_artifact(path: str | Path) -> dict[str, Any]:
+    source = Path(path).expanduser().resolve(strict=True)
+    if not source.is_file():
+        raise ValueError(f"artifact is not a regular file: {source}")
+    return commit_bytes(
+        source.name,
+        source.read_bytes(),
+        root_env="COGNILODE_RETURNED_ARTIFACT_ROOT",
+        purpose="provider-returned-artifact",
+    )

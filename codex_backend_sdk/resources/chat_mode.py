@@ -249,11 +249,10 @@ class ChatModeOperations:
     ) -> dict[str, Any]:
         parent = parent_message_id
         if conversation_id and not parent:
-            existing = self._client.chatgpt.conversations.retrieve(conversation_id)
-            value = existing.get("current_node") if isinstance(existing, dict) else None
-            if not isinstance(value, str) or not value:
-                raise RuntimeError("Existing ChatGPT conversation omitted current_node.")
-            parent = value
+            raise ValueError(
+                "Continuing a ChatGPT conversation requires its normalized parent_message_id; "
+                "provider observability reads are disabled."
+            )
         attachments = self.upload_attachments(attachment_paths)
         message_id, payload = build_chat_mode_turn(
             prompt,

@@ -333,13 +333,23 @@ def main() -> int:
             break
     outcomes = []
     provider_reads = 0
+    source_generation = str(Path(__file__).resolve().parent)
     for path in paths[:max(1, args.limit)]:
         state_path = path.with_name(path.name.removesuffix(".sse.receipt.json") + ".collection_state.json")
         try:
             state = json.loads(state_path.read_text()) if state_path.is_file() else {}
         except (OSError, ValueError):
             state = {}
-        if float(state.get("next_poll_epoch") or 0) > time.time():
+        prior_result = state.get("last_result") if isinstance(state.get("last_result"), dict) else {}
+        prior_reason = str(prior_result.get("reason") or "")
+        repaired_local_blocker = (
+            (Path.home() / ".codex/auth.json").is_file()
+            and state.get("state") == "artifact_download_pending"
+            and state.get("collector_source_generation") != source_generation
+            and ("No module named 'curl_cffi'" in prior_reason
+                 or "central HTTP gate denied observability" in prior_reason)
+        )
+        if float(state.get("next_poll_epoch") or 0) > time.time() and not repaired_local_blocker:
             continue
         allow_provider_read = (observability_enabled and not active_mutation
                                and provider_reads == 0 and time.time() >= global_cooldown_until)
@@ -365,6 +375,7 @@ def main() -> int:
         delay = 0 if status in ("collected", "already_collected") else min(1800, 60 * 2 ** min(attempts - 1, 5))
         atomic_json(state_path, {"state": status, "attempts": attempts,
                                  "next_poll_epoch": time.time() + delay,
+                                 "collector_source_generation": source_generation,
                                  "last_result": outcome})
     print(json.dumps({"processed": len(outcomes), "outcomes": outcomes}, ensure_ascii=False))
     return 0

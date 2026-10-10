@@ -218,7 +218,7 @@ services:
       HOME: /root
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
       COGNILODE_CODEX_INSTALL_ROOT: /codex
-      COGNILODE_BUILDER_GENERATION: git-safe-directory-v1
+      COGNILODE_BUILDER_GENERATION: synced-resolved-pin-v2
       COGNILODE_CODEX_MIN_BUILD_MEMORY_BYTES: "5368709120"
       CARGO_TARGET_DIR: /cargo-target
       CARGO_BUILD_JOBS: "4"

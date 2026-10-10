@@ -9,11 +9,14 @@ from pathlib import Path
 import platform
 import re
 import subprocess
+import sys
 import time
 
 
 SOURCE_ROOT = Path(os.environ.get("COGNILODE_COMPANY_SOURCE_ROOT", "/runtime/source"))
 SOURCE_LINK = SOURCE_ROOT / "current/cognilode-codex"
+SCRIPT_LINK = SOURCE_ROOT / "current/codex-backend-sdk/scripts/cognilode-company-codex-builder"
+BOOT_SCRIPT = Path(__file__).resolve()
 RELEASE = Path(os.environ.get("COGNILODE_CODEX_INSTALL_ROOT", "/codex"))
 TARGET = f"{platform.system().lower()}-{platform.machine().lower()}"
 
@@ -107,6 +110,12 @@ def run_once() -> None:
 
 if __name__ == "__main__":
     while True:
+        try:
+            selected_script = SCRIPT_LINK.resolve(strict=True)
+            if selected_script != BOOT_SCRIPT:
+                os.execv(sys.executable, [sys.executable, str(selected_script)])
+        except OSError:
+            pass
         try:
             run_once()
         except Exception as error:

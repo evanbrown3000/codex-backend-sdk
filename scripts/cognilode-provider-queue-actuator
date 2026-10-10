@@ -8,6 +8,7 @@ crosses the fenced effect boundary, and reports the normalized provider result.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ import signal
 import socket
 import sys
 import threading
+import tempfile
 import time
 from typing import Any, Mapping
 
@@ -53,6 +55,43 @@ def local_attachment(row: object) -> str:
             return str(candidate)
     from codex_backend_sdk.attachment_custody import materialize_attachment
     return materialize_attachment(row)
+
+
+def persist_admission_intent(job: Mapping[str, Any]) -> None:
+    """Durably retain explicit application intent before any provider effect."""
+    intent = job.get("application_intent")
+    if not isinstance(intent, Mapping):
+        metadata = job.get("metadata") if isinstance(job.get("metadata"), Mapping) else {}
+        intent = metadata.get("application_intent")
+    if not isinstance(intent, Mapping):
+        return
+    job_id = str(job.get("id") or "").strip()
+    parent = job.get("parent_operation") if isinstance(job.get("parent_operation"), Mapping) else {}
+    operation_id = str(parent.get("operation_id") or job.get("parent_operation_id") or job["id"])
+    operation_id = str(parent.get("operation_id") or job.get("parent_operation_id") or job_id)
+    root = Path(os.environ.get("COGNILODE_RETURNED_PRODUCT_ADMISSIONS",
+                               "/runtime/worker/returned-products/admission-intents"))
+    target = root / (hashlib.sha256(job_id.encode()).hexdigest() + ".json")
+    record = {"schema": "cognilode.returned_product.pending_intent.v1", "job_id": job_id,
+              "operation_id": operation_id, "application_intent": dict(intent)}
+    root.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+    if target.exists():
+        prior = json.loads(target.read_text(encoding="utf-8"))
+        if prior != record:
+            raise RuntimeError("admission_intent_identity_conflict")
+        return
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=root, prefix=target.name + ".", delete=False) as stream:
+        stream.write(encoded); stream.flush(); os.fsync(stream.fileno())
+        temporary = Path(stream.name)
+    try:
+        os.link(temporary, target)
+    except FileExistsError:
+        prior = json.loads(target.read_text(encoding="utf-8"))
+        if prior != record:
+            raise RuntimeError("admission_intent_identity_conflict")
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def evidence(result: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -155,6 +194,9 @@ def chatgpt_transport(job: Mapping[str, Any], attachments: tuple[str, ...]) -> d
 
 
 def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
+    # Scheduler admission persists the full payload; materialize its intent
+    # into the shared join ledger before attachment work or begin_effect.
+    persist_admission_intent(job)
     try:
         attachments = tuple(local_attachment(row) for row in job.get("attachment_refs") or ())
     except Exception as exc:
@@ -178,7 +220,7 @@ def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
         operation_id=str(job["id"]) + ":lease:" + str(job.get("lease_generation") or 0),
         account_id=str(job.get("assigned_account") or "primary"),
         parent_operation={
-            "operation_id": str(parent.get("operation_id") or job.get("parent_operation_id") or job["id"]),
+            "operation_id": operation_id,
             "automation_order": int(parent.get("automation_order") or job.get("parent_automation_order") or 2),
             "origin": str(parent.get("kind") or job.get("parent_kind") or "provider_queue"),
             "taskflow_node": parent.get("taskflow_node"),
@@ -189,12 +231,21 @@ def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
         metadata={"timeout_seconds": 1800, "queue_job_id": job["id"]},
     )
     if result.get("accepted") is not True or result.get("terminal") is not True:
+        provider_error = result.get("provider_error") or {}
+        reason = str(provider_error.get("code") or result.get("state") or "provider_incomplete")
+        detail = str(provider_error.get("message") or "").strip()
+        if detail:
+            reason += ":" + detail[:500]
         scheduler_call({
             "operation": "release_job", **fence(job), "provider_state": "provider_error",
-            "reason": str((result.get("provider_error") or {}).get("code") or result.get("state") or "provider_incomplete"),
+            "reason": reason,
             "retry_after_seconds": 60,
         })
         return
+    # Carry only scheduler identity, not inferred intent, into the terminal
+    # record so the returned-product worker can perform the durable join.
+    result = {**dict(result), "queue_job_id": str(job["id"]),
+              "parent_operation": {"operation_id": operation_id}}
     scheduler_call({
         "operation": "complete_job", **fence(job),
         "conversation_id": result.get("conversation_id"),

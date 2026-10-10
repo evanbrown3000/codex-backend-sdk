@@ -207,7 +207,11 @@ class Handler(socketserver.StreamRequestHandler):
             else:
                 response = {"exit_code": 64, "stderr": "unsupported transport operation"}
         except Exception as exc:
-            response = {"exit_code": 70, "stderr": type(exc).__name__}
+            # Return a bounded diagnostic to the queue ledger.  Masking every
+            # pre-mutation exception to its class made permanent configuration
+            # faults indistinguishable and forced foreground inspection.
+            response = {"exit_code": 70, "stderr":
+                        (type(exc).__name__ + ":" + str(exc))[:1000]}
         self.wfile.write((json.dumps(response, separators=(",", ":")) + "\n").encode())
 
 

@@ -20,12 +20,25 @@ import threading
 import tempfile
 import time
 from typing import Any, Mapping
+from urllib.request import urlopen
 
 from codex_backend_sdk.provider_actuation_client import ProviderActuationClient
 from codex_backend_sdk.provider_scheduler_client import scheduler_call
 
 STOP = False
 DRAINING = False
+
+
+def provider_backend_ready(provider: str) -> bool:
+    """Publish availability only when the mutation backend is reachable."""
+    if provider == "chatgpt.com":
+        return True
+    endpoint = os.environ.get("COMPUTERUSEX_CDP_ENDPOINT", "http://provider-browser:9334").rstrip("/")
+    try:
+        with urlopen(endpoint + "/json/version", timeout=2.0) as response:
+            return response.status == 200 and bool(response.read(262144))
+    except Exception:
+        return False
 
 
 def stop(*_args: object) -> None:
@@ -663,16 +676,17 @@ def main() -> int:
             account = "central-custody" if args.provider == "chatgpt.com" else "primary"
             with lock:
                 active_count = len(active)
+            backend_ready = provider_backend_ready(args.provider)
             scheduler_call({
                 "operation": "rhythm_device_heartbeat",
                 "device": {
-                    "id": device, "available": True, "active_turns": active_count,
+                    "id": device, "available": backend_ready, "active_turns": active_count,
                     "max_concurrency": max_concurrency,
                     "environment_id": args.device_id,
                     "capabilities": {
                         "environment": args.device_id, "accounts": [account],
                         "providers": {args.provider: {
-                            "enabled": True, "authentication": "both", "attachments": True,
+                            "enabled": backend_ready, "authentication": "both", "attachments": True,
                             "artifact_downloads": True, "continuation": True,
                             "models": (["gpt-5-6-thinking", "gpt-5.6", "gpt-5.6-sol",
                                         "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "auto"]
@@ -683,6 +697,9 @@ def main() -> int:
                     },
                 },
             })
+            if not backend_ready:
+                time.sleep(max(1.0, args.interval))
+                continue
             seen = set()
             for assigned_device in device_ids:
                 for state in ("effect_pending", "claimed"):

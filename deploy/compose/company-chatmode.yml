@@ -100,6 +100,7 @@ services:
         chrome=$$(find /root/.cache/ms-playwright -path '*/chrome-linux64/chrome' -type f -perm -111 | head -n 1)
         test -n "$$chrome"
         "$$chrome" --user-data-dir="$$profile" --remote-debugging-port=9333 \
+          --remote-allow-origins='*' \
           --disable-dev-shm-usage --no-first-run --no-default-browser-check \
           --no-sandbox --headless=new --disable-features=UsePortalFilePicker \
           --window-size=1600,1000 https://gemini.google.com/app &

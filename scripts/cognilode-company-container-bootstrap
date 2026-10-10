@@ -373,6 +373,23 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
     service_hash_path = runtime / "shared/compose-service-digests.json"
     notify_service("READY=1\nSTATUS=Reconciling company containers")
     while True:
+        # Docker may successfully create a replacement container but fail
+        # before starting it. Compose hashes do not change in that case, so
+        # digest-only reconciliation would strand custody services in Created
+        # forever. Reconcile these critical services from the source-driven
+        # supervisor whenever that exact state is observed.
+        for service in ("provider-transport", "returned-product-actuator"):
+            name = f"{project}-{service}-1"
+            state = subprocess.run(["docker", "inspect", "--format", "{{.State.Status}}", name],
+                                   capture_output=True, text=True, check=False, timeout=10)
+            if state.returncode == 0 and state.stdout.strip() == "created":
+                try:
+                    subprocess.run(["docker", "compose", "--project-name", project,
+                                    "-f", str(applied_compose), "up", "-d", "--no-deps", service],
+                                   env=env, check=True, timeout=120)
+                    print(f"company critical service recovered from Created: {service}", flush=True)
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                    print(f"company critical service start pending: {service}: {exc}", flush=True)
         notify_service("WATCHDOG=1")
         candidate = synced / "deploy/compose/company-chatmode.yml"
         if candidate.is_file():

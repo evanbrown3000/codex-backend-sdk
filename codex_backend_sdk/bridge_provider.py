@@ -278,6 +278,8 @@ class ProviderCommandClient:
         priority: int | None = None,
         decisionx: Mapping[str, Any] | None = None,
         parent_operation: Mapping[str, Any] | None = None,
+        application_intent: Mapping[str, Any] | None = None,
+        required_downstream_operation: Mapping[str, Any] | None = None,
         collect_artifacts: bool = False,
     ) -> dict[str, Any]:
         return self.send_provider(
@@ -296,6 +298,8 @@ class ProviderCommandClient:
             priority=priority,
             decisionx=decisionx,
             parent_operation=parent_operation,
+            application_intent=application_intent,
+            required_downstream_operation=required_downstream_operation,
             collect_artifacts=collect_artifacts,
         )
 
@@ -318,6 +322,8 @@ class ProviderCommandClient:
         priority: int | None = None,
         decisionx: Mapping[str, Any] | None = None,
         parent_operation: Mapping[str, Any] | None = None,
+        application_intent: Mapping[str, Any] | None = None,
+        required_downstream_operation: Mapping[str, Any] | None = None,
         collect_artifacts: bool = False,
     ) -> dict[str, Any]:
         """Admit any supported agent turn through one provider-neutral API.
@@ -344,6 +350,9 @@ class ProviderCommandClient:
             "priority": priority,
             "decisionx": dict(decisionx) if decisionx is not None else None,
             "parent_operation": dict(parent_operation) if parent_operation is not None else None,
+            "application_intent": dict(application_intent) if application_intent is not None else None,
+            "required_downstream_operation": (dict(required_downstream_operation)
+                if required_downstream_operation is not None else None),
             "collect_artifacts": bool(collect_artifacts),
         })
 

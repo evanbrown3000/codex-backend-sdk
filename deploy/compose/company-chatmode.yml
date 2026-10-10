@@ -147,7 +147,9 @@ services:
     tmpfs: *company_aws_cli_cache
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
-    network_mode: bridge
+    networks:
+      - company-universe
+      - host-bridge
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
     cpus: 1
     mem_limit: 2g
@@ -722,6 +724,14 @@ services:
     depends_on:
       - source-sync
       - credential-sync
+
+networks:
+  company-universe:
+    external: true
+    name: cognilode-company-runtime_default
+  host-bridge:
+    external: true
+    name: bridge
 
 volumes:
   company_auth:

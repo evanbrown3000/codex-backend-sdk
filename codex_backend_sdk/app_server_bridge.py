@@ -360,6 +360,23 @@ class Bridge:
         result["data"] = [*external, *native]
         return response
 
+    def _central_list_result(self, params: Mapping[str, Any], *, search: bool = False) -> dict[str, Any]:
+        limit = max(1, min(int(params.get("limit") or 100), 500))
+        filters = {
+            key: params[key]
+            for key in ("provider", "platform", "date_from", "date_to")
+            if params.get(key) is not None
+        }
+        if search:
+            query = str(params.get("query") or params.get("text") or params.get("searchTerm") or "").strip()
+            payload = self.memory.search(query, limit=limit, **filters)
+        else:
+            payload = self.memory.list(
+                limit=limit, cursor=str(params.get("cursor")) if params.get("cursor") else None, **filters
+            )
+        data = [summary for row in _rows(payload) if (summary := _memory_summary(row)) is not None]
+        return {"data": data, "nextCursor": _cursor(payload), "backwardsCursor": None}
+
     def _external_read(self, thread_id: str) -> dict[str, Any]:
         conversation_id = thread_id.split(":", 1)[1]
         payload = self.memory.project_thread(conversation_id)
@@ -479,8 +496,25 @@ class Bridge:
             raise ValueError("environmentId is required")
         if environment_id != "local":
             self.remote.select(environment_id)
-        self._start_transport(environment_id)
-        self.emit({"id": request_id, "result": {"environmentId": environment_id, "selected": True}})
+        native_available = True
+        native_error = None
+        try:
+            self._start_transport(environment_id)
+        except Exception as exc:
+            if environment_id == "local":
+                raise
+            # Central normalized conversations remain readable and queueable
+            # even while the selected node lacks its native Codex process.
+            self._selected_environment = environment_id
+            native_available = False
+            native_error = type(exc).__name__
+        self.emit({"id": request_id, "result": {
+            "environmentId": environment_id,
+            "selected": True,
+            "nativeCodexAvailable": native_available,
+            "nativeCodexState": "running" if native_available else "installation_pending",
+            **({"nativeCodexError": native_error} if native_error else {}),
+        }})
 
     def handle(self, request: dict[str, Any]) -> None:
         method = request.get("method")
@@ -495,9 +529,15 @@ class Bridge:
                 self._environment_select(request_id, params)
                 return
             if method == "thread/list":
+                if self._selected_environment != "local":
+                    self.emit({"id": request_id, "result": self._central_list_result(params)})
+                    return
                 self._forward_intercept(request, "thread/list")
                 return
             if method == "thread/search":
+                if self._selected_environment != "local":
+                    self.emit({"id": request_id, "result": self._central_list_result(params, search=True)})
+                    return
                 self._forward_intercept(request, "thread/search")
                 return
             if isinstance(thread_id, str) and thread_id.startswith("memory:"):

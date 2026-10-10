@@ -34,25 +34,30 @@ def iso(value: object) -> float:
 def provider_seconds(job: Mapping[str, Any]) -> float:
     """Measure only provider-side execution, never queue or broker waiting."""
     result = job.get("normalized_provider_result") if isinstance(job.get("normalized_provider_result"), Mapping) else {}
-    receipt = result.get("provider_receipt") if isinstance(result.get("provider_receipt"), Mapping) else {}
-    nested = receipt.get("provider_receipt") if isinstance(receipt.get("provider_receipt"), Mapping) else {}
-    elapsed = nested.get("elapsed_seconds") or receipt.get("elapsed_seconds")
-    if isinstance(elapsed, (int, float)):
-        return float(elapsed)
-    started = (nested.get("provider_started_at") or nested.get("started_at")
-               or receipt.get("provider_started_at") or receipt.get("started_at")
-               or result.get("provider_started_at") or result.get("started_at"))
-    completed = (nested.get("provider_completed_at") or nested.get("completed_at")
-                 or receipt.get("provider_completed_at") or receipt.get("completed_at")
-                 or result.get("provider_completed_at") or result.get("completed_at"))
-    if started is None or completed is None:
-        return 0.0
-    try:
-        start_value = float(started) if isinstance(started, (int, float)) else iso(started)
-        end_value = float(completed) if isinstance(completed, (int, float)) else iso(completed)
-        return end_value - start_value
-    except (TypeError, ValueError):
-        return 0.0
+    candidates: list[Mapping[str, Any]] = [result]
+    seen: set[int] = set()
+    while candidates:
+        receipt = candidates.pop(0)
+        if id(receipt) in seen:
+            continue
+        seen.add(id(receipt))
+        elapsed = receipt.get("elapsed_seconds")
+        if isinstance(elapsed, (int, float)):
+            return float(elapsed)
+        started = receipt.get("provider_started_at") or receipt.get("started_at")
+        completed = receipt.get("provider_completed_at") or receipt.get("completed_at")
+        if started is not None and completed is not None:
+            try:
+                start_value = float(started) if isinstance(started, (int, float)) else iso(started)
+                end_value = float(completed) if isinstance(completed, (int, float)) else iso(completed)
+                return end_value - start_value
+            except (TypeError, ValueError):
+                pass
+        for key in ("provider_receipt", "provider_model_receipt", "model_receipt"):
+            child = receipt.get(key)
+            if isinstance(child, Mapping):
+                candidates.append(child)
+    return 0.0
 
 
 def physical_outputs(job: Mapping[str, Any]) -> list[str]:

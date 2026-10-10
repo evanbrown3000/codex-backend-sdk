@@ -111,6 +111,8 @@ def _remote(args: argparse.Namespace) -> Any:
         return client.environments()
     if args.remote_command == "select":
         return client.select(args.environment_id)
+    if args.remote_command == "current":
+        return client.current()
     if args.remote_command == "exec":
         return client.execute(
             args.command,
@@ -224,6 +226,7 @@ def parser() -> argparse.ArgumentParser:
     remote.add_argument("--actor-id", default="default")
     shell = remote.add_subparsers(dest="remote_command", required=True)
     shell.add_parser("list")
+    shell.add_parser("current")
     select = shell.add_parser("select")
     select.add_argument("environment_id")
     execute = shell.add_parser("exec")

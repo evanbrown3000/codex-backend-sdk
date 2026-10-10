@@ -14,6 +14,8 @@ import uuid
 
 from . import OpenAI
 from .agent_memory import AgentMemoryClient
+from .environment_app_server import SelectedEnvironmentAppServer, _environment_id
+from .remote_shell import RemoteShellClient
 
 
 def _text(message: Mapping[str, Any]) -> str:
@@ -155,15 +157,30 @@ def _input_text(params: Mapping[str, Any]) -> str:
 
 class Bridge:
     def __init__(self) -> None:
-        executable = os.environ.get("CODEX_NATIVE_EXECUTABLE", "codex")
-        self.child = subprocess.Popen(
-            [executable, "app-server", "--stdio"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
+        self.remote_child: SelectedEnvironmentAppServer | None = None
+        self.child: subprocess.Popen[str] | None = None
+        relay = RemoteShellClient(actor_id=os.environ.get("COGNILODE_ACTOR_ID", "default"))
+        try:
+            selected = _environment_id(relay.current())
+        except Exception:
+            selected = None
+        if selected:
+            self.remote_child = SelectedEnvironmentAppServer(
+                relay,
+                executable=os.environ.get("CODEX_NATIVE_EXECUTABLE", "codex"),
+                workdir=os.environ.get("CODEX_REMOTE_WORKDIR") or None,
+                environment_id=selected,
+            ).start()
+        else:
+            executable = os.environ.get("CODEX_NATIVE_EXECUTABLE", "codex")
+            self.child = subprocess.Popen(
+                [executable, "app-server", "--stdio"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
         self._write_lock = threading.Lock()
         self._pending: dict[str, tuple[Any, str]] = {}
         self._provider = None
@@ -181,6 +198,11 @@ class Bridge:
             sys.stdout.flush()
 
     def child_send(self, value: Mapping[str, Any]) -> None:
+        if self.remote_child is not None:
+            self.remote_child.send(value)
+            return
+        if self.child is None:
+            raise RuntimeError("Codex App Server is unavailable.")
         if self.child.stdin is None:
             raise RuntimeError("Native Codex App Server stdin is unavailable.")
         self.child.stdin.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -203,6 +225,12 @@ class Bridge:
         return response
 
     def _child_reader(self) -> None:
+        if self.remote_child is not None:
+            for message in self.remote_child.events():
+                self._receive_child_message(message)
+            return
+        if self.child is None:
+            return
         if self.child.stdout is None:
             return
         for line in self.child.stdout:
@@ -210,15 +238,20 @@ class Bridge:
                 message = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            message_id = message.get("id") if isinstance(message, dict) else None
-            if isinstance(message_id, str) and message_id in self._pending:
-                original_id, operation = self._pending.pop(message_id)
-                message["id"] = original_id
-                if operation == "thread/list":
-                    message = self._merge_thread_list(message)
-            self.emit(message)
+            self._receive_child_message(message)
+
+    def _receive_child_message(self, message: dict[str, Any]) -> None:
+        message_id = message.get("id")
+        if isinstance(message_id, str) and message_id in self._pending:
+            original_id, operation = self._pending.pop(message_id)
+            message["id"] = original_id
+            if operation == "thread/list":
+                message = self._merge_thread_list(message)
+        self.emit(message)
 
     def _child_stderr(self) -> None:
+        if self.child is None:
+            return
         if self.child.stderr is None:
             return
         for line in self.child.stderr:
@@ -346,7 +379,8 @@ class Bridge:
 
     def run(self) -> int:
         threading.Thread(target=self._child_reader, daemon=True).start()
-        threading.Thread(target=self._child_stderr, daemon=True).start()
+        if self.child is not None:
+            threading.Thread(target=self._child_stderr, daemon=True).start()
         for line in sys.stdin:
             try:
                 request = json.loads(line)
@@ -354,6 +388,11 @@ class Bridge:
                 continue
             if isinstance(request, dict):
                 self.handle(request)
+        if self.remote_child is not None:
+            self.remote_child.close()
+            return 0
+        if self.child is None:
+            return 1
         if self.child.stdin is not None:
             self.child.stdin.close()
         return self.child.wait()

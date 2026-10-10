@@ -78,6 +78,10 @@ class RemoteShellClient:
             {"actor_id": self.actor_id, "environment_id": environment_id},
         )
 
+    def current(self) -> Any:
+        """Return the environment persistently selected for this actor."""
+        return self.call("environment_current", {"actor_id": self.actor_id})
+
     def execute(
         self,
         command: str,

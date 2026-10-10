@@ -23,12 +23,16 @@ DRAINING = False
 
 
 def runtime_python() -> Path:
-    root = Path.home() / ".local/share/cognilode/b4pt0r-chatmode"
-    for candidate in sorted(root.glob("venv-python*/bin/python")):
-        environment = candidate.parent.parent
-        if any(environment.glob("lib/python*/site-packages/curl_cffi")):
-            return candidate
-    raise RuntimeError("B4PT0R custody runtime unavailable")
+    source = Path(os.environ.get(
+        "COGNILODE_B4PT0R_SDK_ROOT", "/runtime/source/current/codex-backend-sdk"
+    )).resolve()
+    release_root = Path(os.environ.get(
+        "COGNILODE_B4PT0R_RELEASE_ROOT", "/runtime/b4pt0r-releases/locked-v2"
+    ))
+    selected = release_root / source.name / "bin/python"
+    if selected.is_file() and (selected.parent.parent / ".complete").is_file():
+        return selected
+    raise RuntimeError("current immutable B4PT0R custody runtime unavailable")
 
 
 def option(args: list[str], name: str, default: str = "") -> str:

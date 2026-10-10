@@ -154,6 +154,59 @@ def save_service_hashes(path: Path, hashes: dict[str, str]) -> None:
     temporary.replace(path)
 
 
+def release_stalled_chatmode_replacement(project: str, runtime: Path) -> bool:
+    """Bound an old Chatmode PID1 drain after Compose has made its replacement.
+
+    This only stops the old, exact Compose container. The new Created container
+    and its volumes remain under Compose custody. A queued provider mutation is
+    fenced by the D1 lease/begin-effect protocol; terminating the old worker
+    cannot grant a second send, and uncertain effects remain for reconciliation.
+    """
+    old_name = f"{project}-chatmode-1"
+    result = subprocess.run(
+        ["docker", "ps", "--all", "--filter", f"label=com.docker.compose.project={project}",
+         "--filter", "label=com.docker.compose.service=chatmode", "--format", "{{json .}}"],
+        capture_output=True, text=True, check=True, timeout=20)
+    containers = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+    old = next((item for item in containers if item.get("Names") == old_name
+                and item.get("State") == "running"), None)
+    replacement = next((item for item in containers
+                        if item.get("Names", "").endswith("_" + old_name)
+                        and item.get("State") == "created"), None)
+    if not old or not replacement:
+        return False
+    old_id = old.get("ID", "")
+    replacement_id = replacement.get("ID", "")
+    if not old_id or not replacement_id or old_id == replacement_id:
+        return False
+    receipt = runtime / "shared/chatmode-replacement-stop.json"
+    if receipt.is_file():
+        try:
+            if json.loads(receipt.read_text(encoding="utf-8")).get("old_container_id") == old_id:
+                return False
+        except (OSError, ValueError):
+            pass
+    print(f"bounded Chatmode replacement: stopping old={old_id} "
+          f"preserving created={replacement_id}", flush=True)
+    # `docker stop` sends TERM, then KILL after the grace period. If its client
+    # stalls behind the old container's drain, target the same exact ID with a
+    # bounded KILL. Neither command removes a container or a volume.
+    try:
+        subprocess.run(["docker", "stop", "--time", "10", old_id],
+                       check=True, timeout=35, stdout=subprocess.DEVNULL)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        subprocess.run(["docker", "kill", "--signal", "KILL", old_id],
+                       check=True, timeout=20, stdout=subprocess.DEVNULL)
+    temporary = receipt.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"schema": "cognilode.chatmode-replacement-stop.v1",
+                                     "old_container_id": old_id,
+                                     "created_container_id": replacement_id,
+                                     "at_unix": int(time.time())}, sort_keys=True) + "\n",
+                         encoding="utf-8")
+    temporary.replace(receipt)
+    return True
+
+
 def retire_standalone_adopter(project: str, compose: Path, runtime: Path,
                              env: dict[str, str]) -> None:
     """Remove the old unfenced adopter once its container replacements run."""
@@ -221,6 +274,7 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
                                "COGNILODE_BOOTSTRAP_RECONCILE_ONLY": "1"})
                 digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
                 if digest != applied_digest:
+                    changed: list[str] = []
                     try:
                         current_hashes = compose_service_hashes(project, candidate, env)
                         try:
@@ -235,10 +289,19 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
                             # their unchanged long-running work must keep its lease.
                             subprocess.run(["docker", "compose", "--project-name", project,
                                             "-f", str(candidate), "up", "-d", "--no-deps",
-                                            *changed], env=env, check=True, timeout=300)
+                                            *changed], env=env, check=True,
+                                           timeout=150 if "chatmode" in changed else 300)
                         save_service_hashes(service_hash_path, current_hashes)
-                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
-                            KeyError, ValueError) as exc:
+                    except subprocess.TimeoutExpired as exc:
+                        if "chatmode" in changed:
+                            try:
+                                release_stalled_chatmode_replacement(project, runtime)
+                            except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                                    OSError, ValueError) as recovery_exc:
+                                print(f"bounded Chatmode replacement pending: {recovery_exc}",
+                                      flush=True)
+                        print(f"company Compose reconciliation pending: {exc}", flush=True)
+                    except (subprocess.CalledProcessError, KeyError, ValueError) as exc:
                         print(f"company Compose reconciliation pending: {exc}", flush=True)
                     else:
                         applied_digest = digest

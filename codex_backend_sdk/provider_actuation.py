@@ -382,9 +382,10 @@ class ComputerUseXProviderAdapter:
             f"Native adapter failure: {type(error).__name__}: {error}\n"
             f"Attachments:\n{attachments}\nExact prompt follows:\n{request.prompt}"
         )
+        durable_job_id = request.operation_id.split(":lease:", 1)[0]
         recovery = dispatch(
             provider_kind="modified_codex", prompt=goal,
-            request_id=f"computerusex-provider-recovery:{request.operation_id}",
+            request_id=f"computerusex-provider-recovery:{durable_job_id}",
             role="provider_operator",
             attachment=str(request.attachments[0]) if request.attachments else "",
             response_file=str(response_file),

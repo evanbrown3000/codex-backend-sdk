@@ -406,7 +406,36 @@ def chatgpt_transport_has_job(job_id: str) -> bool | None:
         return None
 
 
+def reject_prohibited_elapsed_time_padding(job: Mapping[str, Any]) -> bool:
+    """Reject prompts that manufacture provider duration with sleep/heartbeat loops."""
+    prompt = str(job.get("prompt") or "").casefold()
+    prohibited = (
+        "visible heartbeat" in prompt
+        or "heartbeat loop" in prompt
+        or ("separate python tool calls" in prompt and "sleep" in prompt)
+        or ("do not finish before" in prompt and "heartbeat" in prompt)
+    )
+    if not prohibited:
+        return False
+    scheduler_call({
+        "operation": "complete_job", **fence(job),
+        "conversation_id": None, "effect_evidence": [], "artifacts": [],
+        "normalized_provider_result": {
+            "schema": "cognilode.provider_result.v1",
+            "state": "invalid_prompt", "terminal": True, "accepted": False,
+            "provider": job.get("provider"),
+            "rejection_reason": "prohibited_elapsed_time_padding",
+            "taskflow_completion": False,
+        },
+        "result_state": "rejected",
+        "rejection_reason": "prohibited_elapsed_time_padding",
+    })
+    return True
+
+
 def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
+    if reject_prohibited_elapsed_time_padding(job):
+        return
     # Scheduler admission persists the full payload; materialize its intent
     # into the shared join ledger before attachment work or begin_effect.
     persist_admission_intent(job)

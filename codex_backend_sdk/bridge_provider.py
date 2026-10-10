@@ -353,6 +353,7 @@ class ProviderCommandClient:
         application_intent: Mapping[str, Any] | None = None,
         required_downstream_operation: Mapping[str, Any] | None = None,
         collect_artifacts: bool = False,
+        supersede_unstarted_parent_intents: bool = False,
     ) -> dict[str, Any]:
         """Admit any supported agent turn through one provider-neutral API.
 
@@ -385,6 +386,7 @@ class ProviderCommandClient:
             "required_downstream_operation": (dict(required_downstream_operation)
                 if required_downstream_operation is not None else None),
             "collect_artifacts": bool(collect_artifacts),
+            "supersede_unstarted_parent_intents": bool(supersede_unstarted_parent_intents),
         })
 
     def queue_status(self, provider: str = "chatgpt.com") -> dict[str, Any]:

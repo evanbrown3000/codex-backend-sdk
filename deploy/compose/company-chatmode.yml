@@ -610,7 +610,7 @@ services:
         set -e
         mkdir -p /runtime/worker/rpe-intake /runtime/worker/rpe-runs
         cp -n /runtime/source/current/research-plan-execute/deploy/unified-operation.goal.md /runtime/worker/rpe-intake/unified-operation.goal.md
-        exec python3 -m recursive_rpe.autonomy --inbox /runtime/worker/rpe-intake --runs /runtime/worker/rpe-runs --interval 60 --parallel 4
+        exec python3 /runtime/source/current/research-plan-execute/scripts/rpe-domain-runtime
     environment:
       HOME: /home/worker
       COGNILODE_SOURCE_WATCH_GENERATION: source-aware-1

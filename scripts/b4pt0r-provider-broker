@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Credential-custody broker for the B4PT0R desktop bridge.
+"""Operator-custody broker for the B4PT0R desktop bridge.
 
 Run this command only inside the credential-owning container.  The desktop
 passes operations on stdin and never receives provider or operator secrets.
@@ -9,9 +9,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
-import tempfile
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -33,37 +31,28 @@ def request(url: str, method: str, body=None, params=None):
 
 
 def provider_send(payload: dict) -> dict:
-    sender = os.environ.get(
-        "B4PT0R_CHATMODE_SENDER",
-        "/runtime/source/current/codex-backend-sdk/scripts/cognilode-b4pt0r-chatmode",
+    # This compatibility broker is an admission boundary only.  Provider HTTP
+    # remains exclusively inside the rhythm-claimed queue actuator.
+    source_root = Path(__file__).resolve().parent.parent
+    if str(source_root) not in sys.path:
+        sys.path.insert(0, str(source_root))
+    from codex_backend_sdk.bridge_provider import ProviderCommandClient
+
+    return ProviderCommandClient(token=token(), timeout=120).send_chatgpt(
+        prompt=str(payload.get("prompt") or ""),
+        conversation_id=payload.get("conversation_id"),
+        parent_message_id=payload.get("parent_message_id"),
+        model=str(payload.get("model") or "gpt-5-6-thinking"),
+        effort=str(payload.get("effort") or "xhigh"),
+        attachments=tuple(str(value) for value in payload.get("attachments") or ()),
+        request_id=str(payload.get("request_id") or payload.get("user_message_id") or "") or None,
+        project=str(payload.get("project") or "unified-b4pt0r"),
+        role=str(payload.get("role") or "desktop-operator"),
+        source="b4pt0r-provider-broker",
+        prompt_authority=str(payload.get("prompt_authority") or "interactive_operator"),
+        priority=payload.get("priority"),
+        decisionx=payload.get("decisionx") if isinstance(payload.get("decisionx"), dict) else None,
     )
-    with tempfile.TemporaryDirectory(prefix="b4pt0r-broker-") as directory:
-        root = Path(directory)
-        prompt = root / "prompt.txt"
-        prompt.write_text(str(payload.get("prompt") or ""), encoding="utf-8")
-        command = [sys.executable, sender, "--auth-source", "codex", "send",
-                   "--prompt-file", str(prompt), "--output-dir", str(root / "returned"),
-                   "--model", str(payload.get("model") or "gpt-5-6-thinking"),
-                   "--effort", str(payload.get("effort") or "xhigh"), "--timeout", "1800"]
-        if payload.get("conversation_id"):
-            command.extend(("--conversation-id", str(payload["conversation_id"])))
-        if payload.get("parent_message_id"):
-            command.extend(("--parent-message-id", str(payload["parent_message_id"])))
-        for attachment in payload.get("attachments") or []:
-            command.extend(("--attach", str(attachment)))
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=2100, check=False)
-        lines = [line for line in (completed.stdout + "\n" + completed.stderr).splitlines() if line.startswith("{")]
-        value = json.loads(lines[-1]) if lines else {"ok": False, "error": completed.stderr[-1000:]}
-        if not value.get("ok"):
-            return value
-        return {
-            "ok": True,
-            "assistant_text": value.get("terminal_assistant_text") or "",
-            "assistant_message_id": value.get("terminal_assistant_message_id"),
-            "conversation_id": value.get("conversation_id"),
-            "artifacts": value.get("downloaded_files") or [],
-            "provider_receipt": value.get("provider_model_receipt") or {},
-        }
 
 
 def main() -> int:

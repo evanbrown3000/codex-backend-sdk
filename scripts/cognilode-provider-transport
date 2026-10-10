@@ -296,12 +296,9 @@ def main() -> int:
     args.socket.unlink(missing_ok=True)
     server = Server(str(args.socket), Handler)
     os.chmod(args.socket, 0o660)
-    retire_stale_children()
-    programs = [
-        [sys.executable, str(Path(__file__).with_name("cognilode-chatmode-floor-watcher"))],
-    ]
-    for program in programs:
-        threading.Thread(target=supervise, args=(program,), daemon=True).start()
+    # Queue clocks and provider workers are owned by the independent batch
+    # supervisor. Credential-bearing transport owns only the mutation socket;
+    # it must neither kill nor start scheduling processes during source handoff.
     server.serve_forever()
     return 0
 

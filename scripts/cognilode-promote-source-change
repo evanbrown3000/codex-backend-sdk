@@ -15,7 +15,7 @@ attempts=${4:-3}
 [[ $attempts =~ ^[1-9][0-9]*$ ]] || { echo 'invalid attempts' >&2; exit 64; }
 [[ $branch =~ ^[A-Za-z0-9._/-]+$ ]] || { echo 'invalid branch' >&2; exit 64; }
 repo=$(git -C "$repo" rev-parse --show-toplevel)
-git -C "$repo" cat-file -e "${change}^{commit}"
+change=$(git -C "$repo" rev-parse "${change}^{commit}")
 remote=$(git -C "$repo" remote get-url origin)
 [[ -n $remote ]] || { echo 'origin remote unavailable' >&2; exit 69; }
 
@@ -33,7 +33,14 @@ for ((try=1; try<=attempts; try++)); do
   }
   trap cleanup EXIT
   git -C "$repo" worktree add --quiet --detach "$worktree" "$base"
-  if ! git -C "$worktree" cherry-pick --empty=drop "$change"; then
+  if ! git -C "$worktree" cherry-pick "$change"; then
+    if git -C "$worktree" diff --quiet &&
+       git -C "$worktree" diff --cached --quiet &&
+       [[ -f $(git -C "$worktree" rev-parse --git-path CHERRY_PICK_HEAD) ]]; then
+      git -C "$worktree" cherry-pick --skip >/dev/null
+      echo "already_applied branch=$branch commit=$change base=$base"
+      exit 0
+    fi
     git -C "$worktree" cherry-pick --abort >/dev/null 2>&1 || true
     echo "promotion_conflict branch=$branch commit=$change base=$base" >&2
     exit 1

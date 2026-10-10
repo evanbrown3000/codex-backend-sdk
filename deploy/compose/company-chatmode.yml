@@ -79,6 +79,40 @@ services:
       - memory_drive_auth:/memory-auth
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
 
+  # The only company browser that may hold provider login state.  Provider
+  # adapters receive CDP access to this process after redeeming an opaque
+  # operation lease; they never receive cookies or a copied profile.  Keeping
+  # the browser beside the transport in Compose replaces the former host-side
+  # bootstrap browser and makes custody survive source generations.
+  provider-browser:
+    image: ${COGNILODE_BROWSER_IMAGE:-362928919715.dkr.ecr.us-west-2.amazonaws.com/cognilode-always-on-node:20261002-v2}
+    restart: unless-stopped
+    shm_size: 1gb
+    entrypoint: [sh, -c]
+    command:
+      - |
+        set -eu
+        profile=/custody/browser/profile
+        mkdir -p "$$profile" /custody/browser/downloads
+        find "$$profile" -maxdepth 1 -name 'Singleton*' -delete
+        chrome=$$(find /root/.cache/ms-playwright -path '*/chrome-linux64/chrome' -type f -perm -111 | head -n 1)
+        test -n "$$chrome"
+        "$$chrome" --user-data-dir="$$profile" --remote-debugging-port=9333 \
+          --disable-dev-shm-usage --no-first-run --no-default-browser-check \
+          --no-sandbox --headless=new --disable-features=UsePortalFilePicker \
+          --window-size=1600,1000 https://gemini.google.com/app &
+        child=$$!
+        trap 'kill -TERM "$$child" 2>/dev/null || true; wait "$$child" || true' TERM INT
+        while ! wget -q -O /dev/null http://127.0.0.1:9333/json/version; do
+          kill -0 "$$child"
+          sleep 1
+        done
+        socat TCP-LISTEN:9334,fork,reuseaddr TCP:127.0.0.1:9333 & relay=$$!
+        wait "$$child"
+        kill -TERM "$$relay" 2>/dev/null || true
+    volumes:
+      - company_browser:/custody/browser
+
   provider-transport:
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
@@ -119,7 +153,7 @@ services:
       # host reconciliation defers its replacement until all effect leases
       # reach terminal receipt or their real scheduler expiry.
       COGNILODE_PROVIDER_SCHEDULER_DB: /runtime/provider-scheduler/scheduler.sqlite3
-      COMPUTERUSEX_CDP_ENDPOINT: ${COMPUTERUSEX_CDP_ENDPOINT:-http://172.20.0.6:9334}
+      COMPUTERUSEX_CDP_ENDPOINT: ${COMPUTERUSEX_CDP_ENDPOINT:-http://provider-browser:9334}
       AGENT_MEMORY_ENDPOINT: http://127.0.0.1:8098/v1/conversations
       AGENT_MEMORY_INGEST_ENDPOINT: http://127.0.0.1:8098/v1/conversations/ingest
       AGENT_MEMORY_INVENTORY_ENDPOINT: http://127.0.0.1:8098/v1/inventory/events
@@ -136,6 +170,7 @@ services:
       - http-gate
       - credential-sync
       - memory
+      - provider-browser
 
   provider-scheduler:
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
@@ -199,7 +234,7 @@ services:
       # The centrally-custodied provider browser is attached to the company
       # network; provider actuators must never fall back to a host/personal
       # browser on the unrelated Docker bridge.
-      COMPUTERUSEX_CDP_ENDPOINT: ${COMPUTERUSEX_CDP_ENDPOINT:-http://172.20.0.6:9334}
+      COMPUTERUSEX_CDP_ENDPOINT: ${COMPUTERUSEX_CDP_ENDPOINT:-http://provider-browser:9334}
       AGENT_MEMORY_ENDPOINT: http://memory:8098/v1/conversations
       AGENT_MEMORY_INGEST_ENDPOINT: http://memory:8098/v1/conversations/ingest
       AGENT_MEMORY_INVENTORY_ENDPOINT: http://memory:8098/v1/inventory/events

@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""Credential-custody broker for the B4PT0R desktop bridge.
+
+Run this command only inside the credential-owning container.  The desktop
+passes operations on stdin and never receives provider or operator secrets.
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+
+def token() -> str:
+    path = Path(os.environ.get("COGNILODE_OPERATOR_TOKEN_FILE", "/home/worker/.config/cognilode/operator-bearer"))
+    return path.read_text(encoding="utf-8").strip().removeprefix("Bearer ").strip()
+
+
+def request(url: str, method: str, body=None, params=None):
+    if params:
+        url += ("&" if "?" in url else "?") + urlencode(params)
+    data = None if body is None else json.dumps(body, separators=(",", ":")).encode()
+    headers = {"Accept": "application/json", "Authorization": "Bearer " + token()}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    with urlopen(Request(url, data=data, headers=headers, method=method), timeout=180) as response:
+        return json.load(response)
+
+
+def provider_send(payload: dict) -> dict:
+    sender = os.environ.get(
+        "B4PT0R_CHATMODE_SENDER",
+        "/runtime/source/current/codex-backend-sdk/scripts/cognilode-b4pt0r-chatmode",
+    )
+    with tempfile.TemporaryDirectory(prefix="b4pt0r-broker-") as directory:
+        root = Path(directory)
+        prompt = root / "prompt.txt"
+        prompt.write_text(str(payload.get("prompt") or ""), encoding="utf-8")
+        command = [sys.executable, sender, "--auth-source", "codex", "send",
+                   "--prompt-file", str(prompt), "--output-dir", str(root / "returned"),
+                   "--model", str(payload.get("model") or "gpt-5-6-thinking"),
+                   "--effort", str(payload.get("effort") or "xhigh"), "--timeout", "1800"]
+        if payload.get("conversation_id"):
+            command.extend(("--conversation-id", str(payload["conversation_id"])))
+        if payload.get("parent_message_id"):
+            command.extend(("--parent-message-id", str(payload["parent_message_id"])))
+        for attachment in payload.get("attachments") or []:
+            command.extend(("--attach", str(attachment)))
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=2100, check=False)
+        lines = [line for line in (completed.stdout + "\n" + completed.stderr).splitlines() if line.startswith("{")]
+        value = json.loads(lines[-1]) if lines else {"ok": False, "error": completed.stderr[-1000:]}
+        if not value.get("ok"):
+            return value
+        return {
+            "ok": True,
+            "assistant_text": value.get("terminal_assistant_text") or "",
+            "assistant_message_id": value.get("terminal_assistant_message_id"),
+            "conversation_id": value.get("conversation_id"),
+            "artifacts": value.get("downloaded_files") or [],
+            "provider_receipt": value.get("provider_model_receipt") or {},
+        }
+
+
+def main() -> int:
+    payload = json.loads(sys.stdin.readline())
+    operation = payload.pop("operation", "")
+    if operation == "agent_memory_request":
+        base = os.environ.get("AGENT_MEMORY_ENDPOINT", "https://cognilode.com/api/operator/agent-memory").rstrip("/")
+        result = request(base + "/" + str(payload.get("path") or "").lstrip("/"),
+                         str(payload.get("method") or "GET"), payload.get("body"), payload.get("params"))
+    elif operation == "remote_shell_request":
+        body = {"jsonrpc": "2.0", "id": "b4pt0r-broker", "method": "tools/call",
+                "params": {"name": payload.get("name"), "arguments": payload.get("arguments") or {}}}
+        raw = request(os.environ.get("COGNILODE_REMOTE_SHELL_ENDPOINT", "https://cognilode.com/api/operator/remote-shell/mcp"), "POST", body)
+        result = raw.get("result", raw)
+        if isinstance(result, dict) and result.get("structuredContent") is not None:
+            result = result["structuredContent"]
+    elif operation == "chatgpt_continue":
+        result = provider_send(payload)
+    else:
+        result = {"ok": False, "error": "unsupported broker operation: " + operation}
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    return 0 if not isinstance(result, dict) or result.get("ok") is not False else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

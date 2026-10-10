@@ -9,6 +9,8 @@ from typing import Any, Mapping
 
 import requests
 
+from .bridge_provider import ProviderCommandClient
+
 
 class AgentMemoryClient:
     def __init__(
@@ -34,6 +36,7 @@ class AgentMemoryClient:
         self.token = (token or os.environ.get("COGNILODE_OPERATOR_TOKEN") or file_token).removeprefix("Bearer ").strip()
         self.timeout = timeout
         self._session = requests.Session()
+        self._broker = ProviderCommandClient(timeout=max(120, int(timeout)))
 
     def _headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json"}
@@ -49,6 +52,16 @@ class AgentMemoryClient:
         params: Mapping[str, Any] | None = None,
         body: Mapping[str, Any] | None = None,
     ) -> Any:
+        if self._broker.available():
+            return self._broker.call(
+                "agent_memory_request",
+                {
+                    "method": method,
+                    "path": path,
+                    "params": dict(params or {}),
+                    "body": dict(body) if body is not None else None,
+                },
+            )
         response = self._session.request(
             method,
             f"{self.endpoint}/{path.lstrip('/')}",

@@ -9,6 +9,8 @@ import uuid
 
 import requests
 
+from .bridge_provider import ProviderCommandClient
+
 
 class RemoteShellClient:
     def __init__(
@@ -29,6 +31,7 @@ class RemoteShellClient:
         self.timeout = timeout
         self._session = requests.Session()
         self._selected_environment: str | None = None
+        self._broker = ProviderCommandClient(timeout=max(120, int(timeout)))
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -37,6 +40,11 @@ class RemoteShellClient:
         return headers
 
     def call(self, name: str, arguments: Mapping[str, Any] | None = None) -> Any:
+        if self._broker.available():
+            return self._broker.call(
+                "remote_shell_request",
+                {"name": name, "arguments": dict(arguments or {}), "actor_id": self.actor_id},
+            )
         payload = {
             "jsonrpc": "2.0",
             "id": str(uuid.uuid4()),

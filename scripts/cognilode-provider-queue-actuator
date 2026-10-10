@@ -129,6 +129,12 @@ def evidence(result: Mapping[str, Any]) -> list[dict[str, Any]]:
             )})
     receipt = result.get("provider_receipt") if isinstance(result.get("provider_receipt"), Mapping) else {}
     uploads = receipt.get("attachments") or ([receipt.get("attachment")] if receipt.get("attachment") else [])
+    # The B4PT0R sender records the exact provider attachment descriptors as
+    # ``attached_context_files`` on its durable receipt.  Preserve that native
+    # field as upload evidence instead of requiring an alias that the sender
+    # never writes.
+    if receipt.get("attached_context_files"):
+        uploads = list(uploads if isinstance(uploads, list) else []) + list(receipt["attached_context_files"])
     model_receipt = receipt.get("provider_model_receipt") if isinstance(receipt.get("provider_model_receipt"), Mapping) else {}
     if model_receipt.get("attached_context_files"):
         uploads = list(uploads if isinstance(uploads, list) else []) + list(model_receipt["attached_context_files"])

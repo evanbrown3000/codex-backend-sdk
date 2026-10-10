@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 
 
 ROOT = Path(os.getenv("COGNILODE_COMPANY_SOURCE_ROOT", "/runtime/source"))
@@ -20,6 +21,7 @@ DRAIN_FILE = SOCKET.with_suffix(".draining")
 SANDBOX_READY = SOCKET.with_suffix(".sandbox-ready.json")
 BWRAP = Path("/usr/bin/bwrap")
 BWRAP_CACHE = Path("/var/cache/cognilode-bwrap")
+CODEX = Path(os.getenv("COGNILODE_CODEX_BIN", "/codex/bin/codex"))
 STOP = False
 
 
@@ -88,8 +90,8 @@ def ensure_bubblewrap() -> None:
         raise RuntimeError("bubblewrap_install_missing_binary")
 
 
-def probe_bubblewrap() -> None:
-    """Prove the actual unprivileged broker can read its mounted work context."""
+def probe_bubblewrap() -> Path:
+    """Prove the installed Codex sandbox can read the broker's mounted context."""
     # Codex preflights a fresh procfs mount and falls back to the inherited
     # read-only procfs in restrictive containers. The readiness probe checks
     # that same fallback while retaining user, network, and PID isolation.
@@ -101,13 +103,27 @@ def probe_bubblewrap() -> None:
                             capture_output=True, text=True, timeout=20, check=False)
     if result.returncode:
         raise RuntimeError("bubblewrap_sandbox_probe_failed: " + result.stderr.strip()[:180])
-    record = {"schema": "cognilode.codex-broker-sandbox-ready.v1",
+    release = CODEX.resolve(strict=True)
+    source_pin = release.parent.name
+    if len(source_pin) != 40 or any(ch not in "0123456789abcdef" for ch in source_pin):
+        raise RuntimeError("codex_binary_not_pinned_release")
+    native = subprocess.run([str(CODEX), "sandbox", "--", "/bin/sh", "-c",
+                             "test -r /runtime/worker && test -x /codex/bin/codex"],
+                            capture_output=True, text=True, timeout=30, check=False)
+    if native.returncode:
+        raise RuntimeError("codex_readonly_sandbox_probe_failed: " + native.stderr.strip()[:180])
+    if CODEX.resolve(strict=True) != release:
+        raise RuntimeError("codex_release_changed_during_probe")
+    record = {"schema": "cognilode.codex-broker-sandbox-ready.v2",
               "bwrap": str(BWRAP),
               "sha256": hashlib.sha256(BWRAP.read_bytes()).hexdigest(),
-              "probe": "unprivileged-readonly-context-exit-0"}
+              "source_pin": source_pin,
+              "probe": "codex-readonly-sandbox-exit-0",
+              "verified_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
     tmp = SANDBOX_READY.with_suffix(".tmp")
     tmp.write_text(json.dumps(record, sort_keys=True) + "\n")
     tmp.replace(SANDBOX_READY)
+    return release
 
 
 def main() -> int:
@@ -134,7 +150,7 @@ def main() -> int:
         os.setuid(uid)
     while not STOP:
         try:
-            probe_bubblewrap()
+            codex_release = probe_bubblewrap()
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
             SANDBOX_READY.unlink(missing_ok=True)
             print(f"Codex broker sandbox unavailable: {str(exc)[:200]}", flush=True)
@@ -154,7 +170,8 @@ def main() -> int:
                                      "--interval", "1800"], env=env)
         try:
             while worker.poll() is None:
-                changed = broker != (CURRENT / "cognilode-codex-exec-broker").resolve() or \
+                changed = codex_release != CODEX.resolve() or \
+                    broker != (CURRENT / "cognilode-codex-exec-broker").resolve() or \
                     quota != (ROOT / "current/modified-codex-runtime/src/modified_codex/codex_quota_observer.py").resolve()
                 if STOP or changed or observer.poll() is not None:
                     DRAIN_FILE.write_text("1")

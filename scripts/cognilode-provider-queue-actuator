@@ -271,7 +271,7 @@ def main() -> int:
     # independent concurrency.
     device = (args.device_id if args.provider == "chatgpt.com"
               else args.device_id + ":b4pt0r:" + args.provider)
-    active: set[str] = set()
+    active: dict[str, Mapping[str, Any]] = {}
     lock = threading.Lock()
 
     def launch(job: Mapping[str, Any]) -> None:
@@ -279,7 +279,7 @@ def main() -> int:
         with lock:
             if not job_id or job_id in active:
                 return
-            active.add(job_id)
+            active[job_id] = job
 
         def run() -> None:
             try:
@@ -307,7 +307,7 @@ def main() -> int:
                     }), flush=True)
             finally:
                 with lock:
-                    active.discard(job_id)
+                    active.pop(job_id, None)
 
         threading.Thread(target=run, daemon=True, name="provider-" + job_id[:24]).start()
 
@@ -358,6 +358,29 @@ def main() -> int:
                               "error": type(exc).__name__ + ":" + str(exc)[:300]}), flush=True)
         if not STOP:
             time.sleep(max(1.0, args.interval))
+    # A source-generation handoff must not strand jobs after begin_effect.
+    # Provider transports are deliberately isolated in daemon threads so the
+    # actuator can continue heartbeating, but daemon threads disappear when
+    # this generation exits.  Hand every unfinished fence back to the central
+    # scheduler before exit; the scheduler remains the only component allowed
+    # to authorize the retry on the successor immutable generation.
+    with lock:
+        interrupted = list(active.values())
+    for job in interrupted:
+        try:
+            scheduler_call({
+                "operation": "release_job", **fence(job),
+                "provider_state": "provider_runtime_interrupted",
+                "reason": "immutable_provider_generation_handoff",
+                "retry_after_seconds": 1,
+            }, timeout=15)
+        except Exception as exc:
+            print(json.dumps({
+                "kind": "provider_actuator_handoff_release_failed",
+                "provider": args.provider,
+                "job_id": str(job.get("id") or ""),
+                "error": type(exc).__name__ + ":" + str(exc)[:300],
+            }), flush=True)
     return 0
 
 

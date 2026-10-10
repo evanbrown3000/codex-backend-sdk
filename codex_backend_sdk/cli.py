@@ -133,9 +133,9 @@ def _remote(args: argparse.Namespace) -> Any:
 def _memory(args: argparse.Namespace) -> Any:
     client = AgentMemoryClient()
     if args.memory_command == "recent":
-        return client.recent(limit=args.limit, provider=args.provider)
+        return client.recent(limit=args.limit, provider=args.memory_provider)
     if args.memory_command == "search":
-        return client.search(args.query, limit=args.limit, provider=args.provider)
+        return client.search(args.query, limit=args.limit, provider=args.memory_provider)
     if args.memory_command == "get":
         return client.get(args.conversation_id)
     if args.memory_command == "read":
@@ -244,11 +244,11 @@ def parser() -> argparse.ArgumentParser:
     mem = memory.add_subparsers(dest="memory_command", required=True)
     recent = mem.add_parser("recent")
     recent.add_argument("--limit", type=int, default=50)
-    recent.add_argument("--provider")
+    recent.add_argument("--provider", dest="memory_provider")
     search = mem.add_parser("search")
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=20)
-    search.add_argument("--provider")
+    search.add_argument("--provider", dest="memory_provider")
     get = mem.add_parser("get")
     get.add_argument("conversation_id")
     read = mem.add_parser("read")

@@ -369,6 +369,7 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
     applied_compose = COMPOSE
     synced = runtime / "shared/source/current/codex-backend-sdk"
     memory_applied = runtime / "shared/memory-source-applied"
+    memory_compose_applied = runtime / "shared/memory-compose-applied.sha256"
     service_hash_path = runtime / "shared/compose-service-digests.json"
     notify_service("READY=1\nSTATUS=Reconciling company containers")
     while True:
@@ -489,19 +490,38 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
                                       check=False).stdout.strip()
             previous = memory_applied.read_text(encoding="utf-8").strip() if memory_applied.is_file() else ""
             if revision and revision != previous:
-                try:
-                    # Agent Memory owns its source mounts and companion source
-                    # vacuum. Reconcile its domain composition rather than
-                    # restarting the obsolete memory definition embedded in
-                    # the provider stack. This applies new WAL/storage mounts
-                    # and environment contracts, not only Python source.
-                    subprocess.run(["docker", "compose", "--project-name", project,
-                                    "-f", str(memory_compose), "up", "-d", "--no-deps",
-                                    "memory", "source-vacuum"],
-                                   env=env, check=True, timeout=180)
-                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-                    print(f"memory source restart pending: {exc}", flush=True)
-                else:
+                compose_digest = hashlib.sha256(memory_compose.read_bytes()).hexdigest()
+                previous_compose = (memory_compose_applied.read_text(encoding="utf-8").strip()
+                                    if memory_compose_applied.is_file() else "")
+                services_present = all(subprocess.run(
+                    ["docker", "inspect", f"{project}-{service}-1"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    check=False, timeout=30,
+                ).returncode == 0 for service in ("memory", "source-vacuum"))
+                if compose_digest != previous_compose or not services_present:
+                    try:
+                        # Source-only revisions are adopted by the stable-root
+                        # entrypoint itself.  Compose reconciliation is reserved
+                        # for changed mounts/environment or missing services;
+                        # recreating both writers for every Python commit reset
+                        # ingestion and publication frontiers repeatedly.
+                        subprocess.run(["docker", "compose", "--project-name", project,
+                                        "-f", str(memory_compose), "up", "-d", "--no-deps",
+                                        "memory", "source-vacuum"],
+                                       env=env, check=True, timeout=180)
+                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                        print(f"memory composition restart pending: {exc}", flush=True)
+                        notify_service("WATCHDOG=1")
+                        time.sleep(30)
+                        continue
+                    temporary_compose = memory_compose_applied.with_suffix(".tmp")
+                    temporary_compose.write_text(compose_digest + "\n", encoding="utf-8")
+                    temporary_compose.replace(memory_compose_applied)
+                # The running entrypoint observes the stable source pointer and
+                # performs a cooperative child cutover without replacing the
+                # containers or interrupting the source-vacuum database.
+                if compose_digest == (memory_compose_applied.read_text(encoding="utf-8").strip()
+                                      if memory_compose_applied.is_file() else compose_digest):
                     temporary = memory_applied.with_suffix(".tmp")
                     temporary.write_text(revision + "\n", encoding="utf-8")
                     temporary.replace(memory_applied)

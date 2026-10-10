@@ -58,7 +58,13 @@ def provider_send(payload: dict) -> dict:
 def main() -> int:
     payload = json.loads(sys.stdin.readline())
     operation = payload.pop("operation", "")
-    if operation == "agent_memory_request":
+    if operation == "managed_control_request":
+        source_root = Path(__file__).resolve().parent.parent
+        if str(source_root) not in sys.path:
+            sys.path.insert(0, str(source_root))
+        from codex_backend_sdk.provider_broker import execute
+        result = execute({"operation": operation, **payload})
+    elif operation == "agent_memory_request":
         base = os.environ.get("AGENT_MEMORY_ENDPOINT", "https://cognilode.com/api/operator/agent-memory").rstrip("/")
         target = str(payload.get("url") or "").strip() or (
             base + "/" + str(payload.get("path") or "").lstrip("/")

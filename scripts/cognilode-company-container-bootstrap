@@ -364,6 +364,51 @@ def stage_managed_codex_release(container: str, release_pin: str, tree: str,
         return False
 
 
+def adopt_host_managed_control(runtime: Path) -> tuple[Path, str] | None:
+    """Advance the small SDK control runtime without waiting for Rust custody."""
+    root = Path(os.environ.get("MODIFIED_CODEX_INSTALL_ROOT",
+                              str(Path.home() / ".local/share/cognilode/modified-codex")))
+    sdk_link = runtime / "shared/source/current/codex-backend-sdk"
+    try:
+        sdk_source = sdk_link.resolve(strict=True)
+        revision = sdk_source.name
+        if (len(revision) != 40 or not all(c in "0123456789abcdef" for c in revision)
+                or not (sdk_source / "codex_backend_sdk/cli.py").is_file()):
+            return None
+    except OSError:
+        return None
+    control_dir = root / "runtime-dependencies" / f"codex-backend-sdk-{revision}"
+    control_dir.mkdir(parents=True, exist_ok=True)
+    control = control_dir / "managed-codex"
+    source = f'''#!/bin/sh
+set -eu
+sdk_root={str(sdk_link)!r}
+python=${{COGNILODE_PYTHON:-/usr/bin/python3}}
+export B4PT0R_PROVIDER_BROKER_COMMAND=${{B4PT0R_PROVIDER_BROKER_COMMAND:-'["docker","exec","-i","cognilode-company-runtime-chatmode-1","python3","/runtime/source/current/codex-backend-sdk/scripts/b4pt0r-provider-broker"]'}}
+case "${{1:-}}" in
+ conversations) shift; sub=${{1:-}}; [ "$#" -gt 0 ] && shift || true
+  case "$sub" in list|search|read) exec env PYTHONPATH="$sdk_root${{PYTHONPATH:+:$PYTHONPATH}}" "$python" -c 'from codex_backend_sdk.cli import main; main()' prompt "$sub" "$@";; esac ;;
+ environments) shift; sub=${{1:-}}; [ "$#" -gt 0 ] && shift || true
+  case "$sub" in list|current|select|exec|write) exec env PYTHONPATH="$sdk_root${{PYTHONPATH:+:$PYTHONPATH}}" "$python" -c 'from codex_backend_sdk.cli import main; main()' remote "$sub" "$@";; esac ;;
+ memory) shift; exec env PYTHONPATH="$sdk_root${{PYTHONPATH:+:$PYTHONPATH}}" "$python" -c 'from codex_backend_sdk.cli import main; main()' memory "$@";;
+esac
+echo 'Usage: managed-codex {{conversations|environments|memory}} ...' >&2
+exit 2
+'''
+    if not control.is_file() or control.read_text(encoding="utf-8") != source:
+        temp = control.with_suffix(".next")
+        temp.write_text(source, encoding="utf-8")
+        temp.chmod(0o755)
+        temp.replace(control)
+    bindir = root / "bin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    link = bindir / ".managed-codex.next"
+    link.unlink(missing_ok=True)
+    link.symlink_to(str(control))
+    link.replace(bindir / "managed-codex")
+    return root, revision
+
+
 def reconcile_host_managed_codex(project: str, runtime: Path) -> None:
     """Adopt an immutable release installed for the selected source tree.
 
@@ -383,6 +428,12 @@ def reconcile_host_managed_codex(project: str, runtime: Path) -> None:
                            "rev-parse", "HEAD:codex-rs"], capture_output=True, text=True,
                           check=False, timeout=20).stdout.strip()
     if not tree:
+        return
+    # Managed-control is Python-only and consumes the shared converged SDK
+    # checkout. Adopt it before querying/building any provider-custodied Rust
+    # release so provider effect draining cannot delay this entrypoint.
+    early_control = adopt_host_managed_control(runtime)
+    if early_control is None:
         return
     container = f"{project}-codex-builder-1"
     # Source can advance for managed-control/packaging-only changes while its

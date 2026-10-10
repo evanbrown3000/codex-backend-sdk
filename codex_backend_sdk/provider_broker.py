@@ -258,6 +258,54 @@ def _send(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 def execute(payload: Mapping[str, Any]) -> Any:
     operation = str(payload.get("operation") or "")
+    if operation == "managed_control_request":
+        # Strict non-provider control-plane dispatch. It executes directly
+        # with the custody bearer and never enters the provider queue/actuator.
+        action = str(payload.get("action") or "")
+        actor_id = str(payload.get("actor_id") or "default")
+        args = payload.get("arguments")
+        if not isinstance(args, Mapping):
+            return {"ok": False, "error": "managed_control_arguments_must_be_object"}
+        token = _operator_token()
+        if not token:
+            return {"ok": False, "error": "operator_custody_capability_unavailable"}
+        if action in {"conversation_list", "conversation_search", "conversation_read"}:
+            memory = AgentMemoryClient(token=token, timeout=45, use_broker=False)
+            if action == "conversation_list":
+                result = memory.list(limit=min(100, max(1, int(args.get("limit", 50)))),
+                                     cursor=str(args["cursor"]) if args.get("cursor") else None,
+                                     provider=str(args.get("provider") or "chatgpt.com"))
+            elif action == "conversation_search":
+                query = str(args.get("query") or "").strip()
+                if not query:
+                    return {"ok": False, "error": "conversation_search_query_required"}
+                result = memory.search(query, limit=min(100, max(1, int(args.get("limit", 50)))),
+                                       provider=str(args.get("provider") or "chatgpt.com"))
+            else:
+                conversation_id = str(args.get("conversation_id") or "").strip()
+                if not conversation_id:
+                    return {"ok": False, "error": "conversation_read_id_required"}
+                result = memory.read(
+                    conversation_id, reader_id=str(args.get("reader_id") or actor_id),
+                    after=str(args["after"]) if args.get("after") else None,
+                    full=bool(args.get("full", False)), peek=bool(args.get("peek", False)),
+                    projection=str(args.get("projection") or "read-model"))
+            return {"ok": True, "action": action, "result": result}
+        if action in {"environment_list", "environment_current", "environment_select"}:
+            remote = RemoteShellClient(token=token, actor_id=actor_id, timeout=45)
+            if action == "environment_list":
+                result = remote.environments()
+            elif action == "environment_current":
+                # Do not let the SDK's interactive process cache masquerade
+                # as a durable registry selection in this evidence path.
+                result = remote.call("environment_current", {"actor_id": actor_id})
+            else:
+                environment_id = str(args.get("environment_id") or "").strip()
+                if not environment_id:
+                    return {"ok": False, "error": "environment_select_id_required"}
+                result = remote.select(environment_id)
+            return {"ok": True, "action": action, "actor_id": actor_id, "result": result}
+        return {"ok": False, "error": "unsupported_managed_control_action"}
     if operation == "embedding":
         texts = payload.get("input")
         if isinstance(texts, str):

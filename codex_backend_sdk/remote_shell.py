@@ -42,6 +42,14 @@ class RemoteShellClient:
 
     def call(self, name: str, arguments: Mapping[str, Any] | None = None) -> Any:
         if self._broker.available() and not self.token:
+            typed = {"node_list": "environment_list",
+                     "environment_current": "environment_current",
+                     "environment_select": "environment_select"}.get(name)
+            if typed:
+                reply = self._broker.call("managed_control_request", {
+                    "action": typed, "actor_id": self.actor_id,
+                    "arguments": dict(arguments or {})})
+                return reply["result"]
             return self._broker.call(
                 "remote_shell_request",
                 {"name": name, "arguments": dict(arguments or {}), "actor_id": self.actor_id},

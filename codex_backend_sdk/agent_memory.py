@@ -102,6 +102,11 @@ class AgentMemoryClient:
         projection: str = "app-server-summary",
         **filters: Any,
     ) -> Any:
+        if self._broker is not None and self._broker.available() and not self.token:
+            reply = self._broker.call("managed_control_request", {
+                "action": "conversation_list", "arguments": {
+                    "limit": limit, "cursor": cursor, "provider": filters.get("provider", "chatgpt.com")}})
+            return reply["result"]
         params = {"limit": limit, "projection": projection, **filters}
         if cursor:
             params["offset"] = cursor
@@ -111,6 +116,11 @@ class AgentMemoryClient:
         return self.list(limit=limit, **filters)
 
     def search(self, query: str, *, limit: int = 50, cursor: str | None = None, projection: str = "app-server-summary", **filters: Any) -> Any:
+        if self._broker is not None and self._broker.available() and not self.token:
+            reply = self._broker.call("managed_control_request", {
+                "action": "conversation_search", "arguments": {
+                    "query": query, "limit": limit, "provider": filters.get("provider", "chatgpt.com")}})
+            return reply["result"]
         params = {"q": query, "limit": limit, "projection": projection, **filters}
         if cursor:
             params["offset"] = cursor
@@ -139,6 +149,12 @@ class AgentMemoryClient:
         peek: bool = False,
         projection: str = "read-model",
     ) -> Any:
+        if self._broker is not None and self._broker.available() and not self.token:
+            reply = self._broker.call("managed_control_request", {
+                "action": "conversation_read", "arguments": {
+                    "conversation_id": conversation_id, "reader_id": reader_id,
+                    "after": after, "full": full, "peek": peek, "projection": projection}})
+            return reply["result"]
         return self.get(
             conversation_id,
             cursor=None if full else after,

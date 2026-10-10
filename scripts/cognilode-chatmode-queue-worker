@@ -1680,6 +1680,16 @@ def reconcile_ambiguous(job: dict, device_id: str = DEVICE_ID) -> None:
             gate = {}
         if not isinstance(gate, dict):
             gate = {}
+        # Every ambiguous job uses the same credential-bearing provider route.
+        # A transient GET failure is route evidence, not a reason for the next
+        # job to issue the same GET immediately. This fence applies only to
+        # readback reconciliation; fresh scheduled sends keep their own gate.
+        read_next_at = float(gate.get("next_provider_read_at") or 0)
+        if time.time() < read_next_at:
+            atomic_json(state_path, {**prior, "state": "effect_pending_read_recovery",
+                                     "job_id": job_id, "reconcile_next_at": read_next_at,
+                                     "reconcile_provider_state": "provider_read_shared_cooldown"})
+            return
         known_conversation_id = known_conversation_for_job(job_id)
         index_next_at = float(gate.get("next_index_at") or 0)
         if time.time() < index_next_at:
@@ -1701,6 +1711,26 @@ def reconcile_ambiguous(job: dict, device_id: str = DEVICE_ID) -> None:
             event.get("phase") == "recent_index" and event.get("http_status") == 429
             for event in events if isinstance(event, dict)
         )
+        if recovered.get("state") in {"read_transient", "read_transport_failure", "rate_limited"}:
+            consecutive_reads = min(8, max(0, int(gate.get("consecutive_provider_read_failures") or 0)) + 1)
+            provider_delay = float(recovered.get("retry_after_seconds") or 0)
+            read_delay = max(provider_delay, min(1800, 120 * 2 ** (consecutive_reads - 1)))
+            read_next_at = time.time() + read_delay
+            gate.update({"next_provider_read_at": read_next_at,
+                         "consecutive_provider_read_failures": consecutive_reads,
+                         "provider_read_state": recovered.get("state"),
+                         "provider_read_source_job_id": job_id,
+                         "provider_read_observed_at": time.time()})
+            event("provider_read_shared_backoff", job_id=job_id,
+                  state=recovered.get("state"), consecutive_failures=consecutive_reads,
+                  retry_after_seconds=read_delay)
+        elif (response is not None and response.returncode == 0 and recovered.get("state")
+              and recovered.get("state") != "recent_index_deferred"):
+            # A successful read ends the shared route outage, including when
+            # the exact user-message ID was not found on that page.
+            gate.update({"next_provider_read_at": 0, "consecutive_provider_read_failures": 0,
+                         "provider_read_state": "healthy", "provider_read_observed_at": time.time()})
+            read_next_at = 0
         if recovered.get("state") == "rate_limited" and (not known_conversation_id or index_429_event):
             # A no-CID reconcile can only rate-limit on the recent index. Do not
             # depend on the sender retaining its nested event list to close the
@@ -1710,24 +1740,29 @@ def reconcile_ambiguous(job: dict, device_id: str = DEVICE_ID) -> None:
             index_delay = max(provider_delay, min(900, 60 * 2 ** (consecutive - 1)))
             index_delay = min(900, index_delay)
             index_next_at = time.time() + index_delay
-            atomic_json(gate_path, {"next_index_at": index_next_at,
-                                    "consecutive_rate_limits": consecutive,
-                                    "retry_after_seconds": recovered.get("retry_after_seconds"),
-                                    "source_job_id": job_id, "observed_at": time.time()})
+            gate.update({"next_index_at": index_next_at,
+                         "consecutive_rate_limits": consecutive,
+                         "retry_after_seconds": recovered.get("retry_after_seconds"),
+                         "source_job_id": job_id, "observed_at": time.time()})
+            atomic_json(gate_path, gate)
             event("recent_index_backoff", job_id=job_id, consecutive_rate_limits=consecutive,
                   retry_after_seconds=index_delay)
         elif any(event.get("phase") == "recent_index" and "candidates" in event
                  for event in events if isinstance(event, dict)):
             # A successful list GET breaks the consecutive-429 streak even if a
             # later candidate hydration still needs its own deferred retry.
-            atomic_json(gate_path, {"next_index_at": 0, "consecutive_rate_limits": 0,
-                                    "observed_at": time.time()})
+            gate.update({"next_index_at": 0, "consecutive_rate_limits": 0,
+                         "observed_at": time.time()})
+            atomic_json(gate_path, gate)
             index_next_at = 0
+        else:
+            atomic_json(gate_path, gate)
     delay = max(60, min(900, float(recovered.get("retry_after_seconds") or 300)))
     transport_error = re.sub(r"[^a-zA-Z0-9_.:/-]", "_",
                              str(recovered.get("error") or "")[:160])
     atomic_json(state_path, {**prior, "state": "effect_pending_read_recovery", "job_id": job_id,
-                             "reconcile_next_at": max(now + delay, index_next_at if not known_conversation_id else 0),
+                             "reconcile_next_at": max(now + delay, read_next_at,
+                                                      index_next_at if not known_conversation_id else 0),
                              "reconcile_retry_after_seconds": recovered.get("retry_after_seconds"),
                              "reconcile_scan_offset": int(recovered.get("next_offset") or 0),
                              "reconcile_provider_state": recovered.get("state"),

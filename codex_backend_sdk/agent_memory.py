@@ -165,6 +165,12 @@ class AgentMemoryClient:
 
     def render_markdown(self, conversation_id: str) -> str:
         result = self.get(conversation_id)
+        # Both the direct central facade and the Cognilode relay use an
+        # ``{ok,result}`` envelope.  Keep this client boundary indifferent to
+        # which route supplied the conversation rather than forcing every RPE
+        # or prompting caller to understand transport envelopes.
+        while isinstance(result, dict) and isinstance(result.get("result"), dict):
+            result = result["result"]
         if isinstance(result, dict):
             for key in ("rendered_markdown", "markdown", "content", "text"):
                 if isinstance(result.get(key), str):

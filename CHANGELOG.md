@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1
+
+- Preserve native ChatGPT continuation for centrally stored ChatGPT threads.
+- Continue other central conversations through a rendered Markdown attachment.
+- Admit exact-turn collection results into Agent Memory.
+
 ## 0.6.0
 
 - Compose B4PT0R ChatGPT resources into complete prepared Chat-mode turns.

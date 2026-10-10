@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import Any, Iterable, Mapping
@@ -121,10 +122,18 @@ def _memory_summary(row: Mapping[str, Any]) -> dict[str, Any] | None:
     if not isinstance(raw_id, str) or not raw_id:
         return None
     provider = str(row.get("provider") or row.get("platform") or "memory")
+    provider_conversation_id = row.get("provider_conversation_id")
+    projected_id = (
+        f"chatgpt:{provider_conversation_id}"
+        if provider.lower() in {"chatgpt", "chatgpt.com"}
+        and isinstance(provider_conversation_id, str)
+        and provider_conversation_id
+        else f"memory:{raw_id}"
+    )
     name = row.get("title") or row.get("name") or row.get("subject") or raw_id
     preview = row.get("preview") or row.get("snippet") or row.get("text") or ""
     return {
-        "id": f"memory:{raw_id}",
+        "id": projected_id,
         "name": str(name),
         "preview": str(preview)[:240],
         "updatedAt": row.get("updated_at") or row.get("observed_at") or 0,
@@ -256,14 +265,30 @@ class Bridge:
         self.emit({"method": "turn/started", "params": {"threadId": thread_id, "turn": {"id": turn_id, "status": "inProgress", "items": []}}})
         self.emit({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id, "item": user_item}})
         try:
-            if not thread_id.startswith("chatgpt:"):
-                raise RuntimeError("Central imported conversations require explicit provider continuation.")
-            conversation_id = thread_id.split(":", 1)[1]
-            result = self.provider.chatgpt.operations.send(
-                prompt,
-                conversation_id=conversation_id,
-                user_message_id=user_id,
-            )
+            if thread_id.startswith("chatgpt:"):
+                conversation_id = thread_id.split(":", 1)[1]
+                result = self.provider.chatgpt.operations.send(
+                    prompt,
+                    conversation_id=conversation_id,
+                    user_message_id=user_id,
+                )
+            elif thread_id.startswith("memory:"):
+                source_id = thread_id.split(":", 1)[1]
+                markdown = self.memory.render_markdown(source_id)
+                with tempfile.TemporaryDirectory(prefix="b4pt0r-conversation-") as directory:
+                    source = os.path.join(directory, "conversation.md")
+                    with open(source, "w", encoding="utf-8") as handle:
+                        handle.write(markdown)
+                    imported_prompt = "First, please read the attached conversation.md in full."
+                    if prompt:
+                        imported_prompt = f"{imported_prompt}\n\n{prompt}"
+                    result = self.provider.chatgpt.operations.send(
+                        imported_prompt,
+                        attachment_paths=[source],
+                        user_message_id=user_id,
+                    )
+            else:
+                raise RuntimeError("Unsupported external conversation provider.")
             try:
                 self.memory.ingest_chatgpt_turn(result)
             except Exception as error:

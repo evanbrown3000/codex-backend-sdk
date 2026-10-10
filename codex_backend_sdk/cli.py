@@ -83,11 +83,25 @@ def _chatgpt(args: argparse.Namespace) -> Any:
                 }
         return result
     if args.chatgpt_command == "collect":
-        return client.chatgpt.operations.collect(
+        turn = client.chatgpt.operations.collect(
             args.conversation_id,
             args.user_message_id,
             artifact_directory=args.artifact_dir,
         )
+        result = {
+            "conversation_id": args.conversation_id,
+            "user_message_id": args.user_message_id,
+            "turn": turn,
+        }
+        try:
+            result["agent_memory"] = AgentMemoryClient().ingest_chatgpt_turn(result)
+        except Exception as error:
+            result["agent_memory"] = {
+                "ingested": False,
+                "error": type(error).__name__,
+                "message": str(error),
+            }
+        return result
     raise ValueError(f"Unknown ChatGPT command: {args.chatgpt_command}")
 
 

@@ -32,6 +32,9 @@ class AgentMemoryClient:
         if not endpoint_path:
             selected_endpoint += "/api/operator/conversations"
             endpoint_path = "/api/operator/conversations"
+        elif endpoint_path.endswith("/agent-memory"):
+            selected_endpoint = selected_endpoint.rsplit("/agent-memory", 1)[0] + "/conversations"
+            endpoint_path = urlsplit(selected_endpoint).path.rstrip("/")
         self.endpoint = selected_endpoint
         self.legacy_endpoint = (
             os.environ.get("AGENT_MEMORY_INGEST_ENDPOINT")

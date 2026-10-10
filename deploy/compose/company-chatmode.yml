@@ -701,6 +701,8 @@ services:
       - /runtime/worker/b4pt0r-chatmode
       - --discovery-ledger
       - /runtime/worker/returned-products/discovery.jsonl
+      - --admission-intents
+      - /runtime/worker/returned-products/admission-intents
       - --interval
       - "30"
     environment:

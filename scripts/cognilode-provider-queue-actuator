@@ -343,10 +343,35 @@ def chatgpt_transport(job: Mapping[str, Any], attachments: tuple[str, ...]) -> d
     }
 
 
-def provider_transport(job: Mapping[str, Any], attachments: tuple[str, ...]) -> dict[str, Any]:
-    """Use the singular immutable provider runtime for every .com mutation."""
+def provider_transport(job: Mapping[str, Any], attachments: tuple[str, ...],
+                       client: ProviderActuationClient) -> dict[str, Any]:
+    """Invoke the B4PT0R actuator without coupling independent providers.
+
+    ChatGPT owns its long-lived streaming transport socket. Browser providers
+    use the same SDK actuator and custody broker in the queue worker process;
+    they must not become unavailable merely because a ChatGPT source generation
+    is draining an accepted turn.
+    """
     parent = job.get("parent_operation") if isinstance(job.get("parent_operation"), Mapping) else {}
     turn_timeout = max(60, lease_remaining_seconds(job))
+    if str(job.get("provider") or "") != "chatgpt.com":
+        return client.prompt(
+            str(job["provider"]), str(job.get("conversation_id") or "") or None,
+            str(job.get("prompt") or ""), attachments,
+            operation_id=str(job["id"]) + ":lease:" + str(job.get("lease_generation") or 0),
+            account_id=str(job.get("assigned_account") or "primary"),
+            parent_operation={
+                "operation_id": str(parent.get("operation_id") or job.get("parent_operation_id") or job["id"]),
+                "automation_order": int(parent.get("automation_order") or job.get("parent_automation_order") or 2),
+                "origin": str(parent.get("kind") or job.get("parent_kind") or "provider_queue"),
+                "taskflow_node": parent.get("taskflow_node"),
+            },
+            mode="continue" if job.get("conversation_id") else "create",
+            parent_message_id=str(job.get("parent_message_id") or "") or None,
+            model=str(job.get("model") or "") or None,
+            reasoning_effort=str(job.get("reasoning_effort") or "") or None,
+            metadata={"timeout_seconds": turn_timeout, "queue_job_id": str(job["id"])},
+        )
     request = {
         "operation": "provider_prompt", "provider": str(job["provider"]),
         "operation_id": str(job["id"]) + ":lease:" + str(job.get("lease_generation") or 0),
@@ -471,7 +496,7 @@ def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
     parent = job.get("parent_operation") if isinstance(job.get("parent_operation"), Mapping) else {}
     operation_id = str(parent.get("operation_id") or job.get("parent_operation_id") or job["id"])
     result = (chatgpt_transport(job, attachments) if job["provider"] == "chatgpt.com"
-              else provider_transport(job, attachments))
+              else provider_transport(job, attachments, client))
     if result.get("accepted") is not True or result.get("terminal") is not True:
         if result.get("accepted") is True:
             # Acceptance has crossed the external-effect boundary. A missing

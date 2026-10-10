@@ -8,18 +8,52 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import quote
 
 
 def _password() -> str:
     value = os.environ.get("UNIVERSE_STORAGE_OPERATOR_PASSWORD", "").strip()
-    path = os.environ.get("UNIVERSE_STORAGE_OPERATOR_PASSWORD_FILE", "").strip()
+    path = (os.environ.get("UNIVERSE_STORAGE_OPERATOR_PASSWORD_FILE", "").strip()
+            or os.environ.get("COGNILODE_OPERATOR_TOKEN_FILE", "").strip())
     if not value and path:
         value = Path(path).expanduser().read_text(encoding="utf-8").strip()
     if not value:
         raise RuntimeError("unified storage operator custody is not configured")
     return value
+
+
+def materialize_attachment(value: object) -> str:
+    """Resolve a scheduled attachment into the shared provider-input mount."""
+    row = value if isinstance(value, Mapping) else {"ref": value}
+    ref: object = row.get("ref") or row.get("path") or ""
+    if isinstance(ref, Mapping):
+        from universe_storage.model import Locator
+        ref = Locator.from_dict(dict(ref)).to_uri()
+    text = str(ref or "")
+    local = text.removeprefix("file:") if text.startswith("file:") else text
+    path = Path(local).expanduser()
+    if path.is_file():
+        return str(path)
+    if not text or "://" not in text:
+        raise RuntimeError("scheduled_attachment_unavailable")
+    from universe_storage.client import UniverseStorageClient
+    endpoint = os.environ.get("UNIVERSE_STORAGE_ENDPOINT", "http://universe-storage:8765").strip()
+    data = UniverseStorageClient(endpoint, operator_password=_password(), timeout=180).read(text)
+    expected = str(row.get("sha256") or "")
+    actual = hashlib.sha256(data).hexdigest()
+    if expected and actual != expected:
+        raise RuntimeError("scheduled_attachment_digest_mismatch")
+    name = Path(str(row.get("name") or "attachment")).name or "attachment"
+    root = Path(os.environ.get("COGNILODE_QUEUE_INPUT_SHARED_ROOT", "/runtime/queue-inputs"))
+    destination = root / "materialized" / actual / name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if not destination.is_file() or hashlib.sha256(destination.read_bytes()).hexdigest() != actual:
+        with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as staged:
+            staged.write(data)
+            staged_path = Path(staged.name)
+        staged_path.replace(destination)
+    return str(destination)
 
 
 def commit_bytes(

@@ -41,13 +41,8 @@ def fence(job: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def local_attachment(row: object) -> str:
-    value = row if isinstance(row, str) else str((row or {}).get("ref") or (row or {}).get("path") or "")
-    if value.startswith("file:"):
-        value = value[5:]
-    path = Path(value)
-    if not path.is_file():
-        raise RuntimeError("scheduled_attachment_unavailable")
-    return str(path)
+    from codex_backend_sdk.attachment_custody import materialize_attachment
+    return materialize_attachment(row)
 
 
 def evidence(result: Mapping[str, Any]) -> list[dict[str, Any]]:

@@ -113,6 +113,29 @@ services:
       - http-gate
       - credential-sync
 
+  provider-scheduler:
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /runtime/source/current/control-execution-runtime
+    entrypoint: [sh, -c]
+    command:
+      - >-
+        while ! test -f /runtime/source/current/control-execution-runtime/scripts/cognilode-provider-scheduler-supervisor;
+        do sleep 2; done;
+        exec python3 /runtime/source/current/control-execution-runtime/scripts/cognilode-provider-scheduler-supervisor
+    environment:
+      HOME: /home/worker
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+      COGNILODE_PROVIDER_SCHEDULER_SOCKET: /runtime/provider-scheduler.sock
+      COGNILODE_PROVIDER_SCHEDULER_DB: /runtime/provider-scheduler/scheduler.sqlite3
+      COGNILODE_PROVIDER_SCHEDULER_LEDGER: /runtime/provider-events/outbox.jsonl
+    volumes:
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+    depends_on:
+      - source-sync
+
   chatmode:
     tmpfs: *company_aws_cli_cache
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
@@ -159,6 +182,7 @@ services:
     depends_on:
       - provider-transport
       - source-sync
+      - provider-scheduler
 
   source-sync:
     tmpfs: *company_aws_cli_cache

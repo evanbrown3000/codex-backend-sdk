@@ -130,31 +130,6 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
     )) / "area1-provider-source.zip"
     if acceptance.is_file() and acceptance_seed.is_file():
         workers.append(([str(CLI.rsplit("/", 1)[0] + "/python"), str(acceptance)], {}))
-    # Area 2 is a separate domain implementation.  B4PT0R only supervises its
-    # durable process beside the Area 1 actuators; it neither owns nor embeds
-    # scheduling policy.
-    configured_scheduler = os.environ.get("COGNILODE_PROVIDER_SCHEDULER_SOURCE", "").strip()
-    scheduler_candidates = [Path(configured_scheduler)] if configured_scheduler else [
-        Path("/runtime/source/current/control-execution-runtime"),
-        Path("/company/control-execution-runtime"),
-    ]
-    scheduler_root = next(
-        (candidate for candidate in scheduler_candidates
-         if (candidate / "scripts/cognilode-provider-scheduler").is_file()),
-        scheduler_candidates[0],
-    )
-    scheduler_program = scheduler_root / "scripts/cognilode-provider-scheduler"
-    if scheduler_program.is_file():
-        scheduler_pythonpath = str(scheduler_root / "src")
-        inherited = os.environ.get("PYTHONPATH", "")
-        if inherited:
-            scheduler_pythonpath += os.pathsep + inherited
-        workers.append(([sys.executable, str(scheduler_program)], {
-            "PYTHONPATH": scheduler_pythonpath,
-            "COGNILODE_PROVIDER_RHYTHM_TAPE": str(
-                scheduler_root / "data/provider_scheduler/historical_rhythm.uleb128"
-            ),
-        }))
     if "chatgpt.com" in requested:
         workers.append(([
             str(CLI.rsplit("/", 1)[0] + "/python"),

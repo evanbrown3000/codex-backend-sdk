@@ -556,22 +556,40 @@ exit 2
         except (OSError, ValueError, subprocess.TimeoutExpired):
             return None
 
-    conversations = control_call("conversations", "list", "--limit", "1")
-    conversation_id = ((conversations or {}).get("items") or [{}])[0].get("id")
-    query = ((conversations or {}).get("items") or [{}])[0].get("title") or "Codex"
-    searched = control_call("conversations", "search", str(query), "--limit", "1")
-    readback = (control_call("conversations", "read", str(conversation_id))
-                if isinstance(conversation_id, str) and conversation_id else None)
-    environments = control_call("environments", "list")
-    current_environment = control_call("environments", "current")
-    env_id = ((current_environment or {}).get("environment_id") or
-              (current_environment or {}).get("selected_environment_id"))
-    if not env_id:
-        env_items = (environments or {}).get("environments") or (environments or {}).get("items") or []
-        if env_items and isinstance(env_items[0], dict):
-            env_id = env_items[0].get("environment_id") or env_items[0].get("id")
-    selected = (control_call("environments", "select", str(env_id))
-                if isinstance(env_id, str) and env_id else None)
+    attempt_marker = root / "receipts" / f"managed-control-attempt-{release_pin}-{sdk_revision}"
+    try:
+        last_attempt = float(attempt_marker.read_text(encoding="ascii"))
+    except (OSError, ValueError):
+        last_attempt = 0.0
+    verification = None
+    conversations = searched = readback = environments = current_environment = selected = None
+    conversation_id = env_id = None
+    if time.time() - last_attempt >= 300:
+        attempt_marker.parent.mkdir(parents=True, exist_ok=True)
+        attempt_tmp = attempt_marker.with_suffix(".next")
+        attempt_tmp.write_text(str(time.time()), encoding="ascii")
+        attempt_tmp.replace(attempt_marker)
+        conversations = control_call("conversations", "list", "--limit", "1")
+        items = (conversations or {}).get("items") or []
+        conversation_id = items[0].get("id") if items and isinstance(items[0], dict) else None
+        query = (items[0].get("title") if items and isinstance(items[0], dict) else None) or "Codex"
+        searched = (control_call("conversations", "search", str(query), "--limit", "1")
+                    if conversations and conversations.get("ok") is True else None)
+        readback = (control_call("conversations", "read", str(conversation_id))
+                    if searched and searched.get("ok") is True and isinstance(conversation_id, str)
+                    else None)
+        environments = (control_call("environments", "list")
+                        if readback and not readback.get("error") else None)
+        current_environment = (control_call("environments", "current") if environments else None)
+        env_id = ((current_environment or {}).get("environment_id") or
+                  (current_environment or {}).get("selected_environment_id"))
+        if not env_id:
+            env_items = ((environments or {}).get("environments") or
+                         (environments or {}).get("items") or [])
+            if env_items and isinstance(env_items[0], dict):
+                env_id = env_items[0].get("environment_id") or env_items[0].get("id")
+        selected = (control_call("environments", "select", str(env_id))
+                    if current_environment and isinstance(env_id, str) else None)
     if (conversations and conversations.get("ok") is True and conversation_id and
             searched and searched.get("ok") is True and readback and
             environments and current_environment and selected):

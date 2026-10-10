@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import json
 import hashlib
+import fcntl
 from pathlib import Path
 import shutil
 import sqlite3
@@ -614,6 +615,29 @@ def main() -> int:
                 os.execve(sys.executable, [sys.executable, str(candidate)],
                           {**os.environ, "COGNILODE_BOOTSTRAP_FROM_SYNC": "1",
                            "COGNILODE_BOOTSTRAP_LOADED_REVISION": selected})
+    # This is the sole permitted host company daemon. An interactive bootstrap
+    # previously raced the systemd-owned reconciler and replaced the provider
+    # containers during a fenced turn. Prefer the service owner when present,
+    # then enforce a host-wide singleton on platforms without systemd.
+    if not os.environ.get("INVOCATION_ID"):
+        owner = subprocess.run(
+            ["systemctl", "--user", "show", "cognilode-company-containers.service",
+             "--property", "MainPID", "--value"],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        try:
+            owner_pid = int(owner.stdout.strip() or "0")
+        except ValueError:
+            owner_pid = 0
+        if owner_pid not in (0, os.getpid()):
+            print(f"company bootstrap delegated to service-owned pid={owner_pid}", flush=True)
+            return 0
+    singleton = (runtime / "shared/company-container-bootstrap.lock").open("a+")
+    try:
+        fcntl.flock(singleton, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("company bootstrap already active", flush=True)
+        return 0
     migrate_previous_state(Path(os.environ.get("COMPANY_LEGACY_DATA_ROOT", str(Path.home() / ".local/share/cognilode"))), runtime)
     env = {**os.environ, "COMPANY_REPOS_ROOT": str(repos), "COMPANY_RUNTIME_ROOT": str(runtime),
            "AWS_AUTH_ROOT": "company_aws_client" if portable_aws else str(aws),

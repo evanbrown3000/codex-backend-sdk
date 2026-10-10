@@ -647,6 +647,44 @@ services:
       - credential-sync
       - taskflow-worker
 
+  returned-product-actuator:
+    tmpfs: *company_aws_cli_cache
+    image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
+    restart: unless-stopped
+    network_mode: bridge
+    user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
+    working_dir: /runtime/source/current/codex-manager
+    entrypoint: [python3, -m, codex.returned_product]
+    command:
+      - serve
+      - --inbox
+      - /runtime/worker/returned-products/inbox
+      - --repositories
+      - /runtime/source/current
+      - --installation-ledger
+      - /runtime/source/events/source-convergence.jsonl
+      - --results
+      - /runtime/worker/returned-products/results
+      - --interval
+      - "30"
+    environment:
+      HOME: /home/worker
+      PYTHONPATH: /runtime/source/current/codex-manager/src
+      COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID:-evanpc-company-container}
+      COGNILODE_AWS_PURPOSE: secrets-read
+      AWS_CONFIG_FILE: /home/worker/.aws/config
+      AWS_SHARED_CREDENTIALS_FILE: /home/worker/.aws/credentials
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: credential.helper
+      GIT_CONFIG_VALUE_0: "!/runtime/source/current/codex-backend-sdk/scripts/cognilode-git-credential-helper"
+    volumes:
+      - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - ${COMPANY_RUNTIME_ROOT}/worker:/runtime/worker
+      - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+    depends_on:
+      - source-sync
+      - credential-sync
+
 volumes:
   company_auth:
   company_browser:

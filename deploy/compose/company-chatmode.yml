@@ -277,12 +277,14 @@ services:
       COGNILODE_CODEX_INSTALL_ROOT: /codex
       COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID:-evanpc-company-container}
       COGNILODE_CODEX_RELEASE_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
+      COGNILODE_CODEX_INSTALLATION_LEDGER: /runtime-events/source-convergence.jsonl
       COGNILODE_AWS_CLI: /usr/bin/aws
       COGNILODE_AWS_PURPOSE: artifact-write
       COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime:ro
+      - ${COMPANY_RUNTIME_ROOT}/shared/source/events/source-convergence.jsonl:/runtime-events/source-convergence.jsonl:rw
       - company_operator:/home/worker/.config/cognilode:ro
       - ${AWS_AUTH_ROOT}:/root/.aws:ro
       - company_codex_release:/codex

@@ -34,6 +34,9 @@ LOOKUP = ROOT / "metadata" / f"lookup-{PIN}-{TARGET}.json"
 LOCK = ROOT / "metadata" / f"release-{PIN}-{TARGET}.lock"
 RELEASE_FILES = ("codex", "codex-code-mode-host", "central-rollouts", "managed-codex")
 HOST_READY = "code-mode-host-ready.json"
+CENTRAL_LEDGER = Path(os.environ.get(
+    "COGNILODE_CODEX_INSTALLATION_LEDGER",
+    "/runtime-events/source-convergence.jsonl"))
 PUBLISH_RECEIPT = ROOT / "metadata" / f"publication-{PIN}-{TARGET}.json"
 AWS_CONNECT_TIMEOUT = 8
 AWS_READ_TIMEOUT = 25
@@ -179,6 +182,7 @@ def publish_installation_receipt() -> None:
         "active_binary": str((ROOT / "bin/codex").resolve(strict=True)),
         "installed_at": time.time(),
     }
+    _publish_central_installation_event(value)
     if receipt.is_file():
         prior = json.loads(receipt.read_text(encoding="utf-8"))
         comparable = {key: value[key] for key in value if key != "installed_at"}
@@ -195,6 +199,34 @@ def publish_installation_receipt() -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+def _publish_central_installation_event(value: dict) -> None:
+    event_id = f"{value['environment_id']}:{PIN}:{TARGET}"
+    central = {
+        "schema": "cognilode.source_installation.v1",
+        "event_id": event_id,
+        "authority": "evanbrown3000/cognilode-codex",
+        "name": "codex-managed-release",
+        "revision": PIN,
+        "previous_revision": None,
+        "environment_id": value["environment_id"],
+        "installed_at": value["installed_at"],
+        "kind": "managed_codex_runtime_installation",
+        "target": TARGET,
+        "files": files,
+    }
+    try:
+        CENTRAL_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+        with CENTRAL_LEDGER.open("a+", encoding="utf-8") as stream:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            stream.seek(0)
+            if not any(json.loads(line).get("event_id") == event_id
+                       for line in stream if line.strip()):
+                stream.seek(0, os.SEEK_END)
+                stream.write(json.dumps(central, sort_keys=True) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+    except OSError as error:
+        raise RuntimeError("central Codex installation ledger append failed") from error
 
 
 def install_remote(manifest: dict) -> None:

@@ -183,10 +183,17 @@ def collect(receipt_path: Path, *, allow_provider_read: bool = False) -> dict:
             assistant_id = str(local_result.get("terminal_assistant_message_id") or "")
             if not conversation_id or not assistant_id:
                 return {"state": "artifact_identity_pending", "receipt": str(receipt_path)}
+            if not (Path.home() / ".codex/auth.json").is_file():
+                # Queue workers can admit saved terminal text but do not hold
+                # provider credentials. Leave exact-file recovery to the
+                # credential-bearing transport collector without imposing a
+                # shared retry delay on it.
+                return {"state": "artifact_recovery_delegated", "receipt": str(receipt_path)}
             try:
                 # The credential-bearing provider-transport collector performs
                 # only the exact linked-file GET. It does not hydrate or poll
                 # the conversation again after the saved SSE terminal.
+                sender.ensure_runtime()
                 session, auth, device_id = sender.codex_identity()
                 files = sender.download_interpreter_artifacts(
                     session, auth, conversation_id=conversation_id,
@@ -352,7 +359,7 @@ def main() -> int:
         if allow_provider_read and status not in ("collected_from_local_terminal", "already_collected",
                                                   "provider_rejected", "awaiting_conversation_id"):
             provider_reads += 1
-        if status == "provider_read_deferred":
+        if status in ("provider_read_deferred", "artifact_recovery_delegated"):
             continue
         attempts = 0 if status in ("collected", "already_collected") else int(state.get("attempts") or 0) + 1
         delay = 0 if status in ("collected", "already_collected") else min(1800, 60 * 2 ** min(attempts - 1, 5))

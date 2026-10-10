@@ -479,6 +479,7 @@ services:
       - ${COMPANY_RUNTIME_ROOT}/worker:/runtime/worker
       - company_codex_release:/codex:ro
       - company_codex_exec:/codex-exec
+      - company_codex_bwrap_cache:/var/cache/cognilode-bwrap
       - company_auth:/home/worker/.codex
       - company_operator:/home/worker/.config/cognilode:ro
       - memory_data:/workspace/company:ro
@@ -636,6 +637,7 @@ volumes:
   company_deploy_custody:
   company_codex_release:
   company_codex_exec:
+  company_codex_bwrap_cache:
   company_codex_target:
   company_cargo_registry:
   company_cargo_git:

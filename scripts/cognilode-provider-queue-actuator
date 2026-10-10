@@ -330,8 +330,7 @@ def main() -> int:
                             "models": (["gpt-5-6-thinking", "gpt-5.6", "gpt-5.6-sol",
                                         "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "auto"]
                                        if args.provider == "chatgpt.com" else []),
-                            "reasoning_modes": (["medium", "high", "xhigh", "max", "extended"]
-                                                if args.provider == "chatgpt.com" else []),
+                            "reasoning_modes": ["low", "medium", "high", "xhigh", "max", "extended"],
                             "max_concurrency": 2_147_483_647,
                         }},
                     },

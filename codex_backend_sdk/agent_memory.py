@@ -49,6 +49,11 @@ class AgentMemoryClient:
             if endpoint_path.endswith("/conversations")
             else self.endpoint.rstrip("/") + "/api/operator/foreground"
         )
+        self.inventory_endpoint = os.environ.get("AGENT_MEMORY_INVENTORY_ENDPOINT") or (
+            self.endpoint.rsplit("/v1/conversations", 1)[0] + "/v1/inventory/events"
+            if "/v1/conversations" in self.endpoint
+            else self.endpoint.rsplit("/api/operator/conversations", 1)[0] + "/api/operator/inventory/events"
+        )
         self.token = operator_token(token)
         self.timeout = timeout
         self._session = requests.Session()
@@ -181,6 +186,9 @@ class AgentMemoryClient:
 
     def ingest(self, observation: Mapping[str, Any]) -> Any:
         return self._request("POST", self.legacy_endpoint, body={"operation": "record_conversation", **dict(observation)})
+
+    def admit_inventory(self, event: Mapping[str, Any]) -> Any:
+        return self._request("POST", self.inventory_endpoint, body={"events": [dict(event)]})
 
     def admit_summary_result(
         self,

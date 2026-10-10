@@ -180,7 +180,10 @@ class AgentMemoryEventPublisher:
         last: Exception | None = None
         while True:
             try:
-                return {"ingested": True, "receipt": self.memory.ingest(observation)}
+                operational = str(observation.get("schema") or "").startswith("cognilode.provider_")
+                receipt = (self.memory.admit_inventory(observation) if operational
+                           else self.memory.ingest(observation))
+                return {"ingested": True, "receipt": receipt}
             except Exception as exc:
                 last = exc
                 response = getattr(exc, "response", None)
@@ -622,15 +625,25 @@ class UnifiedProviderActuator:
                 parent_operation=asdict(request.parent_operation) if request.parent_operation else None,
             )
             publication = self.publisher._publish({
-                "schema": "cognilode.provider_result.v1",
-                "observation_kind": "provider_result",
+                "schema": "memory_stock.conversation_observation.v1",
                 "provider": request.provider,
                 "provider_conversation_id": conversation_id,
                 "conversation_id": conversation_id or "operation:" + request.operation_id,
+                "provider_user_message_id": user_message_id,
+                "provider_account_id": str(custody["account_id"]),
                 "operation_id": request.operation_id,
                 "observed_at": envelope.completed_at,
                 "source": {"type": "b4pt0r_provider_actuator", "provenance": "normalized_result"},
-                "result": envelope.to_dict(),
+                "messages": [
+                    {"id": user_message_id, "author": {"role": "user"},
+                     "content": {"content_type": "text", "parts": [request.prompt]}},
+                    {"id": assistant_message_id, "author": {"role": "assistant"},
+                     "content": {"content_type": "text", "parts": [assistant_text]}},
+                ],
+                "attachments": list(request.attachments),
+                "artifacts": artifacts,
+                "terminal": terminal,
+                "normalized_provider_result": envelope.to_dict(),
             }, require_admission=True)
             envelope.provider_receipt["agent_memory_publication"] = publication
             return envelope

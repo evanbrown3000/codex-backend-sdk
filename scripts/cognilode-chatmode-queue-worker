@@ -78,7 +78,8 @@ DEVICE_ID = os.environ.get("COGNILODE_CHATMODE_DEVICE_ID", "evanpc")
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 MAX_RETURNED_WORK_BYTES = 2_500_000_000
 DEVICE_PRIORITY = int(os.environ.get("COGNILODE_CHATMODE_DEVICE_PRIORITY", "100"))
-MAX_PARALLEL = int(os.environ.get("COGNILODE_CHATMODE_MAX_PARALLEL", "4"))
+MAX_PARALLEL = int(os.environ.get("COGNILODE_CHATMODE_MAX_PARALLEL", "0"))
+ADVERTISED_MAX_PARALLEL = MAX_PARALLEL if MAX_PARALLEL > 0 else 2_147_483_647
 STAGE_ROOT = ROOT / "staged-attachments"
 DRAIN = False
 
@@ -2296,11 +2297,11 @@ def heartbeat(device_id: str, active: int) -> None:
     queue_post({"operation": "rhythm_device_heartbeat", "device": {
         "id": device_id, "available": ready, "chatgpt_eligible": True, "priority": DEVICE_PRIORITY,
         "active_turns": active,
-        "max_concurrency": max(1, MAX_PARALLEL),
+        "max_concurrency": ADVERTISED_MAX_PARALLEL,
         "network_route": os.environ.get("COGNILODE_CHATMODE_NETWORK_ROUTE", "home"),
         "capabilities": {
             "environment": os.environ.get("COGNILODE_ENVIRONMENT_ID", device_id),
-            "max_concurrency": max(1, MAX_PARALLEL),
+            "max_concurrency": ADVERTISED_MAX_PARALLEL,
             "accounts": [os.environ.get("COGNILODE_CHATGPT_ACCOUNT", "central-custody")],
             "providers": {"chatgpt.com": {
                 "enabled": True, "authentication": "authenticated",

@@ -125,6 +125,28 @@ def main() -> int:
         "schema": "cognilode.four_provider_acceptance.v1", "providers": []
     }
     proof.setdefault("rejected_attempts", [])
+    # A source cutover may inherit proof written by an older acceptance
+    # generation.  Never grandfather a row that lacks the exact provider
+    # identities or the required physical evidence; demote it to an attempt
+    # and let the durable sequence produce a complete replacement.
+    valid_rows: list[dict[str, Any]] = []
+    for row in proof.get("providers") or []:
+        complete_identity = all(str(row.get(key) or "") for key in (
+            "provider", "job_id", "conversation_id", "user_message_id", "assistant_message_id",
+        ))
+        complete_work = (
+            float(row.get("provider_seconds") or 0) >= MIN_PROVIDER_SECONDS
+            and bool(row.get("uploaded_attachments"))
+            and bool(row.get("artifacts"))
+        )
+        if complete_identity and complete_work:
+            valid_rows.append(dict(row))
+        else:
+            proof["rejected_attempts"].append({
+                "provider": row.get("provider"), "job_id": row.get("job_id"),
+                "reasons": ["legacy_incomplete_acceptance_record"],
+            })
+    proof["providers"] = valid_rows
     completed = {row["provider"]: row for row in proof["providers"]}
     inherited = [str(seed), str(source_packet(root))]
     for row in proof["providers"]:

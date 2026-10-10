@@ -945,7 +945,13 @@ def test_terminal_missing_zip_waits_for_fresh_get_then_completes_failed_delivera
     module.recover(job)
     assert job["state"] == "effect_pending", "a post-deadline transient GET is not a provider work defect"
     assert operations == []
+    renewed = json.loads(module.job_state_path(job["id"]).read_text())
+    assert renewed["deliverable_deadline_renewed"] is True
+    assert renewed["deliverable_deadline_at"] >= clock[0] + module.TERMINAL_DELIVERABLE_WINDOW_SECONDS
     clock[0] += module.TERMINAL_DELIVERABLE_RECHECK_SECONDS + 1
+    module.recover(job)
+    assert job["state"] == "effect_pending", "fresh read cannot cancel the renewed collection window"
+    clock[0] = renewed["deliverable_deadline_at"] + 1
     module.recover(job)
     assert job["state"] == "complete"
     assert operations == ["complete_job", "get_job"]

@@ -128,7 +128,7 @@ class ProviderCommandClient:
         # The Python second-order scheduler is the exclusive mutation and
         # queue-state route.  Agent Memory remains the conversation authority.
         scheduler_operations = {
-            "enqueue_job", "begin_effect", "complete_job", "list_jobs",
+            "enqueue_job", "begin_effect", "complete_job", "get_job", "list_jobs",
             "rhythm_read", "rhythm_tick", "rhythm_device_heartbeat",
             "queue_ledger", "codex_admit", "codex_budget_update", "provider_cooldown",
         }

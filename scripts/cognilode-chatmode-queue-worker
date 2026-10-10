@@ -2182,6 +2182,16 @@ def health_ready() -> bool:
         return False
 
 
+def provider_observability_enabled() -> bool:
+    """Return the central gate decision without making any provider request."""
+    policy_path = Path(os.environ.get("COGNILODE_HTTP_GATE_POLICY_FILE", ""))
+    try:
+        policy = json.loads(policy_path.read_text()) if policy_path.is_file() else {}
+    except (OSError, ValueError):
+        return False
+    return bool(policy.get("purposes", {}).get("observability") is True)
+
+
 @lru_cache(maxsize=8)
 def _transport_cli_ready(path: str, inode: int, size: int, mtime_ns: int) -> bool:
     """Check this synced generation locally; provider observability stays gated."""
@@ -2257,7 +2267,15 @@ def scan_job_state(device_id: str, state: str) -> tuple[list[dict], str]:
 
 
 def poll(device_id: str, active_ids: set[str], lock: threading.Lock) -> None:
-    pending, pending_cursor = scan_job_state(device_id, "effect_pending")
+    # Ambiguous historical mutations remain held in D1 while provider
+    # observability is gated.  Do not synthesize reconcile operations: besides
+    # violating the gate, walking that backlog serially starves newly claimed
+    # prompt sends.  When policy explicitly enables observability the same
+    # bounded recovery path becomes available again.
+    if provider_observability_enabled():
+        pending, pending_cursor = scan_job_state(device_id, "effect_pending")
+    else:
+        pending, pending_cursor = [], str(_scan_cursors(device_id).get("effect_pending") or "")
     claimed, claimed_cursor = scan_job_state(device_id, "claimed")
     recovery_leader = None
     if pending:

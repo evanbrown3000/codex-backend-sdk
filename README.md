@@ -111,7 +111,7 @@ or existing ChatGPT conversation.
 
 ## App Server pass-through bridge
 
-`cognilode-b4pt0r-app-server app-server --stdio` (also installed as
+`cognilode-b4pt0r-app-server` (also installed as
 `b4pt0r-app-server`) preserves native Codex App Server
 behavior by launching the installed Codex executable and forwarding all
 unknown JSON-RPC methods and notifications unchanged. It merges Agent Memory
@@ -119,11 +119,11 @@ threads into the first `thread/list` page and projects ChatGPT threads through
 the existing `thread/read`, `thread/resume`, `thread/turns/list`, and
 `turn/start` shapes consumed by Codex Desktop.
 
-Set `CODEX_APP_SERVER_EXECUTABLE` in B4PT0R Electron to
-`cognilode-b4pt0r-app-server`.
-Set `CODEX_EXECUTABLE` to the real installed Codex binary; it must not point
-back to the bridge. The bridge passes the ordinary App Server arguments and
-every unowned method and notification to that binary unchanged.
+Launch the Electron application with `b4pt0r-desktop`. The launcher obtains an
+operator capability from central company custody into an inherited anonymous
+descriptor, sets the bridge as `CODEX_EXECUTABLE`, and keeps the real modified
+Codex binary separate as `CODEX_NATIVE_EXECUTABLE`. No provider token is copied
+into the desktop process or a per-environment file.
 
 The bridge adds two operations beneath the existing interface:
 
@@ -134,12 +134,14 @@ The bridge adds two operations beneath the existing interface:
 
 Conversation discovery and reading use the normalized Agent Memory endpoint,
 including ChatGPT and Codex conversations. Provider mutations never load
-provider credentials in the bridge. Set `B4PT0R_PROVIDER_BROKER_COMMAND` to a
-JSON argv array for the singular credential-owning provider broker. The bridge
-sends one JSON operation on stdin and reads one JSON result from stdout. Native
-ChatGPT continuations use `chatgpt_continue`; cross-provider continuations use
-`conversation_continue` with `context_delivery` set to
-`rendered_conversation_attachment`.
+provider credentials in the bridge. Interactive ChatGPT turns enter the same
+central, provider-specific queue used by TaskFlow and DecisionX; the biological
+rhythm worker performs the B4PT0R provider operation from credential custody.
+The bridge observes only central queue state and normalized memory. A
+cross-provider continuation automatically renders and stages
+`conversation.md`, injects the instruction to read it, and queues the physical
+attachment. `B4PT0R_PROVIDER_BROKER_COMMAND` remains available for relay and
+memory access from credential-free container clients.
 
 ## Choose the right surface
 

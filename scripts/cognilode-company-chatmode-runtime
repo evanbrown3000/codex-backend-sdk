@@ -162,6 +162,10 @@ def launch_prepared(runner: Path, cli: Path) -> subprocess.Popen:
     environment = os.environ.copy()
     environment["B4PT0R_CLI"] = str(cli)
     environment["COMPUTERUSEX_SKIP_IMPORT_GUARDS"] = "1"
+    environment.setdefault(
+        "COMPUTERUSEX_RUNTIME_ROOT",
+        "/home/worker/.local/share/cognilode/computerusex",
+    )
     return subprocess.Popen(
         [sys.executable, str(runner)], env=environment, start_new_session=True
     )
@@ -173,6 +177,10 @@ def replace_supervisor(source: Path, draining_pids: list[int] | None = None) -> 
     # Source convergence may advance the Git worktree in place, so equal
     # filesystem paths do not imply equal executable generations.
     environment = os.environ.copy()
+    environment.setdefault(
+        "COMPUTERUSEX_RUNTIME_ROOT",
+        "/home/worker/.local/share/cognilode/computerusex",
+    )
     inherited = [int(value) for value in environment.get(
         "COGNILODE_DRAINING_PROVIDER_PIDS", ""
     ).split(",") if value.strip().isdigit()]

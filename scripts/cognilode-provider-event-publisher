@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -23,7 +24,7 @@ def stop(_signal, _frame):
 
 def atomic_cursor(path: Path, value: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".partial")
+    temporary = path.with_suffix(path.suffix + f".{os.getpid()}.partial")
     temporary.write_text(str(value) + "\n", encoding="utf-8")
     os.replace(temporary, path)
 
@@ -91,6 +92,12 @@ def main() -> int:
     )))
     parser.add_argument("--interval", type=float, default=10.0)
     args = parser.parse_args()
+    args.cursor.parent.mkdir(parents=True, exist_ok=True)
+    ownership = args.cursor.with_suffix(args.cursor.suffix + ".publisher.lock").open("a+")
+    try:
+        fcntl.flock(ownership.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return 0
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     memory = AgentMemoryClient(use_broker=False)

@@ -1566,6 +1566,24 @@ def complete_from_result(job: dict, value: dict) -> bool:
     if not checked:
         return False
     conversation_id, files = checked
+    try:
+        from codex_backend_sdk.attachment_custody import commit_returned_artifact
+
+        for row in files:
+            if row.get("ref"):
+                continue
+            receipt = commit_returned_artifact(Path(str(row["path"])))
+            if receipt.get("sha256") != row.get("sha256"):
+                raise ValueError("central returned-artifact identity mismatch")
+            row.update(receipt)
+            row["custody_state"] = "committed"
+    except Exception as exc:
+        # Collection already happened.  Hold completion for custody retry and
+        # never repeat the provider mutation merely because durable storage is
+        # temporarily unavailable.
+        event("returned_artifact_custody_retry_required", job_id=job["id"],
+              error=type(exc).__name__ + ":" + str(exc)[:240])
+        return False
     if job.get("prompt_author") == "rpe_run":
         text_sha = hashlib.sha256(value["terminal_assistant_text"].encode("utf-8")).hexdigest()
         evidence = [{"kind": "provider_conversation", "ref": conversation_id},
@@ -1606,6 +1624,7 @@ def complete_from_result(job: dict, value: dict) -> bool:
     evidence = [{"kind": "provider_conversation", "ref": conversation_id},
                 {"kind": "central_conversation_readback", "ref": conversation_id}]
     evidence.extend({"kind": "chatgpt_sandbox_artifact", "ref": row["sha256"], "path": row["path"],
+                     "custody_ref": row.get("ref"), "custody_state": row.get("custody_state"),
                      **({"mirrors": row["mirrors"]} if row.get("mirrors") else {})} for row in files)
     evidence.extend(native_evidence)
     if decisionx_result is not None:

@@ -103,6 +103,17 @@ def _sdk_worker_generation(program: list[str]) -> tuple[list[str], str]:
     # them. The outer supervisor alone owns generation handoff.
     selected = Path(program[1])
     dependencies = [selected]
+    if selected.name == "cognilode-provider-queue-actuator" and "--provider" in program:
+        provider = program[program.index("--provider") + 1]
+        if provider != "chatgpt.com":
+            configured = os.environ.get("COGNILODE_COMPUTERUSEX_SOURCE", "").strip()
+            roots = ([Path(configured)] if configured else []) + [
+                Path("/runtime/source/current/automation-computeruse-vision/src"),
+                Path("/company/automation-computeruse-vision/src"),
+            ]
+            package = next((root / "computerusex" for root in roots if (root / "computerusex").is_dir()), None)
+            if package is not None:
+                dependencies.extend(sorted(package.glob("*.py")))
     if selected.name == "cognilode-chatmode-queue-worker":
         checkout = selected.parent.parent
         dependencies.extend([

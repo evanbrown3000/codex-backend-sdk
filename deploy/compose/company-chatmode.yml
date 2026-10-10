@@ -191,6 +191,8 @@ services:
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
       COGNILODE_B4PT0R_SDK_ROOT: /runtime/source/current/codex-backend-sdk
       COGNILODE_UNIFIED_PROMPTER: /runtime/source/current/modified-codex-runtime/src/modified_codex/unified_bridge.py
+      COMPUTERUSEX_MODIFIED_CODEX: /codex/bin/codex
+      COMPUTERUSEX_CODEX_STATE: /home/worker/.local/share/cognilode/computerusex/modified-codex
       COGNILODE_TASKFLOW_ATTACHMENT_S3_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
       COGNILODE_TASKFLOW_ATTACHMENT_S3_READ_BUCKETS: cognilode-conversation-visibility-362928919715-us-west-2
       COGNILODE_AWS_CLI: /usr/bin/aws
@@ -201,6 +203,8 @@ services:
       - company_operator:/home/worker/.config/cognilode:ro
       - ${COMPANY_RUNTIME_ROOT}/worker:/home/worker/.local/share/cognilode
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      - company_codex_release:/codex:ro
+      - company_auth:/home/worker/.codex
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
     depends_on:
       - provider-transport
@@ -338,8 +342,8 @@ services:
     restart: unless-stopped
     network_mode: bridge
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
-    working_dir: /company/codex-backend-sdk
-    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-company-taskflow-runtime]
+    working_dir: /runtime/source/current/codex-backend-sdk
+    entrypoint: [python3, /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-taskflow-runtime]
     environment:
       HOME: /home/worker
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source

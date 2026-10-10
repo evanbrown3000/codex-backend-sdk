@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import sqlite3
 import socket
 import subprocess
 import sys
@@ -20,6 +21,30 @@ import time
 
 
 STOP = False
+
+
+def durable_provider_effects() -> int | None:
+    """Count unexpired accepted effects before allowing a generation exit.
+
+    The drain socket is intentionally only an in-process view.  A transport
+    restart or a lost child can make it report zero while the scheduler still
+    owns an accepted provider effect.  Fail closed if the durable ledger cannot
+    be read; source replacement is not more important than custody.
+    """
+    database = Path(os.environ.get(
+        "COGNILODE_PROVIDER_SCHEDULER_DB",
+        "/runtime/provider-scheduler/scheduler.sqlite3",
+    ))
+    try:
+        with sqlite3.connect(database, timeout=5) as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM provider_jobs "
+                "WHERE state = 'effect_pending' AND lease_until > ?",
+                (time.time(),),
+            ).fetchone()
+        return int(row[0]) if row else None
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return None
 
 
 def service_python(source: Path) -> Path | None:
@@ -269,7 +294,10 @@ def main() -> int:
                 # With no admitted send left, retaining the drained generation
                 # for the debounce interval is pure provider downtime; adopt
                 # the newest complete generation immediately.
-                if candidate_ready and custody_state(options.drain_socket) == (0, True):
+                state = custody_state(options.drain_socket)
+                durable = durable_provider_effects()
+                if (candidate_ready and state == (0, True)
+                        and durable == 0):
                     break
                 if candidate_ready and time.monotonic() - pending_since >= stability_seconds:
                     break
@@ -283,6 +311,13 @@ def main() -> int:
                 if options.no_drain:
                     break
                 active = drain(options.drain_socket)
+                durable = durable_provider_effects()
+                if durable is None:
+                    active = None
+                elif active == 0 and durable > 0:
+                    active = durable
+                elif active is not None:
+                    active = max(active, durable)
                 if active == 0:
                     break
                 if time.monotonic() - last_report >= 60:

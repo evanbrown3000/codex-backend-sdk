@@ -20,6 +20,7 @@ SENDER = Path(__file__).with_name("cognilode-b4pt0r-chatmode")
 COLLECTOR = Path(__file__).with_name("cognilode-b4pt0r-collect")
 COUNTER_LOCK = threading.Lock()
 ACTIVE_SENDS = 0
+ACTIVE_JOB_IDS: set[str] = set()
 DRAINING = False
 
 
@@ -178,6 +179,7 @@ def transport(args: list[str], send_fence: dict | None = None) -> dict:
                         "state": "provider_transport_draining",
                         "provider_acceptance_observed": False})}
             ACTIVE_SENDS += 1
+            ACTIVE_JOB_IDS.add(str((send_fence or {}).get("job_id") or ""))
     try:
         try:
             child_env = os.environ.copy()
@@ -192,6 +194,7 @@ def transport(args: list[str], send_fence: dict | None = None) -> dict:
         if verb == "send":
             with COUNTER_LOCK:
                 ACTIVE_SENDS -= 1
+                ACTIVE_JOB_IDS.discard(str((send_fence or {}).get("job_id") or ""))
 
 
 class Handler(socketserver.StreamRequestHandler):
@@ -201,7 +204,8 @@ class Handler(socketserver.StreamRequestHandler):
             request = json.loads(self.rfile.readline(1048576))
             if request.get("operation") == "active":
                 with COUNTER_LOCK:
-                    response = {"active": ACTIVE_SENDS, "draining": DRAINING}
+                    response = {"active": ACTIVE_SENDS, "draining": DRAINING,
+                                "job_ids": sorted(value for value in ACTIVE_JOB_IDS if value)}
             elif request.get("operation") == "drain":
                 with COUNTER_LOCK:
                     DRAINING = True

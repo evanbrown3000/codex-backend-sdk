@@ -282,6 +282,28 @@ def chatgpt_transport(job: Mapping[str, Any], attachments: tuple[str, ...]) -> d
     }
 
 
+def chatgpt_transport_has_job(job_id: str) -> bool | None:
+    """Inspect local custody only; never query provider conversation history."""
+    path = os.environ.get("COGNILODE_PROVIDER_SOCKET", "/runtime/provider.sock")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(5)
+            connection.connect(path)
+            connection.sendall(b'{"operation":"active"}\n')
+            connection.shutdown(socket.SHUT_WR)
+            data = bytearray()
+            while b"\n" not in data and len(data) < 65536:
+                piece = connection.recv(65536)
+                if not piece:
+                    break
+                data.extend(piece)
+        result = json.loads(data.split(b"\n", 1)[0])
+        jobs = result.get("job_ids")
+        return job_id in jobs if isinstance(jobs, list) else None
+    except (OSError, ValueError, IndexError, TypeError):
+        return None
+
+
 def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
     # Scheduler admission persists the full payload; materialize its intent
     # into the shared join ledger before attachment work or begin_effect.
@@ -460,7 +482,9 @@ def main() -> int:
                         seen.add(job.get("id"))
                         if state == "effect_pending":
                             recovered = recover_terminal(job)
-                            if not recovered and args.provider != "chatgpt.com":
+                            chatgpt_orphan = (args.provider == "chatgpt.com" and
+                                              chatgpt_transport_has_job(str(job.get("id") or "")) is False)
+                            if not recovered and (args.provider != "chatgpt.com" or chatgpt_orphan):
                                 # A browser mutation from an exited immutable
                                 # generation has no live collector.  The
                                 # queue-authorized retry policy, not a human

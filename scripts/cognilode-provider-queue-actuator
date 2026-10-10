@@ -66,6 +66,8 @@ def persist_admission_intent(job: Mapping[str, Any]) -> None:
     if not isinstance(intent, Mapping):
         return
     job_id = str(job.get("id") or "").strip()
+    if not job_id:
+        raise RuntimeError("provider_job_identity_required_for_admission_intent")
     parent = job.get("parent_operation") if isinstance(job.get("parent_operation"), Mapping) else {}
     operation_id = str(parent.get("operation_id") or job.get("parent_operation_id") or job_id)
     root = Path(os.environ.get("COGNILODE_RETURNED_PRODUCT_ADMISSIONS",

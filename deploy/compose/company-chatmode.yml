@@ -147,9 +147,10 @@ services:
       COGNILODE_TASKFLOW_ATTACHMENT_S3_READ_BUCKETS: cognilode-conversation-visibility-362928919715-us-west-2
       COGNILODE_AWS_CLI: /usr/bin/aws
       COGNILODE_AWS_PURPOSE: artifact-write
-      PATH: /usr/bin:/usr/local/bin:/bin
+      PATH: /node-runtime:/usr/bin:/usr/local/bin:/bin
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
+      - company_node_runtime:/node-runtime:ro
       - company_operator:/home/worker/.config/cognilode:ro
       - ${COMPANY_RUNTIME_ROOT}/worker:/home/worker/.local/share/cognilode
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
@@ -630,6 +631,7 @@ volumes:
   company_auth:
   company_browser:
   company_operator:
+  company_node_runtime:
   company_deploy_custody:
   company_codex_release:
   company_codex_exec:

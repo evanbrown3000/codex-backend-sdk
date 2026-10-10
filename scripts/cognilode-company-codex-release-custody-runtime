@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 from pathlib import Path
 import re
 import signal
@@ -50,17 +51,26 @@ def main() -> None:
         print(f'Codex release custody source generation {selected} for {pin}', flush=True)
         env = os.environ.copy()
         env['COGNILODE_CODEX_SOURCE_COMMIT'] = pin
-        child = subprocess.Popen([sys.executable, str(selected)], env=env)
+        # Keep long-running AWS upload children in this generation's process
+        # group so source handoff cannot orphan an old-pin publisher.
+        child = subprocess.Popen([sys.executable, str(selected)], env=env,
+                                 start_new_session=True)
         while (not STOP and child.poll() is None and
                selected == (SCRIPTS / 'cognilode-company-codex-release-custody').resolve() and
                pin == selected_pin()):
             time.sleep(5)
         if child.poll() is None:
-            child.terminate()
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
             try:
                 child.wait(timeout=15)
             except subprocess.TimeoutExpired:
-                child.kill()
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 child.wait(timeout=10)
         if STOP:
             return

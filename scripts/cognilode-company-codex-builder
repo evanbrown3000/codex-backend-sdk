@@ -121,4 +121,5 @@ if __name__ == "__main__":
             run_once()
         except Exception as error:
             print(f"Codex release pending: {type(error).__name__}: {error}", flush=True)
-        time.sleep(max(60, int(os.environ.get("COGNILODE_CODEX_BUILD_INTERVAL", "300"))))
+        # This process supervises source-generation adoption as well as builds.
+        time.sleep(max(5, int(os.environ.get("COGNILODE_CODEX_BUILD_INTERVAL", "15"))))

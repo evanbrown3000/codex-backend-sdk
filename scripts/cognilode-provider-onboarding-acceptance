@@ -360,12 +360,29 @@ def main() -> int:
                           + packet_identity.hexdigest()[:12])
             job_id = str(proof["inflight"].get(provider) or "")
             if not job_id:
+                continuation_conversation = ""
+                continuation_parent = ""
+                if prior:
+                    continuation_conversation = str(prior[-1].get("conversation_id") or "")
+                    continuation_parent = str(prior[-1].get("assistant_message_id") or "")
+                    if not continuation_parent and prior[-1].get("job_id"):
+                        prior_result = scheduler_call({
+                            "operation": "get_job", "job_id": str(prior[-1]["job_id"]),
+                        })
+                        prior_job = prior_result.get("job") if isinstance(
+                            prior_result.get("job"), Mapping
+                        ) else {}
+                        prior_normalized = prior_job.get("normalized_provider_result") if isinstance(
+                            prior_job.get("normalized_provider_result"), Mapping
+                        ) else {}
+                        continuation_conversation = str(
+                            prior_normalized.get("conversation_id") or continuation_conversation
+                        )
+                        continuation_parent = str(prior_normalized.get("assistant_message_id") or "")
                 queued = client.send_provider(
                     provider=provider, prompt=authored, attachments=tuple(inherited), request_id=request_id,
-                    conversation_id=(str(prior[-1].get("conversation_id") or "") or None)
-                    if prior else None,
-                    parent_message_id=(str(prior[-1].get("assistant_message_id") or "") or None)
-                    if prior else None,
+                    conversation_id=continuation_conversation or None,
+                    parent_message_id=continuation_parent or None,
                     project="unified-provider-actuation", role="provider-implementation-worker",
                     source="area1-sequential-onboarding", prompt_authority="taskflow_plan",
                     priority=ACCEPTANCE_PRIORITY,

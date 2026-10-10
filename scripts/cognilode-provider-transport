@@ -41,6 +41,7 @@ def option(args: list[str], name: str, default: str = "") -> str:
 def b4pt0r_send(args: list[str]) -> dict:
     prompt_file = Path(option(args, "--prompt-file"))
     job_id = option(args, "--queue-job-id")
+    provider_attempt = option(args, "--provider-attempt", "0")
     if not prompt_file.is_file() or not job_id:
         return {"exit_code": 64, "stderr": "queued prompt input unavailable"}
     artifact_root = Path.home() / ".local/share/cognilode/b4pt0r-chatmode" / (
@@ -55,7 +56,12 @@ def b4pt0r_send(args: list[str]) -> dict:
         "model": option(args, "--model", "gpt-5-6-thinking"),
         "effort": option(args, "--effort", "xhigh"),
         "attachments": attachments,
-        "user_message_id": str(uuid.uuid5(uuid.NAMESPACE_URL, "cognilode-chatmode-queue:" + job_id)),
+        "user_message_id": str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            "cognilode-chatmode-queue:" + job_id + (
+                "" if provider_attempt == "0" else ":provider-attempt:" + provider_attempt
+            ),
+        )),
         "artifact_directory": str(artifact_root),
     }
     environment = os.environ.copy()

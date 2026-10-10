@@ -1964,14 +1964,13 @@ def stable_user_message_id(job_id: str) -> str:
 
 def sender_command(job: dict, prompt_path: Path, attachments: list[Path],
                    provider_attempt: int = 0) -> list[str]:
-    provider_job_id = str(job["id"])
-    if provider_attempt:
-        provider_job_id += ":provider-attempt:" + str(provider_attempt)
     command = sender_prefix() + ["send", "--prompt-file", str(prompt_path),
-               "--queue-job-id", provider_job_id,
+               "--queue-job-id", str(job["id"]),
                "--model", str(job.get("requested_model") or job.get("model") or "gpt-5-6-thinking"),
                "--effort", str(job.get("reasoning_effort") or "xhigh"),
                "--timeout", "1800"]
+    if provider_attempt:
+        command.extend(["--provider-attempt", str(provider_attempt)])
     # DecisionX follow-ups must target the actual existing Chat-mode conversation
     # and its observed parent. The sender performs a read-before-send on that
     # exact provider branch and refuses a stale expected parent.
@@ -2013,7 +2012,9 @@ def resend_pending(job: dict, device_id: str) -> None:
         attachments = attachment_paths(job)
         command = sender_command(job, prompt_path, attachments, attempt)
         send_env = dict(os.environ)
-        send_env["COGNILODE_CHATMODE_SEND_FENCE"] = json.dumps({**fence(job), "device_id": device_id})
+        send_env["COGNILODE_CHATMODE_SEND_FENCE"] = json.dumps(
+            {**fence(job), "device_id": device_id, "provider_attempt": attempt}
+        )
         atomic_json(state_path, {**prior, "state": "provider_resend_running", "job_id": job_id,
                                  "provider_attempt": attempt})
         response = subprocess.run(command, text=True, capture_output=True,

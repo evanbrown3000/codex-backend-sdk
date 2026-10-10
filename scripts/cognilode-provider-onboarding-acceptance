@@ -30,6 +30,22 @@ def iso(value: object) -> float:
     return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
 
 
+def provider_seconds(job: Mapping[str, Any]) -> float:
+    """Measure only provider-side execution, never queue or broker waiting."""
+    result = job.get("normalized_provider_result") if isinstance(job.get("normalized_provider_result"), Mapping) else {}
+    receipt = result.get("provider_receipt") if isinstance(result.get("provider_receipt"), Mapping) else {}
+    started = receipt.get("started_at") or result.get("provider_started_at")
+    completed = receipt.get("completed_at") or result.get("provider_completed_at")
+    if started is None or completed is None:
+        return 0.0
+    try:
+        start_value = float(started) if isinstance(started, (int, float)) else iso(started)
+        end_value = float(completed) if isinstance(completed, (int, float)) else iso(completed)
+        return end_value - start_value
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def physical_outputs(job: Mapping[str, Any]) -> list[str]:
     found: list[str] = []
     for row in list(job.get("artifacts") or []) + list(job.get("effect_evidence") or []):
@@ -121,10 +137,7 @@ def main() -> int:
             reasons: list[str] = []
             if result.get("ok") is not True:
                 reasons.append("no_queue_recorded_terminal_completion")
-            try:
-                duration = iso(job.get("completed_at")) - iso(job.get("effect_started_at"))
-            except (TypeError, ValueError):
-                duration = 0.0
+            duration = provider_seconds(job)
             if duration < MIN_PROVIDER_SECONDS:
                 reasons.append("provider_execution_shorter_than_five_minutes")
             conversation_id = str(result.get("conversation_id") or "")

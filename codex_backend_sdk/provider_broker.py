@@ -77,8 +77,9 @@ def _send(payload: Mapping[str, Any]) -> dict[str, Any]:
         if memory_enabled:
             try:
                 foreground = memory.prompt_foreground(
-                    persona=str(payload.get("memory_persona") or "company"),
+                persona=str(payload.get("memory_persona") or payload.get("role") or "company"),
                     max_tokens=int(payload.get("memory_max_tokens") or 40_000),
+                task=prompt,
                 )
             except Exception as exc:
                 # Prompt transport is the availability boundary.  Memory is an

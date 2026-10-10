@@ -152,11 +152,12 @@ class AgentMemoryClient:
         *,
         persona: str = "company",
         max_tokens: int = 40_000,
+        task: str = "",
     ) -> dict[str, Any]:
         value = self._request(
             "GET",
             self.foreground_endpoint,
-            params={"persona": persona, "max_tokens": max_tokens},
+            params={"persona": persona, "max_tokens": max_tokens, "task": task},
         )
         if isinstance(value, Mapping) and isinstance(value.get("result"), Mapping):
             value = value["result"]

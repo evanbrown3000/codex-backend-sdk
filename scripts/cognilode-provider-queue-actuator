@@ -419,7 +419,18 @@ def main() -> int:
                             continue
                         seen.add(job.get("id"))
                         if state == "effect_pending":
-                            recover_terminal(job)
+                            recovered = recover_terminal(job)
+                            if not recovered and args.provider != "chatgpt.com":
+                                # A browser mutation from an exited immutable
+                                # generation has no live collector.  The
+                                # queue-authorized retry policy, not a human
+                                # observer, decides the successor attempt.
+                                scheduler_call({
+                                    "operation": "release_job", **fence(job),
+                                    "provider_state": "provider_collection_interrupted",
+                                    "reason": "no_terminal_receipt_after_generation_handoff",
+                                    "retry_after_seconds": 1,
+                                })
                         else:
                             launch(job)
         except Exception as exc:

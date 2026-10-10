@@ -217,10 +217,21 @@ def chatgpt_transport(job: Mapping[str, Any], attachments: tuple[str, ...]) -> d
         "--timeout", "1800", "--provider-attempt", str(job.get("lease_generation") or 1),
         "--provider-account-id", "central-custody",
     ]
-    if job.get("conversation_id"):
-        args.extend(["--conversation-id", str(job["conversation_id"])])
-    if job.get("parent_message_id"):
-        args.extend(["--parent-message-id", str(job["parent_message_id"])])
+    conversation_id = str(job.get("conversation_id") or "")
+    parent_message_id = str(job.get("parent_message_id") or "")
+    # A queue-authorized replay of an unacceptably short terminal attempt is a
+    # new provider attempt for the same logical job, not a continuation of the
+    # discarded provider branch.  The scheduler intentionally retains the
+    # prior receipt as evidence, so it can still contain conversation_id while
+    # lacking the exact terminal parent.  Forwarding that half-identity makes
+    # the actuation layer reject the retry before any provider-side work.  A
+    # genuine continuation always carries both identities from Agent Memory.
+    if int(job.get("lease_generation") or 1) > 1 and not parent_message_id:
+        conversation_id = ""
+    if conversation_id:
+        args.extend(["--conversation-id", conversation_id])
+    if parent_message_id:
+        args.extend(["--parent-message-id", parent_message_id])
     for attachment in attachments:
         args.extend(["--attach", attachment])
     parent = job.get("parent_operation") if isinstance(job.get("parent_operation"), Mapping) else {}

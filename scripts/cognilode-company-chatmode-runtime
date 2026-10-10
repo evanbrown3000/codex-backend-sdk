@@ -82,6 +82,15 @@ def launch_prepared(runner: Path, cli: Path) -> subprocess.Popen:
     )
 
 
+def replace_supervisor(source: Path) -> None:
+    """Continue supervision with the synchronized generation's own code."""
+    supervisor = (source / "scripts" / "cognilode-company-chatmode-runtime").resolve()
+    current = Path(__file__).resolve()
+    if supervisor == current:
+        return
+    os.execve(sys.executable, [sys.executable, str(supervisor)], os.environ.copy())
+
+
 def launch(source: Path) -> subprocess.Popen:
     return launch_prepared(*release_for(source))
 
@@ -131,6 +140,13 @@ def main() -> int:
             if candidate != source:
                 candidate, runner, cli = prepare_frontier()
                 drain(process)
+                # A source cutover includes the supervisor itself, not only its
+                # children.  Otherwise an old bootstrap process can keep stale
+                # release/install semantics forever while merely launching new
+                # worker scripts beneath it.  Candidate preparation happens
+                # before the drain, so provider custody remains live during the
+                # potentially slow immutable-release build.
+                replace_supervisor(candidate)
                 source = candidate
                 process = launch_prepared(runner, cli)
         time.sleep(2)

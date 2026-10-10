@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from io import BytesIO
 import json
+import mimetypes
 from pathlib import Path
 from typing import Any, Iterator, Literal, Mapping, TYPE_CHECKING
 from urllib.parse import quote
@@ -14,6 +15,7 @@ from .._models import ChatGPTSpeech
 from .._utils import _jsonable
 from .chatgpt_apps import ChatGPTApps
 from .chatgpt_connectors import ChatGPTConnectors
+from .chat_mode import ChatModeOperations
 from .chatgpt_plugins import ChatGPTPlugins
 from .chatgpt_writing_blocks import ChatGPTWritingBlocks
 
@@ -44,12 +46,13 @@ def _path(value: str, name: str) -> str:
 
 
 def _prepare_headers(payload: Mapping[str, Any]) -> dict[str, str]:
+    """Extract the generation headers returned by ChatGPT prepare."""
     headers: dict[str, str] = {}
 
     def collect(value: Any) -> None:
         if isinstance(value, Mapping):
             for key, nested in value.items():
-                if isinstance(nested, Mapping) and "header" in key.lower():
+                if isinstance(nested, Mapping) and "header" in str(key).lower():
                     for name, header_value in nested.items():
                         if isinstance(name, str) and isinstance(header_value, (str, int, float)):
                             headers[name] = str(header_value)
@@ -60,10 +63,10 @@ def _prepare_headers(payload: Mapping[str, Any]) -> dict[str, str]:
                 collect(item)
 
     collect(payload)
-    for token_key in ("conduit_token", "conduitToken"):
-        token = payload.get(token_key)
-        if isinstance(token, str) and token:
-            headers.setdefault("OpenAI-Conduit-Token", token)
+    conduit = payload.get("conduit_token") or payload.get("conduitToken")
+    if isinstance(conduit, str) and conduit:
+        headers.setdefault("OpenAI-Conduit-Token", conduit)
+        headers.setdefault("X-Conduit-Token", conduit)
     return headers
 
 
@@ -78,6 +81,7 @@ class ChatGPTResources:
         self.files = ChatGPTFiles(client)
         self.gizmos = ChatGPTGizmos(client)
         self.models = ChatGPTModels(client)
+        self.operations = ChatModeOperations(client)
         self.pins = ChatGPTPins(client)
         self.plugins = ChatGPTPlugins(client)
         self.projects = ChatGPTProjects(client)
@@ -333,18 +337,19 @@ class ChatGPTConversations:
             f"/conversation/{_required(conversation_id, 'conversation_id')}"
         )
 
-    def reconcile_turn(
-        self,
-        conversation_id: str,
-        user_message_id: str,
-    ) -> dict[str, Any]:
-        """Read back the exact submitted turn without replaying its mutation."""
+    def resolve_turn(self, conversation_id: str, user_message_id: str) -> dict[str, Any]:
+        """Resolve one submitted user message on its provider branch.
+
+        The returned assistant message is tied to the supplied user message and
+        cannot be confused with an older or later terminal response.
+        """
         conversation = self.retrieve(conversation_id)
         mapping = conversation.get("mapping") if isinstance(conversation, dict) else None
         if not isinstance(mapping, dict):
             raise RuntimeError("Conversation response is missing its mapping.")
+
         current = conversation.get("current_node")
-        chain: list[dict[str, Any]] = []
+        branch: list[dict[str, Any]] = []
         visited: set[str] = set()
         while isinstance(current, str) and current and current not in visited:
             visited.add(current)
@@ -353,42 +358,40 @@ class ChatGPTConversations:
                 break
             message = node.get("message")
             if isinstance(message, dict):
-                chain.append(message)
+                branch.append(message)
             current = node.get("parent")
-        chain.reverse()
-        submitted_index = next(
-            (index for index, message in enumerate(chain)
-             if str(message.get("id") or "") == _required(user_message_id, "user_message_id")),
+        branch.reverse()
+
+        user_index = next(
+            (
+                index
+                for index, message in enumerate(branch)
+                if str(message.get("id") or "") == _required(user_message_id, "user_message_id")
+            ),
             None,
         )
-        if submitted_index is None:
-            return {
-                "accepted": False,
-                "terminal": False,
-                "conversation_id": conversation_id,
-            }
-        for message in reversed(chain[submitted_index + 1:]):
+        if user_index is None:
+            return {"accepted": False, "terminal": False, "conversation_id": conversation_id}
+
+        terminal: dict[str, Any] | None = None
+        for message in branch[user_index + 1 :]:
             author = message.get("author") if isinstance(message.get("author"), dict) else {}
+            if author.get("role") == "user":
+                break
             if author.get("role") != "assistant":
                 continue
-            terminal = message.get("end_turn") is True or message.get("status") == "finished_successfully"
-            if terminal:
-                content = message.get("content") if isinstance(message.get("content"), dict) else {}
-                parts = content.get("parts") if isinstance(content.get("parts"), list) else []
-                text = "\n".join(str(part) for part in parts if isinstance(part, str))
-                return {
-                    "accepted": True,
-                    "terminal": True,
-                    "conversation_id": conversation_id,
-                    "assistant_message_id": message.get("id"),
-                    "assistant_text": text,
-                    "assistant_message": message,
-                }
-        return {
+            if message.get("end_turn") is True or message.get("status") == "finished_successfully":
+                terminal = message
+
+        result: dict[str, Any] = {
             "accepted": True,
-            "terminal": False,
+            "terminal": terminal is not None,
             "conversation_id": conversation_id,
+            "user_message": branch[user_index],
         }
+        if terminal is not None:
+            result["assistant_message"] = terminal
+        return result
 
     def update(self, conversation_id: str, body: Any) -> dict[str, Any]:
         return self._client._patch_chatgpt(
@@ -685,6 +688,49 @@ class ChatGPTFiles:
             f"/files/{_required(file_id, 'file_id')}/uploaded",
             body={} if body is None else _object(body),
         )
+
+    def upload(
+        self,
+        source: str | Path,
+        *,
+        use_case: str | None = None,
+        mime_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Create, transfer, and finalize one physical ChatGPT attachment."""
+        path = Path(source).expanduser().resolve(strict=True)
+        size = path.stat().st_size
+        if size <= 0:
+            raise ValueError(f"Attachment is empty: {path}")
+        detected_type = mime_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        selected_use_case = use_case or (
+            "my_files"
+            if detected_type.startswith("text/")
+            or detected_type
+            in {"application/json", "application/pdf", "application/zip", "application/x-zip-compressed"}
+            else "ace_upload"
+        )
+        created = self.create(
+            {"file_name": path.name, "file_size": size, "use_case": selected_use_case}
+        )
+        file_id = str(created.get("file_id") or "")
+        upload_url = str(created.get("upload_url") or "")
+        if not file_id or not upload_url:
+            raise RuntimeError("ChatGPT file creation omitted file_id or upload_url.")
+        with path.open("rb") as handle:
+            response = requests.put(
+                upload_url,
+                data=handle,
+                headers={"Content-Type": detected_type, "x-ms-blob-type": "BlockBlob"},
+                timeout=self._client._timeout,
+            )
+        response.raise_for_status()
+        finalized = self.finalize(file_id)
+        return {
+            "id": file_id,
+            "name": str(finalized.get("file_name") or path.name),
+            "mimeType": str(finalized.get("mime_type") or detected_type),
+            "size": int(finalized.get("file_size_bytes") or size),
+        }
 
     def download_link(
         self,

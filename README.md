@@ -47,6 +47,82 @@ print(response.output_text)
 opens the browser OAuth flow. Most examples below assume an authenticated
 `client` created this way.
 
+## Chat-mode operations and unified CLI
+
+The low-level B4PT0R resources remain the provider implementation. The
+`client.chatgpt.operations` layer composes those resources into complete
+ChatGPT Chat-mode turns without introducing a second HTTP transport:
+
+```python
+result = client.chatgpt.operations.send(
+    "Read the attached source and return the finished package.",
+    attachment_paths=["source.zip"],
+    effort="xhigh",
+    artifact_directory="returned",
+)
+```
+
+This performs the Desktop-observed create/upload/finalize attachment sequence,
+prepares the conversation request, consumes its SSE response, resolves the
+exact submitted user-message branch, and downloads linked `/mnt/data` or
+`/tmp` interpreter artifacts. Continuing an existing conversation requires its
+conversation ID; the current parent is read once and the new turn is submitted
+through the same operation.
+
+The `b4pt0r` CLI exposes the same SDK operations for agents and automation:
+
+```bash
+b4pt0r chatgpt list
+b4pt0r chatgpt search "provider transport"
+b4pt0r chatgpt read CONVERSATION_ID
+b4pt0r chatgpt send --prompt-file prompt.md --attach source.zip --effort xhigh \
+  --artifact-dir returned
+b4pt0r chatgpt collect CONVERSATION_ID USER_MESSAGE_ID --artifact-dir returned
+```
+
+It also calls the existing Cognilode remote-shell MCP instead of implementing
+another relay:
+
+```bash
+b4pt0r remote list
+b4pt0r remote select ENVIRONMENT_ID
+b4pt0r remote exec 'codex exec "continue the assigned work"'
+```
+
+Set `COGNILODE_OPERATOR_TOKEN` for the private relay. The selected environment
+is retained by the relay for the CLI actor. `COGNILODE_REMOTE_SHELL_ENDPOINT`
+can override the default Cognilode endpoint.
+
+Central conversation search and delta-aware reading use the Agent Memory HTTP
+facade:
+
+```bash
+b4pt0r memory recent
+b4pt0r memory search "attachment collection"
+b4pt0r memory read CONVERSATION_ID --reader-id agent:researcher
+b4pt0r memory render CONVERSATION_ID
+b4pt0r transfer CONVERSATION_ID --prompt "Continue this work in ChatGPT."
+```
+
+Set `AGENT_MEMORY_ENDPOINT` when the facade is hosted somewhere other than the
+Cognilode operator endpoint. `transfer` obtains the centralized Markdown
+rendering and supplies it as a physical `conversation.md` attachment to a new
+or existing ChatGPT conversation.
+
+## App Server pass-through bridge
+
+`b4pt0r-app-server app-server --stdio` preserves native Codex App Server
+behavior by launching the installed Codex executable and forwarding all
+unknown JSON-RPC methods and notifications unchanged. It merges Agent Memory
+threads into the first `thread/list` page and projects ChatGPT threads through
+the existing `thread/read`, `thread/resume`, `thread/turns/list`, and
+`turn/start` shapes consumed by Codex Desktop.
+
+Set `CODEX_NATIVE_EXECUTABLE` to the real installed Codex binary. This must not
+point back to the bridge executable. B4PT0R Electron can select the bridge with
+its existing `CODEX_EXECUTABLE` configuration; no replacement renderer or
+frontend provider logic is required.
+
 ## Choose the right surface
 
 ### Direct client: inference and reusable primitives
@@ -586,10 +662,6 @@ uv build
 
 Live probes are intentionally kept separate from the deterministic test suite:
 tests must not consume quota, mutate account state, or depend on rollout state.
-
-## Independent paid bounty board
-
-Developers looking for independent paid bug-hunting and coding tasks can also browse the public [uGig bounty board](https://ugig.net/bounties). It is a third-party marketplace and is not operated by or affiliated with this project; review each bounty's terms independently.
 
 ## License
 

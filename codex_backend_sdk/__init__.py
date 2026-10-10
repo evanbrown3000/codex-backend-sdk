@@ -17,7 +17,10 @@ Quickstart:
     print(response.output_text)
 """
 
-__version__ = "0.5.3"
+__version__ = "0.5.4"
+
+from .agent_memory import AgentMemoryClient
+from .remote_shell import RemoteShellClient
 
 from .oauth import (
     DeviceCode,
@@ -92,6 +95,8 @@ from .codex_client import (
 __all__ = [
     "CodexClient",
     "OpenAI",
+    "AgentMemoryClient",
+    "RemoteShellClient",
     "CodexBackendUnsupportedParameterError",
     "CodexBaseModel",
     "ChatGPTSpeech",

@@ -31,6 +31,9 @@ def commit_bytes(
 ) -> dict[str, Any]:
     endpoint = os.environ.get("UNIVERSE_STORAGE_ENDPOINT", "").strip()
     root = os.environ.get(root_env, "").rstrip("/")
+    if not root and root_env == "COGNILODE_RETURNED_ARTIFACT_ROOT":
+        prompt_root = os.environ.get("COGNILODE_PROMPT_ATTACHMENT_ROOT", "").rstrip("/")
+        root = prompt_root + "/returned" if prompt_root else ""
     digest = hashlib.sha256(data).hexdigest()
     if not endpoint or not root:
         bucket = os.environ.get(

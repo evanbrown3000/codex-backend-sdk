@@ -205,13 +205,23 @@ def main() -> int:
                     },
                 },
             })
-            listed = scheduler_call({
-                "operation": "list_jobs", "provider": args.provider,
-                "state": "claimed", "assigned_device": device, "limit": 10,
-            })
-            for job in listed.get("jobs") or []:
-                if isinstance(job, Mapping):
-                    process(job, client)
+            device_ids = [device]
+            # The predecessor ChatGPT actuator advertised the environment ID
+            # directly.  Consume its still-fenced leases during rolling
+            # upgrades instead of waiting for them to expire or resending the
+            # provider mutation.
+            if args.provider == "chatgpt.com":
+                device_ids.append(args.device_id)
+            seen = set()
+            for assigned_device in device_ids:
+                listed = scheduler_call({
+                    "operation": "list_jobs", "provider": args.provider,
+                    "state": "claimed", "assigned_device": assigned_device, "limit": 10,
+                })
+                for job in listed.get("jobs") or []:
+                    if isinstance(job, Mapping) and job.get("id") not in seen:
+                        seen.add(job.get("id"))
+                        process(job, client)
         except Exception as exc:
             print(json.dumps({"kind": "provider_actuator_retry", "provider": args.provider,
                               "error": type(exc).__name__ + ":" + str(exc)[:300]}), flush=True)

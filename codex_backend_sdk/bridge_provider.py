@@ -227,6 +227,26 @@ class ProviderCommandClient:
             "attachment_refs": [self.stage_file(path) for path in attachments],
         })
 
+    def send_chatgpt(
+        self,
+        *,
+        prompt: str,
+        conversation_id: str | None = None,
+        parent_message_id: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        attachments: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        return self._enqueue({
+            "provider": "chatgpt.com",
+            "conversation_id": conversation_id,
+            "parent_message_id": parent_message_id,
+            "prompt": prompt,
+            "model": model,
+            "reasoning_effort": effort,
+            "attachment_refs": [self.stage_file(path) for path in attachments],
+        })
+
     def continue_from_memory(
         self,
         *,

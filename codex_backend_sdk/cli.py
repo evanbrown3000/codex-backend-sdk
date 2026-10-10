@@ -6,11 +6,10 @@ import argparse
 import json
 from pathlib import Path
 import sys
-import tempfile
 from typing import Any
 
-from . import OpenAI
 from .agent_memory import AgentMemoryClient
+from .bridge_provider import ProviderCommandClient
 from .remote_shell import RemoteShellClient
 from .storage import load_tokens, token_needs_refresh
 
@@ -30,78 +29,39 @@ def _prompt(args: argparse.Namespace) -> str:
     raise ValueError("Provide --prompt, --prompt-file, or prompt text on stdin.")
 
 
-def _client():
-    return OpenAI().authenticate()
-
-
 def _chatgpt(args: argparse.Namespace) -> Any:
-    client = _client()
+    memory = AgentMemoryClient()
     if args.chatgpt_command == "list":
-        return client.chatgpt.conversations.list(
-            offset=args.offset, limit=args.limit, order=args.order
-        )
+        return memory.list(limit=args.limit, cursor=str(args.offset) if args.offset else None, provider="chatgpt.com")
     if args.chatgpt_command == "search":
-        return client.chatgpt.conversations.search(args.query)
+        return memory.search(args.query, provider="chatgpt.com")
     if args.chatgpt_command == "read":
-        conversation = client.chatgpt.conversations.retrieve(args.conversation_id)
-        result: dict[str, Any] = {"conversation": conversation}
-        if not args.no_memory_ingest:
-            try:
-                result["agent_memory"] = AgentMemoryClient().ingest_chatgpt_conversation(
-                    conversation
-                )
-            except Exception as error:
-                result["agent_memory"] = {
-                    "ingested": False,
-                    "error": type(error).__name__,
-                    "message": str(error),
-                }
-        return result
+        return memory.get(args.conversation_id)
     if args.chatgpt_command == "upload":
-        return client.chatgpt.operations.upload_attachments(args.path)
+        return {
+            "accepted": False,
+            "reason": "attachments are staged atomically by chatgpt send; standalone provider uploads are disabled",
+        }
     if args.chatgpt_command == "send":
-        result = client.chatgpt.operations.send(
-            _prompt(args),
+        provider = ProviderCommandClient()
+        queued = provider.send_chatgpt(
+            prompt=_prompt(args),
             conversation_id=args.conversation_id,
             parent_message_id=args.parent_message_id,
             model=args.model,
             effort=args.effort,
-            attachment_paths=args.attach,
-            connector_ids=args.connector,
-            user_message_id=args.user_message_id,
-            readback=not args.no_readback,
-            artifact_directory=args.artifact_dir,
+            attachments=args.attach,
         )
-        if not args.no_memory_ingest:
-            try:
-                result["agent_memory"] = AgentMemoryClient().ingest_chatgpt_turn(result)
-            except Exception as error:
-                result["agent_memory"] = {
-                    "ingested": False,
-                    "error": type(error).__name__,
-                    "message": str(error),
-                }
-        return result
-    if args.chatgpt_command == "collect":
-        turn = client.chatgpt.operations.collect(
-            args.conversation_id,
-            args.user_message_id,
-            artifact_directory=args.artifact_dir,
-        )
-        result = {
-            "conversation_id": args.conversation_id,
-            "user_message_id": args.user_message_id,
-            "turn": turn,
+        if args.no_readback:
+            return queued
+        completed = provider.wait(str(queued["job_id"]))
+        conversation_id = str(completed.get("conversation_id") or "")
+        return {
+            **completed,
+            "conversation": memory.get(conversation_id) if completed.get("ok") and conversation_id else None,
         }
-        try:
-            result["agent_memory"] = AgentMemoryClient().ingest_chatgpt_turn(result)
-        except Exception as error:
-            result["agent_memory"] = {
-                "ingested": False,
-                "error": type(error).__name__,
-                "message": str(error),
-            }
-        return result
+    if args.chatgpt_command == "collect":
+        return memory.get(args.conversation_id)
     raise ValueError(f"Unknown ChatGPT command: {args.chatgpt_command}")
 
 
@@ -167,21 +127,15 @@ def _auth(args: argparse.Namespace) -> Any:
 
 def _transfer(args: argparse.Namespace) -> Any:
     markdown = AgentMemoryClient().render_markdown(args.source_conversation_id)
-    with tempfile.TemporaryDirectory(prefix="b4pt0r-conversation-") as directory:
-        source = Path(directory) / "conversation.md"
-        source.write_text(markdown, encoding="utf-8")
-        followup = _prompt(args).strip()
-        prompt = "First, please read the attached conversation.md in full."
-        if followup:
-            prompt = f"{prompt}\n\n{followup}"
-        return _client().chatgpt.operations.send(
-            prompt,
-            conversation_id=args.destination_conversation_id,
-            model=args.model,
-            effort=args.effort,
-            attachment_paths=[source],
-            artifact_directory=args.artifact_dir,
-        )
+    return ProviderCommandClient().continue_from_memory(
+        source_conversation_id=args.source_conversation_id,
+        prompt=_prompt(args).strip(),
+        destination_provider="chatgpt",
+        destination_conversation_id=args.destination_conversation_id,
+        model=args.model,
+        effort=args.effort,
+        rendered_conversation=markdown,
+    )
 
 
 def parser() -> argparse.ArgumentParser:

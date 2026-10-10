@@ -114,81 +114,42 @@ def provider_reasoning_evidence(job: Mapping[str, Any]) -> tuple[float, int]:
 
 
 def physical_outputs(job: Mapping[str, Any]) -> list[str]:
+    """Recover downloaded products recursively from the immutable result envelope.
+
+    Provider custody runs as ``/home/worker`` while acceptance runs against the
+    same persistent volume as ``/home/evan``.  A custody pathname is therefore
+    translated, never copied, before physical verification.
+    """
     found: list[str] = []
-    for row in list(job.get("artifacts") or []) + list(job.get("effect_evidence") or []):
-        if not isinstance(row, Mapping):
-            continue
-        candidates = [row.get("path")]
-        custody = row.get("custody") if isinstance(row.get("custody"), Mapping) else {}
-        candidates.extend(custody.get("storage_locations") or [])
-        for value in candidates:
-            text = str(value or "")
-            if text.startswith("file:"):
-                text = text[5:]
-            path = Path(text)
-            if path.is_file() and path.stat().st_size >= MIN_ARTIFACT_BYTES:
-                found.append(str(path))
-    return list(dict.fromkeys(found))
-
-
-def memory_admitted(result: Mapping[str, Any]) -> bool:
-    """Use the send-path admission receipt; never issue a provider read here."""
-    pending: list[Mapping[str, Any]] = [result]
     seen: set[int] = set()
-    while pending:
-        row = pending.pop(0)
-        if id(row) in seen:
-            continue
-        seen.add(id(row))
-        central = row.get("central_conversation_store")
-        if isinstance(central, Mapping) and central.get("stored") is True and central.get("central_readback_verified") is True:
-            return True
-        publication = row.get("agent_memory_publication")
-        if isinstance(publication, Mapping) and publication.get("ingested") is True:
-            return True
-        for key in ("provider_receipt", "provider_model_receipt", "model_receipt"):
-            child = row.get(key)
-            if isinstance(child, Mapping):
-                pending.append(child)
-    return False
 
+    def visit(value: Any) -> None:
+        if isinstance(value, Mapping):
+            if id(value) in seen:
+                return
+            seen.add(id(value))
+            for key in ("path", "local_path", "custody_path"):
+                raw = value.get(key)
+                if not isinstance(raw, str) or not raw:
+                    continue
+                candidates = [Path(raw)]
+                prefix = "/home/worker/.local/share/cognilode/"
+                if raw.startswith(prefix):
+                    candidates.append(Path("/home/evan/.local/share/cognilode/") / raw[len(prefix):])
+                for candidate in candidates:
+                    if candidate.is_file() and candidate.stat().st_size >= MIN_ARTIFACT_BYTES:
+                        text = str(candidate.resolve())
+                        if text not in found:
+                            found.append(text)
+                        break
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                visit(child)
 
-def wait_bootstrap_job(client: ProviderCommandClient, provider: str, job_id: str) -> dict[str, Any]:
-    """Wait through queue-authorized retries without losing bootstrap pacing."""
-    last_state = ""
-    while True:
-        value = scheduler_call({"operation": "get_job", "job_id": job_id})
-        job = value.get("job") if isinstance(value.get("job"), Mapping) else {}
-        state = str(job.get("state") or "")
-        if state == "queued" and int(job.get("priority") or 0) < ACCEPTANCE_PRIORITY:
-            scheduler_call({
-                "operation": "promote_job", "job_id": job_id,
-                "priority": ACCEPTANCE_PRIORITY,
-                "parent_operation_id": str(job.get("parent_operation_id") or
-                                             "area1-four-provider-acceptance"),
-            })
-        if state == "queued" and state != last_state:
-            scheduler_call({"operation": "rhythm_fast_forward", "provider": provider, "slots": 1})
-        # Provider collection and downstream application are separate effects.
-        # A valid provider result can remain ``effect_pending`` until its
-        # returned product is accepted; do not deadlock provider acceptance on
-        # the later application effect.  Keep this identical to the unified
-        # client's durable completion rule.
-        conversation_id = client.conversation_id(job)
-        provider_complete = (
-            state in {"complete", "completed", "provider_complete"}
-            or bool(job.get("completed_at") and conversation_id)
-            or bool(state == "effect_pending" and conversation_id)
-        )
-        if provider_complete or state in {"failed", "dead", "cancelled"}:
-            if provider_complete and state == "effect_pending":
-                return {
-                    "ok": True, "job_id": job_id, "state": "completed",
-                    "conversation_id": conversation_id, "job": dict(job),
-                }
-            return client.wait(job_id)
-        last_state = state
-        time.sleep(5)
+    visit(job)
+    return found
 
 
 def source_packet(root: Path) -> Path:
@@ -235,9 +196,17 @@ def prompt_for(provider: str, following: str | None) -> str:
         "toy adapter. Trace and harden queue lease consumption, provider capability publication, authenticated "
         "conversation create/continue, physical upload, terminal detection, returned-file download, exact "
         "conversation/message identity, normalized result envelopes, central memory publication, and ambiguous "
-        "send recovery. Inspect both attached repositories and preserve their ownership boundary. The response "
-        "and ZIP must be substantial enough to exceed what a five-minute GPT-5.6-terra Codex implementation "
-        "turn could produce."
+        "send recovery. Inspect both attached repositories and preserve their ownership boundary. Do not "
+        "invent a standalone adapter module and stop: integrate the provider through the existing public client, "
+        "queue actuator, provider broker, ComputerUseX worker, capability heartbeat, conversation continuation, "
+        "attachment materializer, returned-artifact collector, normalized result admission, and central-memory "
+        "event path. Use sandbox tools for successive source-reading, implementation, and integration-hardening "
+        "passes. The returned package must contain every actually changed production file from both repositories, "
+        "a source-grounded architecture report, an exact apply manifest, and a provider-operation walkthrough. "
+        "If an interface already exists, improve it in place and trace every caller rather than duplicating it. "
+        "The response and ZIP must be substantial enough to exceed what a five-minute GPT-5.6-terra Codex "
+        "implementation turn could produce. Continue substantive inspection and integration work for the entire "
+        "provider interval; never idle, sleep, simulate elapsed time, or use heartbeat calls as proof of work."
     )
 
 

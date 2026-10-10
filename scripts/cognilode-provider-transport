@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import socketserver
+import signal
 import subprocess
 import sys
 import threading
@@ -182,6 +183,23 @@ def supervise(command: list[str]) -> None:
         time.sleep(5)
 
 
+def retire_stale_children() -> None:
+    """End queue/rhythm children orphaned by an immutable source cutover."""
+    names = ("cognilode-chatmode-queue-worker", "cognilode-chatmode-floor-watcher")
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        try:
+            command = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode()
+        except OSError:
+            continue
+        if any(name in command for name in names):
+            try:
+                os.kill(int(entry.name), signal.SIGTERM)
+            except (OSError, ValueError):
+                pass
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--socket", type=Path, required=True)
@@ -190,10 +208,8 @@ def main() -> int:
     args.socket.unlink(missing_ok=True)
     server = Server(str(args.socket), Handler)
     os.chmod(args.socket, 0o660)
+    retire_stale_children()
     programs = [
-        [sys.executable, str(Path(__file__).with_name("cognilode-chatmode-queue-worker")),
-         "--device-id", os.environ.get("COGNILODE_ENVIRONMENT_ID", "company-container"),
-         "--interval", "60"],
         [sys.executable, str(Path(__file__).with_name("cognilode-chatmode-floor-watcher"))],
     ]
     for program in programs:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -130,14 +131,20 @@ def main() -> int:
         raise SystemExit("invalid hosted rhythm provider list")
     status_root = Path(os.environ.get("COGNILODE_RHYTHM_STATUS_ROOT",
                                    str(Path.home() / ".local/share/cognilode/rhythm-status")))
-    threads = []
-    for provider in providers:
-        thread = threading.Thread(target=watch_provider, args=(sender, provider, status_root),
-                                  daemon=False, name="rhythm-" + provider)
-        thread.start()
-        threads.append(thread)
-    for thread in threads:
-        thread.join()
+    status_root.mkdir(parents=True, exist_ok=True)
+    with (status_root / "hosted-floor-watcher.lock").open("a+") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        threads = []
+        for provider in providers:
+            thread = threading.Thread(target=watch_provider, args=(sender, provider, status_root),
+                                      daemon=False, name="rhythm-" + provider)
+            thread.start()
+            threads.append(thread)
+        for thread in threads:
+            thread.join()
     return 0
 
 

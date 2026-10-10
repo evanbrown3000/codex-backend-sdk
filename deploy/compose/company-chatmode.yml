@@ -113,6 +113,12 @@ services:
       COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
       COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
       COGNILODE_GENERATION_MANIFEST_ROOT: /runtime/provider-generations
+      # The generation supervisor must consult the same durable scheduler
+      # ledger as queue workers before exiting an incumbent provider process.
+      # This also source-converges the already-running transport container;
+      # host reconciliation defers its replacement until all effect leases
+      # reach terminal receipt or their real scheduler expiry.
+      COGNILODE_PROVIDER_SCHEDULER_DB: /runtime/provider-scheduler/scheduler.sqlite3
       COMPUTERUSEX_CDP_ENDPOINT: ${COMPUTERUSEX_CDP_ENDPOINT:-http://172.20.0.6:9334}
       AGENT_MEMORY_ENDPOINT: http://127.0.0.1:8098/v1/conversations
       AGENT_MEMORY_INGEST_ENDPOINT: http://127.0.0.1:8098/v1/conversations/ingest

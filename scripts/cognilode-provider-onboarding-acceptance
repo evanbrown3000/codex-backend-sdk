@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import time
 from typing import Any, Mapping
+import zipfile
 
 from codex_backend_sdk.agent_memory import AgentMemoryClient
 from codex_backend_sdk.bridge_provider import ProviderCommandClient
@@ -76,6 +77,19 @@ def response(memory: AgentMemoryClient, conversation_id: str) -> str:
     return memory.render_markdown(conversation_id)
 
 
+def source_packet(root: Path) -> Path:
+    """Give the provider the actual immutable SDK source, not a toy fixture."""
+    source = Path(__file__).resolve().parents[1]
+    target = root / "codex-backend-sdk-current-source.zip"
+    temporary = target.with_suffix(".zip.tmp")
+    with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as bundle:
+        for path in sorted(source.rglob("*")):
+            if path.is_file() and ".git" not in path.parts and "__pycache__" not in path.parts:
+                bundle.write(path, Path("codex-backend-sdk") / path.relative_to(source))
+    temporary.replace(target)
+    return target
+
+
 def prompt_for(provider: str, following: str | None) -> str:
     if following:
         objective = (
@@ -112,7 +126,7 @@ def main() -> int:
     }
     proof.setdefault("rejected_attempts", [])
     completed = {row["provider"]: row for row in proof["providers"]}
-    inherited = [str(seed)]
+    inherited = [str(seed), str(source_packet(root))]
     for row in proof["providers"]:
         inherited.extend(path for path in row.get("artifacts") or [] if Path(path).is_file())
     client = ProviderCommandClient(timeout=24 * 3600, poll_interval=10)
@@ -125,6 +139,9 @@ def main() -> int:
             prior = [row for row in proof["rejected_attempts"] if row.get("provider") == provider]
             attempt = len(prior) + 1
             authored = prompt_for(provider, following) + (
+                " Do the implementation in your own native sandbox. Extract and inspect the actual attached "
+                "repository source; do not offload coding to a remote environment. Continue recovering missing "
+                "context from the attached source rather than returning an audit or asking questions. "
                 " Perform no fewer than three implementation passes: source and interface analysis, "
                 "complete implementation, then integration hardening and physical artifact verification. "
                 "Do not submit the terminal answer until at least 300 seconds have elapsed since provider-side "

@@ -56,6 +56,20 @@ def _input_text(params: Mapping[str, Any]) -> str:
     return "\n".join(values).strip()
 
 
+def _input_paths(params: Mapping[str, Any]) -> list[str]:
+    paths: list[str] = []
+    inputs = params.get("input")
+    if not isinstance(inputs, list):
+        return paths
+    for item in inputs:
+        if not isinstance(item, Mapping) or item.get("type") == "text":
+            continue
+        value = item.get("path") or item.get("filePath") or item.get("file_path")
+        if isinstance(value, str) and value and value not in paths:
+            paths.append(value)
+    return paths
+
+
 def _message_text(message: Mapping[str, Any]) -> str:
     for key in ("text", "markdown", "content"):
         value = message.get(key)
@@ -412,6 +426,7 @@ class Bridge:
             model = params.get("model") or source.get("model")
             effort = params.get("effort") or params.get("reasoningEffort") or source.get("reasoning_effort")
             requested_provider = str(params.get("provider") or provider)
+            input_paths = _input_paths(params)
             provider_kind = provider.rstrip("/").removesuffix(".com")
             requested_provider_kind = requested_provider.rstrip("/").removesuffix(".com")
             if provider_kind == "chatgpt" and provider_conversation_id and requested_provider_kind == "chatgpt":
@@ -421,8 +436,10 @@ class Bridge:
                     parent_message_id=source.get("parent_message_id"),
                     model=str(model) if model else None,
                     effort=str(effort) if effort else None,
+                    attachments=input_paths,
                 )
             else:
+                rendered = self.memory.render_markdown(conversation_id)
                 result = self.provider.continue_from_memory(
                     source_conversation_id=conversation_id,
                     prompt=prompt,
@@ -431,6 +448,8 @@ class Bridge:
                     environment_id=self._selected_environment,
                     model=str(model) if model else None,
                     effort=str(effort) if effort else None,
+                    rendered_conversation=rendered,
+                    attachments=input_paths,
                 )
             collected = self._collected_turn(result) if result.get("queued") else dict(result)
             assistant_item, artifacts = self._turn_result_items(collected)

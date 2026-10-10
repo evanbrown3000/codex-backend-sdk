@@ -21,7 +21,11 @@ def _require_central_http_gate(method: str, url: str) -> None:
 
     if not os.environ.get("COGNILODE_HTTP_GATE_SOCKET"):
         return
-    from control_exec.http_gate_client import require
+    try:
+        from cognilode_http_gate import require
+    except ImportError:
+        # Compatibility with older custody-runtime generations.
+        from control_exec.http_gate_client import require
 
     require(method, url)
 

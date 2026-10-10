@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import os
 import json
+import hashlib
+from pathlib import Path
+import shutil
 import subprocess
 import time
 from typing import Any, Mapping, Sequence
@@ -21,6 +24,14 @@ from .operator_auth import operator_token
 
 
 TERMINAL_STATES = {"completed", "failed", "cancelled", "held", "dead_letter"}
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 class ProviderCommandClient:
@@ -112,6 +123,49 @@ class ProviderCommandClient:
         job_id = str(value.get("id") or job.get("id") or request["request_id"])
         return {**value, "job_id": job_id, "queued": True}
 
+    def stage_file(self, source: str | Path) -> dict[str, Any]:
+        path = Path(source).expanduser().resolve()
+        if not path.is_file():
+            raise RuntimeError(f"provider input attachment is unavailable: {path}")
+        digest = _sha256_file(path)
+        host_root = Path(os.environ.get(
+            "COGNILODE_QUEUE_ATTACHMENT_ROOT",
+            str(Path.home() / ".local/share/cognilode/company-runtime/shared/queue-inputs"),
+        )).expanduser()
+        runtime_root = os.environ.get(
+            "COGNILODE_QUEUE_ATTACHMENT_RUNTIME_ROOT", "/runtime/queue-inputs"
+        ).rstrip("/")
+        target_dir = host_root / digest
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / path.name
+        if not target.is_file() or _sha256_file(target) != digest:
+            temporary = target.with_suffix(target.suffix + ".part")
+            shutil.copyfile(path, temporary)
+            os.replace(temporary, target)
+        return {
+            "ref": f"file:{runtime_root}/{digest}/{path.name}",
+            "sha256": digest,
+            "name": path.name,
+        }
+
+    def stage_text(self, text: str, name: str = "conversation.md") -> dict[str, Any]:
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        host_root = Path(os.environ.get(
+            "COGNILODE_QUEUE_ATTACHMENT_ROOT",
+            str(Path.home() / ".local/share/cognilode/company-runtime/shared/queue-inputs"),
+        )).expanduser()
+        runtime_root = os.environ.get(
+            "COGNILODE_QUEUE_ATTACHMENT_RUNTIME_ROOT", "/runtime/queue-inputs"
+        ).rstrip("/")
+        target_dir = host_root / digest
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / name
+        if not target.is_file() or target.read_text(encoding="utf-8") != text:
+            temporary = target.with_suffix(target.suffix + ".part")
+            temporary.write_text(text, encoding="utf-8")
+            os.replace(temporary, target)
+        return {"ref": f"file:{runtime_root}/{digest}/{name}", "sha256": digest, "name": name}
+
     def wait(self, job_id: str) -> dict[str, Any]:
         deadline = time.monotonic() + self.timeout
         last: dict[str, Any] = {"job_id": job_id, "state": "queued"}
@@ -161,6 +215,7 @@ class ProviderCommandClient:
         parent_message_id: str | None = None,
         model: str | None = None,
         effort: str | None = None,
+        attachments: Sequence[str] = (),
     ) -> dict[str, Any]:
         return self._enqueue({
             "provider": "chatgpt.com",
@@ -169,6 +224,7 @@ class ProviderCommandClient:
             "prompt": prompt,
             "model": model,
             "reasoning_effort": effort,
+            "attachment_refs": [self.stage_file(path) for path in attachments],
         })
 
     def continue_from_memory(
@@ -181,9 +237,15 @@ class ProviderCommandClient:
         environment_id: str | None = None,
         model: str | None = None,
         effort: str | None = None,
+        rendered_conversation: str | None = None,
+        attachments: Sequence[str] = (),
     ) -> dict[str, Any]:
         kind = destination_provider.rstrip("/").removesuffix(".com")
         provider = "chatgpt.com" if kind == "chatgpt" else "codex.research"
+        refs = [self.stage_file(path) for path in attachments]
+        if rendered_conversation:
+            refs.insert(0, self.stage_text(rendered_conversation))
+            prompt = "First, please read the attached conversation.md in full, then continue from that conversation.\n\n" + prompt
         return self._enqueue({
             "provider": provider,
             "conversation_id": destination_conversation_id,
@@ -193,4 +255,5 @@ class ProviderCommandClient:
             "model": model,
             "reasoning_effort": effort,
             "context_delivery": "central_normalized_conversation",
+            "attachment_refs": refs,
         })

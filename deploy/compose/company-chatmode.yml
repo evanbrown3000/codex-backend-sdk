@@ -104,7 +104,7 @@ services:
         # Chrome in uninterruptible volume I/O long enough to miss queue slots.
         for item in 'Local State' Default/Cookies Default/Cookies-journal \
           Default/Network Default/'Local Storage' Default/'Session Storage' \
-          Default/IndexedDB Default/Preferences Default/'Secure Preferences' \
+          Default/Preferences Default/'Secure Preferences' \
           Default/'Web Data' Default/'Web Data-journal'; do
           if test -e "$$durable/$$item"; then
             mkdir -p "$$profile/$$(dirname "$$item")"
@@ -123,7 +123,7 @@ services:
         persist() {
           for item in 'Local State' Default/Cookies Default/Cookies-journal \
             Default/Network Default/'Local Storage' Default/'Session Storage' \
-            Default/IndexedDB Default/Preferences Default/'Secure Preferences' \
+            Default/Preferences Default/'Secure Preferences' \
             Default/'Web Data' Default/'Web Data-journal'; do
             if test -e "$$profile/$$item"; then
               mkdir -p "$$durable/$$(dirname "$$item")"

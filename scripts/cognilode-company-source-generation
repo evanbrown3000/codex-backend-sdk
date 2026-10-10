@@ -30,7 +30,10 @@ def content_generation(current: Path) -> tuple[Path, str] | None:
     digest = hashlib.sha256()
     sources = [selected]
     package = selected.parent.parent / "codex_backend_sdk"
-    if package.is_dir():
+    # Provider transport imports the synchronized SDK package into its
+    # credential runtime.  The HTTP gate is self-contained; coupling it to all
+    # SDK module changes would create needless admission-socket outages.
+    if selected.name == "cognilode-provider-transport" and package.is_dir():
         sources.extend(sorted(package.rglob("*.py")))
     for source in sources:
         digest.update(str(source.relative_to(selected.parent.parent)).encode())

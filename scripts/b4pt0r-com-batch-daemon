@@ -191,14 +191,13 @@ def main() -> int:
         thread = threading.Thread(
             target=supervise,
             args=(actuator, extra_environment),
-            # During a generation handoff the supervised actuator receives
-            # TERM and enters its own cooperative drain.  It is a separate
-            # process and must be allowed to finish an admitted provider turn
-            # after this supervisor releases the singleton lock.  Non-daemon
-            # threads pinned the old batch process (and therefore the lock)
-            # for the entire turn, preventing the successor generation from
-            # serving every other independent provider queue.
-            daemon=True,
+            # The batch generation retains ownership of every actuator until
+            # its admitted mutation drains.  Orphaning these children during
+            # a source change allowed the successor generation to start a
+            # second consumer for the same provider/account and disconnected
+            # live transport sockets. Providers are still independent within
+            # this generation; only the atomic generation handoff waits.
+            daemon=False,
         )
         SUPERVISORS.append(thread)
         thread.start()
@@ -209,13 +208,11 @@ def main() -> int:
     # the provider queue workers supervised above.
     while not STOP:
         time.sleep(5)
-    # Give every supervisor an opportunity to signal its child into drain,
-    # then release the batch lock.  Active actuator processes remain alive as
-    # orphans until their already-fenced turns reach terminal state; the new
-    # generation can immediately claim unrelated work without interrupting
-    # them or duplicating their scheduler fences.
+    # Retain the singleton lock and generation process until every provider
+    # actuator has completed its cooperative drain.  This makes generation
+    # ownership atomic and prevents duplicate consumers after an upgrade.
     for thread in SUPERVISORS:
-        thread.join(timeout=2.0)
+        thread.join()
     return 0
 
 

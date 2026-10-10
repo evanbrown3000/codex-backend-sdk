@@ -41,6 +41,16 @@ def fence(job: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def local_attachment(row: object) -> str:
+    # Shared file custody must remain usable while the immutable environment
+    # catches up with a newer source generation. Resolve this hot path without
+    # importing a module that may not exist in the incumbent wheel.
+    value = row if isinstance(row, Mapping) else {"ref": row}
+    ref = value.get("ref") or value.get("path") or ""
+    if isinstance(ref, str):
+        local = ref.removeprefix("file:") if ref.startswith("file:") else ref
+        candidate = Path(local).expanduser()
+        if candidate.is_file():
+            return str(candidate)
     from codex_backend_sdk.attachment_custody import materialize_attachment
     return materialize_attachment(row)
 

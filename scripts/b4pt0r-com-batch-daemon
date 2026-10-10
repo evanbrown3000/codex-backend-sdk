@@ -125,7 +125,13 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
         value.strip().casefold()
         for value in os.environ.get(
             "COGNILODE_HOSTED_RHYTHM_PROVIDERS",
-            "chatgpt.com,gemini.com,claude.com,anthropic.com",
+            # Provider onboarding is deliberately causal.  ChatGPT.com is the
+            # bootstrap actuator; later providers are enabled explicitly only
+            # after the preceding adapter has produced a terminal, centrally
+            # admitted acceptance turn.  Starting every browser worker on a
+            # cold boot both violated that ordering and exhausted the custody
+            # container's PID budget before ChatGPT could prove the substrate.
+            "chatgpt.com",
         ).split(",")
         if value.strip()
     }

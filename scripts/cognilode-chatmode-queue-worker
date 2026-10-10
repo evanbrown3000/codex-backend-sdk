@@ -3,7 +3,8 @@
 
 The hosted D1 queue owns priority, dependency readiness, and slot claims. This
 worker owns only the authenticated provider send and its fenced completion.
-An ambiguous send is never replayed; the exact receipt is recovered instead.
+An incomplete streamed send is retried by the same fenced queue operation.  It
+never starts a provider-observation loop and never escapes the single queue.
 """
 from __future__ import annotations
 
@@ -1704,6 +1705,12 @@ def recover(job: dict, device_id: str = DEVICE_ID) -> None:
                                      "job_id": job["id"], "rpe_validation_checks": checks})
             event("terminal_rpe_validation_hold", job_id=job["id"], checks=checks)
         return
+    if (job.get("migrated_from") == "cloudflare-kv-agent-memory-prompt-job"
+            and job.get("migration_hold_reason") == "legacy_job_may_have_started_provider_effect"):
+        event("legacy_unknown_effect_held_without_provider_observation", job_id=job["id"])
+        return
+    resend_pending(job, device_id)
+    return
     state_path = job_state_path(job["id"])
     try:
         prior_state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
@@ -1955,9 +1962,13 @@ def stable_user_message_id(job_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, "cognilode-chatmode-queue:" + job_id))
 
 
-def sender_command(job: dict, prompt_path: Path, attachments: list[Path]) -> list[str]:
+def sender_command(job: dict, prompt_path: Path, attachments: list[Path],
+                   provider_attempt: int = 0) -> list[str]:
+    provider_job_id = str(job["id"])
+    if provider_attempt:
+        provider_job_id += ":provider-attempt:" + str(provider_attempt)
     command = sender_prefix() + ["send", "--prompt-file", str(prompt_path),
-               "--queue-job-id", str(job["id"]),
+               "--queue-job-id", provider_job_id,
                "--model", str(job.get("requested_model") or job.get("model") or "gpt-5-6-thinking"),
                "--effort", str(job.get("reasoning_effort") or "xhigh"),
                "--timeout", "1800"]
@@ -1977,6 +1988,66 @@ def sender_command(job: dict, prompt_path: Path, attachments: list[Path]) -> lis
     return command
 
 
+def resend_pending(job: dict, device_id: str) -> None:
+    """Repeat an unconfirmed streamed mutation under the existing queue fence.
+
+    The user-message and central transport identities advance per attempt so a
+    provider can accept a fresh turn.  No conversation index, conversation GET,
+    browser observation, or collector request occurs on this path.
+    """
+    job_id = str(job["id"])
+    prompt = str(job.get("prompt") or "")
+    if not prompt.strip() or hashlib.sha256(prompt.encode()).hexdigest() != job.get("prompt_sha256"):
+        event("pending_resend_prompt_mismatch", job_id=job_id)
+        return
+    state_path = job_state_path(job_id)
+    try:
+        prior = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
+    except (OSError, ValueError):
+        prior = {}
+    attempt = max(1, int(prior.get("provider_attempt") or 0) + 1)
+    prompt_path = ROOT / "prompts" / (hashlib.sha256(job_id.encode()).hexdigest() + ".txt")
+    prompt_path.parent.mkdir(parents=True, exist_ok=True)
+    prompt_path.write_text(prompt, encoding="utf-8")
+    try:
+        attachments = attachment_paths(job)
+        command = sender_command(job, prompt_path, attachments, attempt)
+        send_env = dict(os.environ)
+        send_env["COGNILODE_CHATMODE_SEND_FENCE"] = json.dumps({**fence(job), "device_id": device_id})
+        atomic_json(state_path, {**prior, "state": "provider_resend_running", "job_id": job_id,
+                                 "provider_attempt": attempt})
+        response = subprocess.run(command, text=True, capture_output=True,
+                                  timeout=2100, check=False, env=send_env)
+        value = json.loads(response.stdout) if response.stdout.strip().startswith("{") else {}
+        if value:
+            try:
+                record_send_receipt(job, value, device_id)
+            except Exception as exc:
+                event("resend_receipt_record_failed", job_id=job_id,
+                      error=type(exc).__name__ + ":" + str(exc)[:180])
+        if value and complete_from_result(job, value):
+            return
+        if value and requeue_definitive_rejection(job, value):
+            return
+        atomic_json(state_path, {**prior, "state": "provider_resend_required", "job_id": job_id,
+                                 "provider_attempt": attempt,
+                                 "sender_exit": response.returncode,
+                                 "sender_state": value.get("state")})
+        event("provider_resend_required", job_id=job_id, provider_attempt=attempt,
+              sender_exit=response.returncode, sender_state=value.get("state"))
+    except subprocess.TimeoutExpired:
+        atomic_json(state_path, {**prior, "state": "provider_resend_required", "job_id": job_id,
+                                 "provider_attempt": attempt, "sender_state": "stream_timeout"})
+        event("provider_resend_required", job_id=job_id, provider_attempt=attempt,
+              sender_state="stream_timeout")
+    except Exception as exc:
+        atomic_json(state_path, {**prior, "state": "provider_resend_required", "job_id": job_id,
+                                 "provider_attempt": attempt,
+                                 "sender_state": type(exc).__name__})
+        event("provider_resend_required", job_id=job_id, provider_attempt=attempt,
+              sender_state=type(exc).__name__)
+
+
 def send_custody(job: dict) -> dict:
     return sender.operator_memory_post({"operation": "get_chatmode_send_custody", "job_id": job["id"]})
 
@@ -1988,7 +2059,8 @@ def record_send_intent(job: dict, device_id: str) -> dict:
 
 def record_send_receipt(job: dict, value: dict, device_id: str) -> None:
     sender.operator_memory_post({"operation": "record_chatmode_provider_receipt", **fence(job),
-        "device_id": device_id, "user_message_id": stable_user_message_id(str(job["id"])),
+        "device_id": device_id,
+        "user_message_id": str(value.get("user_message_id") or stable_user_message_id(str(job["id"]))),
         "conversation_id": value.get("conversation_id"),
         "terminal_assistant_message_id": value.get("terminal_assistant_message_id"),
         "provider_acceptance_observed": bool(value.get("provider_acceptance_observed") or value.get("conversation_id"))})
@@ -2143,16 +2215,16 @@ def execute(job: dict, device_id: str = DEVICE_ID) -> None:
             return
         if requeue_prepost_failure(job, device_id, value, response.stderr):
             return
-        provider_delay = max(0.0, float(value.get("retry_after_seconds") or 0))
-        atomic_json(job_state_path(job_id), {"state": "reconcile_required", "job_id": job_id,
-                                            "reconcile_next_at": time.time() + provider_delay,
+        atomic_json(job_state_path(job_id), {"state": "provider_resend_required", "job_id": job_id,
+                                            "provider_attempt": 0,
                                             "sender_exit": response.returncode,
                                             "sender_state": value.get("state"),
                                             "receipt": str(receipt)})
-        event("send_reconcile_required", job_id=job_id, sender_exit=response.returncode,
-              sender_state=value.get("state"))
+        event("provider_resend_required", job_id=job_id, provider_attempt=0,
+              sender_exit=response.returncode, sender_state=value.get("state"))
     except Exception as exc:
-        event("job_error_reconcile_required", job_id=job_id, error=type(exc).__name__ + ":" + str(exc)[:250])
+        event("job_error_resend_required", job_id=job_id,
+              error=type(exc).__name__ + ":" + str(exc)[:250])
 
 
 def health_ready() -> bool:

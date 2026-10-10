@@ -170,6 +170,43 @@ def save_service_hashes(path: Path, hashes: dict[str, str]) -> None:
     temporary.replace(path)
 
 
+def prepare_volume_ownership(project: str, image: str, uid: int, gid: int,
+                             runtime: Path, names: tuple[str, ...]) -> None:
+    """Do expensive custody preparation once per named volume, including upgrades."""
+    marker = runtime / "shared/container-volume-ownership.json"
+    applied_compose = runtime / "shared/compose-config-applied.sha256"
+    try:
+        prior = json.loads(marker.read_text(encoding="utf-8"))
+        owned = set(prior.get("volumes", ())) if (prior.get("schema") ==
+                    "cognilode.container-volume-ownership.v1" and
+                    prior.get("project") == project and prior.get("uid") == uid and
+                    prior.get("gid") == gid) else set()
+    except (OSError, ValueError, TypeError, AttributeError):
+        # The applied Compose marker was written only after the historical
+        # bootstrap had already prepared these established custody volumes.
+        owned = set(names) if applied_compose.is_file() else set()
+
+    def save() -> None:
+        temporary = marker.with_suffix(".tmp")
+        temporary.write_text(json.dumps({
+            "schema": "cognilode.container-volume-ownership.v1",
+            "project": project, "uid": uid, "gid": gid,
+            "volumes": sorted(owned)}, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(marker)
+
+    for name in names:
+        if name in owned:
+            continue
+        subprocess.run(["docker", "run", "--rm", "--user", "0",
+                        "--volume", f"{project}_{name}:/custody", image,
+                        "chown", "-R", f"{uid}:{gid}", "/custody"],
+                       stdout=subprocess.DEVNULL, check=True, timeout=180)
+        owned.add(name)
+        save()
+    if not marker.is_file():
+        save()
+
+
 def release_stalled_chatmode_replacement(project: str, runtime: Path) -> bool:
     """Bound an old Chatmode PID1 drain after Compose has made its replacement.
 
@@ -411,20 +448,14 @@ def main() -> int:
     if portable_aws:
         prepare_portable_aws(project, image, os.getuid(), os.getgid())
     migrate_container_browser(project, image)
-    for name in ("company_auth", "company_operator", "company_deploy_custody",
-                 "memory_data", "memory_drive_auth", "company_relay_custody"):
+    volume_names = ("company_auth", "company_operator", "company_deploy_custody",
+                    "memory_data", "memory_drive_auth", "company_relay_custody")
+    for name in volume_names:
         subprocess.run(["docker", "volume", "create", f"{project}_{name}"],
                        stdout=subprocess.DEVNULL, check=True, timeout=30)
-    subprocess.run(["docker", "run", "--rm", "--user", "0",
-                    "--volume", f"{project}_company_auth:/auth",
-                    "--volume", f"{project}_company_operator:/operator",
-                    "--volume", f"{project}_company_deploy_custody:/deploy",
-                    "--volume", f"{project}_memory_drive_auth:/memory-auth",
-                    "--volume", f"{project}_company_relay_custody:/relay",
-                    image,
-                    "chown", "-R", f"{os.getuid()}:{os.getgid()}",
-                    "/auth", "/operator", "/deploy", "/memory-auth", "/relay"],
-                   stdout=subprocess.DEVNULL, check=True, timeout=60)
+    custody_volumes = tuple(name for name in volume_names if name != "memory_data")
+    prepare_volume_ownership(project, image, os.getuid(), os.getgid(), runtime,
+                             custody_volumes)
     command = ["docker", "compose", "--project-name", project, "-f", str(COMPOSE), "up", "-d"]
     try:
         subprocess.run(command, env=env, check=True, timeout=180)

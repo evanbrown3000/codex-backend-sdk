@@ -56,12 +56,20 @@ def reap_orphaned_publications() -> None:
             argv = (entry / 'cmdline').read_bytes().decode(errors='replace').split('\0')
         except (OSError, ValueError, IndexError):
             continue
-        if (ppid != 1 or pgid != 1 or state == 'Z' or len(argv) < 4 or
+        if (ppid != 1 or pgid != 1 or len(argv) < 4 or
                 not any(arg.endswith('/aws') for arg in argv[:3]) or 's3api' not in argv or
                 'put-object' not in argv or BUCKET not in argv or
                 not any(arg.startswith('codex-releases/') for arg in argv)):
             continue
         pid = int(entry.name)
+        if state == 'Z':
+            # These are abandoned grandchildren from pre-fix Popen calls;
+            # they are now adopted by PID 1 and can be reaped explicitly.
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                pass
+            continue
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:

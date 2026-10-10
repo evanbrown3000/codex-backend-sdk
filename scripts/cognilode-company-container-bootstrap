@@ -409,6 +409,41 @@ def reconcile_host_managed_codex(project: str, runtime: Path) -> None:
         return
     root = Path(os.environ.get("MODIFIED_CODEX_INSTALL_ROOT",
                               str(Path.home() / ".local/share/cognilode/modified-codex")))
+    # Managed control is a versioned SDK runtime dependency, independent of
+    # the immutable Rust CLI package. The SDK checkout is source-converged by
+    # the same host supervisor; do not rely on a mutable venv bin directory.
+    sdk_link = runtime / "shared/source/current/codex-backend-sdk"
+    try:
+        sdk_source = sdk_link.resolve(strict=True)
+        sdk_revision = sdk_source.name
+        if (len(sdk_revision) != 40 or
+                not all(ch in "0123456789abcdef" for ch in sdk_revision) or
+                not (sdk_source / "codex_backend_sdk/cli.py").is_file()):
+            return
+    except OSError:
+        return
+    control_dir = root / "runtime-dependencies" / f"codex-backend-sdk-{sdk_revision}"
+    control_dir.mkdir(parents=True, exist_ok=True)
+    control = control_dir / "managed-codex"
+    control_source = f'''#!/bin/sh
+set -eu
+sdk_root={str(sdk_link)!r}
+python=${{COGNILODE_PYTHON:-/usr/bin/python3}}
+case "${{1:-}}" in
+  conversations) shift; sub=${{1:-}}; [ "$#" -gt 0 ] && shift || true
+    case "$sub" in list|search|read) exec env PYTHONPATH="$sdk_root${{PYTHONPATH:+:$PYTHONPATH}}" "$python" -c 'from codex_backend_sdk.cli import main; main()' prompt "$sub" "$@";; esac ;;
+  environments) shift; sub=${{1:-}}; [ "$#" -gt 0 ] && shift || true
+    case "$sub" in list|current|select|exec|write) exec env PYTHONPATH="$sdk_root${{PYTHONPATH:+:$PYTHONPATH}}" "$python" -c 'from codex_backend_sdk.cli import main; main()' remote "$sub" "$@";; esac ;;
+  memory) shift; exec env PYTHONPATH="$sdk_root${{PYTHONPATH:+:$PYTHONPATH}}" "$python" -c 'from codex_backend_sdk.cli import main; main()' memory "$@";;
+esac
+echo 'Usage: managed-codex {{conversations|environments|memory}} ...' >&2
+exit 2
+'''
+    if not control.is_file() or control.read_text(encoding="utf-8") != control_source:
+        control_tmp = control.with_suffix(".next")
+        control_tmp.write_text(control_source, encoding="utf-8")
+        control_tmp.chmod(0o755)
+        control_tmp.replace(control)
     release = root / "releases" / release_pin
     if not release.is_dir():
         releases = root / "releases"
@@ -459,7 +494,7 @@ def reconcile_host_managed_codex(project: str, runtime: Path) -> None:
     links = {"codex-bin": expected + "codex", "codex": expected + "launcher",
              "codex-code-mode-host": expected + "codex-code-mode-host",
              "central-rollouts": expected + "central-rollouts",
-             "managed-codex": expected + "managed-codex"}
+             "managed-codex": str(control)}
     (root / "bin").mkdir(parents=True, exist_ok=True)
     for name, target in links.items():
         temp_link = root / "bin" / ("." + name + ".next")
@@ -486,6 +521,7 @@ def reconcile_host_managed_codex(project: str, runtime: Path) -> None:
              "installed_at": time.time(), "kind": "managed_codex_runtime_installation",
              "target": "linux-x86_64", "entrypoints": ["codex", "managed-codex"],
              "active_release": str((root / "active").resolve()),
+             "managed_control_dependency": f"codex-backend-sdk-{sdk_revision}",
              "codex_version": version.stdout.strip()}
     runtime_event = {
         "schema": "cognilode.runtime_generation.v1",

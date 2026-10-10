@@ -213,7 +213,7 @@ services:
     network_mode: bridge
     user: "0:0"
     working_dir: /company/codex-backend-sdk
-    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-company-codex-builder]
+    entrypoint: [python3, /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-codex-builder]
     environment:
       HOME: /root
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source

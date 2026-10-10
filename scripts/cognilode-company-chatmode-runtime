@@ -37,7 +37,11 @@ def active_source() -> Path:
 def release_for(source: Path) -> tuple[Path, Path]:
     """Build one immutable CLI environment for a synchronized SDK revision."""
     release_root = Path(os.environ.get(
-        "COGNILODE_B4PT0R_RELEASE_ROOT", "/runtime/b4pt0r-releases"
+        # Keep the lock-aware immutable releases in their own generation.
+        # Bootstrap containers may still be draining a pre-lock supervisor
+        # against the legacy root; sharing paths with those processes lets an
+        # old supervisor remove a newly completed environment.
+        "COGNILODE_B4PT0R_RELEASE_ROOT", "/runtime/b4pt0r-releases/locked-v2"
     ))
     release = release_root / source.name
     cli = release / "bin" / "b4pt0r"

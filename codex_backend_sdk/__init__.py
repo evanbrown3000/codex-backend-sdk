@@ -5,7 +5,7 @@ The package intentionally exposes existing execution surfaces without creating
 parallel provider, transport, or memory authorities.
 """
 
-__version__ = "0.9.0"
+__version__ = "0.9.3"
 
 from .agent_memory import AgentMemoryClient
 from .remote_shell import RemoteShellClient

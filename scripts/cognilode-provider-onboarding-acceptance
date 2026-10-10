@@ -22,7 +22,7 @@ import zipfile
 from codex_backend_sdk.bridge_provider import ProviderCommandClient
 from codex_backend_sdk.provider_scheduler_client import scheduler_call
 
-PROVIDERS = ("chatgpt.com", "gemini.com", "claude.com", "anthropic.com")
+PROVIDERS = ("chatgpt.com", "gemini.com", "anthropic.com", "claude.com")
 MIN_PROVIDER_SECONDS = 300.0
 MIN_RESPONSE_CHARS = 1200
 MIN_ARTIFACT_BYTES = 4096

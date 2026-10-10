@@ -444,6 +444,10 @@ class ComputerUseXProviderAdapter:
             })
             conversation_id = str(forked.get("conversation_id") or "") or None
         if browser_turn:
+            # Gemini/Anthropic/Claude use the direct provider runtime. Importing
+            # ComputerUseX's ChatGPT-only package guards here can invoke the
+            # legacy Modified Codex repair path before the native browser turn.
+            os.environ["COMPUTERUSEX_SKIP_IMPORT_GUARDS"] = "1"
             source = Path(os.environ.get(
                 "COMPUTERUSEX_SOURCE", "/runtime/source/current/automation-computeruse-vision/src"
             ))

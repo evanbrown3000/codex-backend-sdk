@@ -70,13 +70,31 @@ def release_for(source: Path) -> tuple[Path, Path]:
     return source / "scripts" / "b4pt0r-com-batch-daemon", release / "bin" / "b4pt0r"
 
 
-def launch(source: Path) -> subprocess.Popen:
-    runner, cli = release_for(source)
+def launch_prepared(runner: Path, cli: Path) -> subprocess.Popen:
     environment = os.environ.copy()
     environment["B4PT0R_CLI"] = str(cli)
     return subprocess.Popen(
         [sys.executable, str(runner)], env=environment, start_new_session=True
     )
+
+
+def launch(source: Path) -> subprocess.Popen:
+    return launch_prepared(*release_for(source))
+
+
+def prepare_frontier() -> tuple[Path, Path, Path]:
+    """Build toward the moving source frontier without stopping provider work.
+
+    Several agents may publish close together.  Intermediate revisions remain
+    valid immutable history, but custody must not drain and restart once per
+    commit.  Keep the incumbent worker live while releases build and only
+    return when the prepared revision is still the current frontier.
+    """
+    while True:
+        candidate = active_source()
+        runner, cli = release_for(candidate)
+        if active_source() == candidate:
+            return candidate, runner, cli
 
 
 def drain(process: subprocess.Popen) -> None:
@@ -98,18 +116,19 @@ def drain(process: subprocess.Popen) -> None:
 def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    source = active_source()
-    process = launch(source)
+    source, runner, cli = prepare_frontier()
+    process = launch_prepared(runner, cli)
     while not STOP:
         if process.poll() is not None:
-            source = active_source()
-            process = launch(source)
+            source, runner, cli = prepare_frontier()
+            process = launch_prepared(runner, cli)
         else:
             candidate = active_source()
             if candidate != source:
+                candidate, runner, cli = prepare_frontier()
                 drain(process)
                 source = candidate
-                process = launch(source)
+                process = launch_prepared(runner, cli)
         time.sleep(2)
     if process.poll() is None:
         drain(process)

@@ -22,8 +22,8 @@ import time
 STOP = False
 
 
-def service_python() -> Path:
-    """Return the newest complete immutable SDK interpreter.
+def service_python(source: Path) -> Path | None:
+    """Return the immutable interpreter built from exactly ``source``.
 
     The generation supervisor is deliberately bootstrapped by the container's
     system Python, but SDK services import packaged dependencies (requests,
@@ -47,13 +47,20 @@ def service_python() -> Path:
             path for path in configured.parent.iterdir()
             if path.is_dir() and path != configured
         )
-    candidates: list[tuple[int, Path]] = []
+    repository = source.parent.parent
+    try:
+        revision = subprocess.check_output(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            text=True, timeout=15,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        revision = repository.name
     for root in roots:
-        for marker in root.glob("*/.complete"):
-            interpreter = marker.parent / "bin" / "python"
-            if interpreter.is_file():
-                candidates.append((marker.stat().st_mtime_ns, interpreter))
-    return max(candidates, default=(0, Path(sys.executable)))[1]
+        release = root / revision
+        interpreter = release / "bin/python"
+        if interpreter.is_file() and (release / ".complete").is_file():
+            return interpreter
+    return None
 
 
 def content_generation(current: Path) -> tuple[Path, str] | None:
@@ -122,12 +129,21 @@ def main() -> int:
             time.sleep(5)
             continue
         selected, signature = generation
+        interpreter = service_python(selected)
+        if interpreter is None:
+            print(f"SDK service {options.script} waiting for matching immutable release", flush=True)
+            time.sleep(2)
+            continue
         print(f"SDK service {options.script} source generation {selected}", flush=True)
-        child = subprocess.Popen([str(service_python()), str(selected), *child_args],
+        child = subprocess.Popen([str(interpreter), str(selected), *child_args],
                                  env=os.environ.copy())
         while child.poll() is None and not STOP:
             active_generation = content_generation(current)
-            if active_generation is None or active_generation[1] != signature:
+            if active_generation is None:
+                time.sleep(2)
+                continue
+            if (active_generation[1] != signature
+                    and service_python(active_generation[0]) is not None):
                 break
             time.sleep(2)
         if child.poll() is None:

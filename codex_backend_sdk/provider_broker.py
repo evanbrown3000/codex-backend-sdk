@@ -71,12 +71,13 @@ def _lease_authority() -> ProviderLeaseAuthority:
         descriptor = [
             {
                 "provider": "chatgpt.com",
-                "account_id": os.environ.get("B4PT0R_CHATGPT_ACCOUNT_ID", "primary"),
+                "account_id": os.environ.get("B4PT0R_CHATGPT_ACCOUNT_ID", "central-custody"),
                 "custody_ref": "runtime:codex-home",
                 "capabilities": {
                     "attachments": True, "artifact_downloads": True,
-                    "continuation": True, "models": ["gpt-5-6-thinking"],
-                    "reasoning_modes": ["medium", "high", "xhigh"],
+                    "continuation": True,
+                    "models": ["gpt-5-6-thinking", "gpt-5.6", "gpt-5.6-sol", "auto"],
+                    "reasoning_modes": ["medium", "high", "xhigh", "max", "extended"],
                 },
             },
         ] + [

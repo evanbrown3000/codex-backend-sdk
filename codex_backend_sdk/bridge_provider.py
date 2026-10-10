@@ -24,7 +24,7 @@ from .operator_auth import operator_token
 from .provider_scheduler_client import scheduler_available, scheduler_call
 
 
-TERMINAL_STATES = {"complete", "completed", "provider_complete", "failed", "cancelled", "held", "dead_letter"}
+TERMINAL_STATES = {"complete", "completed", "provider_complete", "rejected", "provider_rejected", "failed", "cancelled", "held", "dead_letter"}
 PROVIDER_QUEUES = {
     "chatgpt": "chatgpt.com", "chatgpt.com": "chatgpt.com",
     "gemini": "gemini.com", "gemini.com": "gemini.com",

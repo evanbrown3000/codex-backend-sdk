@@ -124,6 +124,25 @@ def evidence(result: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [row for row in rows if row["ref"]]
 
 
+def complete_insufficient_chatgpt(job: Mapping[str, Any], result: Mapping[str, Any],
+                                 elapsed: float | None) -> None:
+    """Close an accepted terminal short turn; never replay identical prompt."""
+    rejected = {**dict(result), "accepted": True, "terminal": True,
+                "state": "insufficient_evidence",
+                "provider_execution_seconds": elapsed,
+                "rejection_reason": "provider_execution_below_300_seconds",
+                "taskflow_completion": False}
+    scheduler_call({
+        "operation": "complete_job", **fence(job),
+        "conversation_id": rejected.get("conversation_id"),
+        "effect_evidence": evidence(rejected),
+        "artifacts": rejected.get("artifacts") or [],
+        "normalized_provider_result": rejected,
+        "result_state": "rejected",
+        "rejection_reason": rejected["rejection_reason"],
+    })
+
+
 def provider_execution_seconds(result: Mapping[str, Any]) -> float | None:
     receipt = result.get("provider_receipt")
     candidates = [result]
@@ -190,12 +209,7 @@ def recover_terminal(job: Mapping[str, Any]) -> bool:
     if str(job.get("provider") or "") == "chatgpt.com":
         elapsed = provider_execution_seconds(result)
         if elapsed is None or elapsed < 300.0:
-            scheduler_call({
-                "operation": "release_job", **fence(job),
-                "provider_state": "provider_turn_below_minimum_duration",
-                "reason": "provider_execution_below_300_seconds",
-                "retry_after_seconds": 60,
-            })
+            complete_insufficient_chatgpt(job, result, elapsed)
             return True
     scheduler_call({
         "operation": "complete_job", **fence(job),
@@ -367,12 +381,7 @@ def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
     if str(job.get("provider") or "") == "chatgpt.com":
         elapsed = provider_execution_seconds(result)
         if elapsed is None or elapsed < 300.0:
-            scheduler_call({
-                "operation": "release_job", **fence(job),
-                "provider_state": "provider_execution_shorter_than_five_minutes",
-                "reason": "provider_execution_shorter_than_five_minutes",
-                "retry_after_seconds": 60,
-            })
+            complete_insufficient_chatgpt(job, result, elapsed)
             return
     # Carry only scheduler identity, not inferred intent, into the terminal
     # record so the returned-product worker can perform the durable join.

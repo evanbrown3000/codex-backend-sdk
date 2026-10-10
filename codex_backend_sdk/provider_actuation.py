@@ -351,6 +351,12 @@ class ComputerUseXProviderAdapter:
         # ChatGPT browser guard installation belongs to the ChatGPT actuator,
         # not to Gemini/Claude actuation and pulls unrelated optional domains.
         os.environ.setdefault("COMPUTERUSEX_SKIP_IMPORT_GUARDS", "1")
+        # The immutable provider runtime is intentionally unprivileged and its
+        # image HOME is not a state volume. ComputerUseX owns durable/browser
+        # state beneath the shared runtime volume, so every provider generation
+        # and every environment resolves the same writable domain root instead
+        # of inventing an environment-local credential/state location.
+        os.environ.setdefault("COMPUTERUSEX_RUNTIME_ROOT", "/runtime/worker/computerusex")
         source = Path(os.environ.get(
             "COMPUTERUSEX_SOURCE", "/runtime/source/current/automation-computeruse-vision/src"
         ))

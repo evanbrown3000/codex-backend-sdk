@@ -97,12 +97,22 @@ def handle(payload):
         return {'ok': False, 'state': 'ambiguous', 'error': 'drive_effect_pending'}
     if state != 'committed':
         return {'ok': False, 'state': 'error', 'error': 'drive_writer_unavailable'}
-    stored = result.get('value') if operation == 'read' else value
+    semantic_duplicate = operation == 'write' and result.get('semantic_duplicate') is True
+    stored = result.get('value') if operation == 'read' or semantic_duplicate else value
     if not valid_rollout(stored, revision):
         raise ValueError('committed Drive rollout revision mismatch')
     stored_bytes = canonical(stored)
     stored_sha = hashlib.sha256(stored_bytes).hexdigest()
-    if operation == 'write' and stored_sha != expected_sha:
+    if semantic_duplicate:
+        # The sole writer retained the original immutable bytes. A retried
+        # projection may have different ancillary timestamps or stock cursors;
+        # never claim those newly submitted bytes were committed to Drive.
+        if result.get('submitted_sha256') != expected_sha or any(
+            stored.get(field) != value.get(field)
+            for field in ('conversation_id', 'provider', 'revision', 'rollout_jsonl')
+        ):
+            raise ValueError('committed Drive rollout semantic duplicate mismatch')
+    elif operation == 'write' and stored_sha != expected_sha:
         raise ValueError('committed Drive rollout payload mismatch')
     if result.get('sha256') != stored_sha:
         raise ValueError('Drive writer receipt digest mismatch')

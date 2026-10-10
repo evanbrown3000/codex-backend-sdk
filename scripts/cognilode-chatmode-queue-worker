@@ -1283,7 +1283,14 @@ def validated_result(value: dict) -> tuple[str, list[dict]] | None:
         if path.suffix.lower() == ".zip":
             try:
                 with zipfile.ZipFile(path) as archive:
-                    info = archive.getinfo("EXTERNAL_EFFECT_INSTRUCTIONS.md")
+                    instructions = [name for name in archive.namelist()
+                                    if name == "EXTERNAL_EFFECT_INSTRUCTIONS.md"
+                                    or (name.count("/") == 1 and name.split("/", 1)[0]
+                                        not in {"", ".", ".."} and
+                                        name.endswith("/EXTERNAL_EFFECT_INSTRUCTIONS.md"))]
+                    if len(instructions) != 1:
+                        return None
+                    info = archive.getinfo(instructions[0])
                     if info.file_size > 1_000_000 or not archive.read(info):
                         return None
             except (OSError, KeyError, zipfile.BadZipFile):

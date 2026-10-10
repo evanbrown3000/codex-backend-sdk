@@ -41,7 +41,7 @@ def release_for(source: Path) -> tuple[Path, Path]:
         # Bootstrap containers may still be draining a pre-lock supervisor
         # against the legacy root; sharing paths with those processes lets an
         # old supervisor remove a newly completed environment.
-        "COGNILODE_B4PT0R_RELEASE_ROOT", "/runtime/b4pt0r-releases/locked-v2"
+        "COGNILODE_B4PT0R_RELEASE_ROOT", "/runtime/b4pt0r-releases/locked-v3-computerusex"
     ))
     release = release_root / source.name
     cli = release / "bin" / "b4pt0r"

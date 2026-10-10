@@ -161,7 +161,17 @@ def wait_bootstrap_job(client: ProviderCommandClient, provider: str, job_id: str
         state = str(job.get("state") or "")
         if state == "queued" and state != last_state:
             scheduler_call({"operation": "rhythm_fast_forward", "provider": provider, "slots": 1})
-        if state in {"complete", "completed", "provider_complete", "failed", "dead", "cancelled"}:
+        # Provider collection and downstream application are separate effects.
+        # A valid provider result can remain ``effect_pending`` until its
+        # returned product is accepted; do not deadlock provider acceptance on
+        # the later application effect.  Keep this identical to the unified
+        # client's durable completion rule.
+        conversation_id = client.conversation_id(job)
+        provider_complete = (
+            state in {"complete", "completed", "provider_complete"}
+            or bool(job.get("completed_at") and conversation_id)
+        )
+        if provider_complete or state in {"failed", "dead", "cancelled"}:
             return client.wait(job_id)
         last_state = state
         time.sleep(5)

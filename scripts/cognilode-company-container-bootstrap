@@ -537,12 +537,61 @@ exit 2
         "entrypoints": ["codex", "managed-codex"],
         "codex_version": version.stdout.strip(),
     }
+    # Publish a distinct managed-control installation/readback receipt only
+    # after the installed client has performed real central API operations.
+    # A JSON error envelope is not success (the CLI preserves exit 0 for
+    # machine-readable errors), so validate each response semantically.
+    def control_call(*arguments: str) -> dict[str, Any] | None:
+        try:
+            result = subprocess.run([str(root / "bin/managed-codex"), *arguments],
+                                    capture_output=True, text=True, check=False, timeout=60)
+            value = json.loads(result.stdout) if result.stdout.strip() else None
+            if result.returncode or not isinstance(value, dict) or value.get("error"):
+                return None
+            return value
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return None
+
+    conversations = control_call("conversations", "list", "--limit", "1")
+    conversation_id = ((conversations or {}).get("items") or [{}])[0].get("id")
+    query = ((conversations or {}).get("items") or [{}])[0].get("title") or "Codex"
+    searched = control_call("conversations", "search", str(query), "--limit", "1")
+    readback = (control_call("conversations", "read", str(conversation_id))
+                if isinstance(conversation_id, str) and conversation_id else None)
+    environments = control_call("environments", "list")
+    current_environment = control_call("environments", "current")
+    env_id = ((current_environment or {}).get("environment_id") or
+              (current_environment or {}).get("selected_environment_id"))
+    if not env_id:
+        env_items = (environments or {}).get("environments") or (environments or {}).get("items") or []
+        if env_items and isinstance(env_items[0], dict):
+            env_id = env_items[0].get("environment_id") or env_items[0].get("id")
+    selected = (control_call("environments", "select", str(env_id))
+                if isinstance(env_id, str) and env_id else None)
+    if (conversations and conversations.get("ok") is True and conversation_id and
+            searched and searched.get("ok") is True and readback and
+            environments and current_environment and selected):
+        verification = {
+            "schema": "cognilode.managed_control_readback.v1",
+            "event_id": f"evanpc-host:managed-control:{release_pin}:{sdk_revision}",
+            "authority": "evanbrown3000/codex-backend-sdk",
+            "environment_id": "evanpc-host", "release_revision": release_pin,
+            "sdk_revision": sdk_revision,
+            "operations": ["conversation_list", "conversation_search", "conversation_read",
+                           "environment_list", "environment_current", "environment_select"],
+            "conversation_id": conversation_id, "selected_environment_id": env_id,
+            "observed_at": time.time(), "ok": True,
+        }
+        runtime_event["managed_control_readback_event_id"] = verification["event_id"]
+    else:
+        verification = None
     ledger.parent.mkdir(parents=True, exist_ok=True)
     with ledger.open("a+", encoding="utf-8") as stream:
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
         stream.seek(0)
         existing = {json.loads(line).get("event_id") for line in stream if line.strip()}
-        pending = [record for record in (event, runtime_event)
+        records = (event, runtime_event, verification) if verification else (event, runtime_event)
+        pending = [record for record in records
                    if record["event_id"] not in existing]
         if pending:
             stream.seek(0, os.SEEK_END)

@@ -135,26 +135,38 @@ services:
           kill -0 "$$child"
           sleep 1
         done
-        python3 -c 'import socket,threading
-        def copy(a,b):
+        # Chrome deliberately binds DevTools to loopback.  Export it through a
+        # byte-transparent asyncio relay.  The first implementation used two
+        # unsynchronised threads and could close the upstream socket after the
+        # WebSocket upgrade while its peer was still writing, yielding a
+        # successful handshake followed by a silent CDP timeout.
+        python3 -c 'import asyncio
+        async def pipe(reader,writer):
           try:
-            while data:=a.recv(65536): b.sendall(data)
-          except OSError: pass
-          try: b.shutdown(socket.SHUT_WR)
-          except OSError: pass
-        def serve(c):
-          u=socket.create_connection(("127.0.0.1",9333)); head=b""
-          while b"\r\n\r\n" not in head and len(head)<262144:
-            part=c.recv(65536)
-            if not part: break
-            head+=part
-          lines=head.split(b"\r\n")
-          lines=[b"Host: 127.0.0.1:9333" if x.lower().startswith(b"host:") else x for x in lines]
-          u.sendall(b"\r\n".join(lines))
-          threading.Thread(target=copy,args=(c,u),daemon=True).start(); copy(u,c); c.close(); u.close()
-        s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(("0.0.0.0",9334)); s.listen()
-        while True:
-          c,_=s.accept(); threading.Thread(target=serve,args=(c,),daemon=True).start()' & relay=$$!
+            while True:
+              data=await reader.read(65536)
+              if not data: break
+              writer.write(data); await writer.drain()
+          except (ConnectionError,asyncio.CancelledError): pass
+          try: writer.write_eof()
+          except (OSError,AttributeError): pass
+        async def serve(reader,writer):
+          try:
+            head=await reader.readuntil(b"\r\n\r\n")
+            lines=head.split(b"\r\n")
+            lines=[b"Host: 127.0.0.1:9333" if x.lower().startswith(b"host:") else x for x in lines]
+            upstream_reader,upstream_writer=await asyncio.open_connection("127.0.0.1",9333)
+            upstream_writer.write(b"\r\n".join(lines)); await upstream_writer.drain()
+            await asyncio.gather(pipe(reader,upstream_writer),pipe(upstream_reader,writer),return_exceptions=True)
+            upstream_writer.close(); await upstream_writer.wait_closed()
+          except (Exception,asyncio.CancelledError): pass
+          writer.close()
+          try: await writer.wait_closed()
+          except Exception: pass
+        async def main():
+          server=await asyncio.start_server(serve,"0.0.0.0",9334)
+          async with server: await server.serve_forever()
+        asyncio.run(main())' & relay=$$!
         wait "$$child"
         kill -TERM "$$relay" 2>/dev/null || true
         kill -TERM "$$xvfb" 2>/dev/null || true

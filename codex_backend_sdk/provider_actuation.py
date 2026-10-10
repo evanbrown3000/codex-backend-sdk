@@ -165,16 +165,18 @@ class AgentMemoryEventPublisher:
             "B4PT0R_PROVIDER_EVENT_OUTBOX", "/runtime/provider-events/outbox.jsonl"
         ))
 
-    def _publish(self, observation: Mapping[str, Any]) -> dict[str, Any]:
+    def _publish(
+        self, observation: Mapping[str, Any], *, require_admission: bool = False,
+    ) -> dict[str, Any]:
         self.outbox.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(dict(observation), ensure_ascii=False, separators=(",", ":")) + "\n"
         with self.outbox.open("a", encoding="utf-8") as stream:
             stream.write(line)
             stream.flush()
             os.fsync(stream.fileno())
-        deadline = time.monotonic() + float(os.environ.get(
+        deadline = time.monotonic() + (float(os.environ.get(
             "B4PT0R_AGENT_MEMORY_ADMISSION_SECONDS", "120"
-        ))
+        )) if require_admission else 0.0)
         last: Exception | None = None
         while True:
             try:
@@ -576,7 +578,7 @@ class UnifiedProviderActuator:
                 "observed_at": envelope.completed_at,
                 "source": {"type": "b4pt0r_provider_actuator", "provenance": "normalized_result"},
                 "result": envelope.to_dict(),
-            })
+            }, require_admission=True)
             envelope.provider_receipt["agent_memory_publication"] = publication
             return envelope
         except Exception as exc:

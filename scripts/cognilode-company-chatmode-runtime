@@ -153,13 +153,9 @@ def replace_supervisor(source: Path) -> None:
 
 
 def source_revision(source: Path) -> str:
-    try:
-        return subprocess.check_output(
-            ["git", "-C", str(source), "rev-parse", "HEAD"],
-            text=True, timeout=15,
-        ).strip()
-    except (OSError, subprocess.SubprocessError):
-        return source.name
+    # Converged checkouts are named by immutable revision. Their embedded git
+    # metadata may share a moving branch and cannot identify these files.
+    return source.name
 
 
 def launch(source: Path) -> subprocess.Popen:

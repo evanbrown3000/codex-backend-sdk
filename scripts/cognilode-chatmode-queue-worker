@@ -1380,20 +1380,19 @@ def validated_result(value: dict, job: dict | None = None) -> tuple[str, list[di
         if (not path.is_file() or not 0 < path.stat().st_size <= MAX_RETURNED_WORK_BYTES
                 or _sha256_file(path) != digest):
             return None
+        # Provider actuation owns collection and physical integrity, not the
+        # business schema of the returned package.  Requiring a TaskFlow-
+        # specific instruction filename here caused valid provider turns to be
+        # resent and coupled the first-order B4PT0R route to downstream work.
+        # Artifact application validates APPLY_MANIFEST or any other domain
+        # contract after custody; this boundary only requires a readable ZIP.
         if path.suffix.lower() == ".zip":
             try:
                 with zipfile.ZipFile(path) as archive:
-                    instructions = [name for name in archive.namelist()
-                                    if name == "EXTERNAL_EFFECT_INSTRUCTIONS.md"
-                                    or (name.count("/") == 1 and name.split("/", 1)[0]
-                                        not in {"", ".", ".."} and
-                                        name.endswith("/EXTERNAL_EFFECT_INSTRUCTIONS.md"))]
-                    if len(instructions) != 1:
+                    if not archive.infolist():
                         return None
-                    info = archive.getinfo(instructions[0])
-                    if info.file_size > 1_000_000 or not archive.read(info):
-                        return None
-            except (OSError, KeyError, zipfile.BadZipFile):
+                    archive.testzip()
+            except (OSError, zipfile.BadZipFile):
                 return None
         files.append({"path": str(path), "sha256": digest, "name": item.get("name")})
     if len([f for f in files if str(f["name"] or "").lower().endswith(".zip")]) != 1:

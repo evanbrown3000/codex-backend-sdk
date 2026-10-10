@@ -13,6 +13,7 @@ Environment=COMPANY_SOURCE_ROOT=/home/evan/.local/share/cognilode/company-runtim
 Environment=AWS_AUTH_ROOT=/home/evan/.aws
 Environment=COGNILODE_ENVIRONMENT_ID=evanpc-company-container
 Environment=COGNILODE_ENVIRONMENT_SYNC_SECONDS=300
+Environment=COGNILODE_BOOTSTRAP_RECONCILE_ONLY=1
 ExecStart=/home/evan/.local/share/cognilode/company-runtime/shared/source/current/codex-backend-sdk/scripts/cognilode-company-container-bootstrap
 Restart=always
 RestartSec=10

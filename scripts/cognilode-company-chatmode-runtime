@@ -107,10 +107,19 @@ def launch_prepared(runner: Path, cli: Path) -> subprocess.Popen:
 def replace_supervisor(source: Path) -> None:
     """Continue supervision with the synchronized generation's own code."""
     supervisor = (source / "scripts" / "cognilode-company-chatmode-runtime").resolve()
-    current = Path(__file__).resolve()
-    if supervisor == current:
-        return
+    # Source convergence may advance the Git worktree in place, so equal
+    # filesystem paths do not imply equal executable generations.
     os.execve(sys.executable, [sys.executable, str(supervisor)], os.environ.copy())
+
+
+def source_revision(source: Path) -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(source), "rev-parse", "HEAD"],
+            text=True, timeout=15,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        return source.name
 
 
 def launch(source: Path) -> subprocess.Popen:
@@ -204,6 +213,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     source = active_source()
+    active_revision = source_revision(source)
     bootstrap_cli = latest_complete_cli()
     target_cli = Path(os.environ.get(
         "COGNILODE_B4PT0R_RELEASE_ROOT", "/runtime/b4pt0r-releases/locked-v2"
@@ -222,7 +232,8 @@ def main() -> int:
             process = launch_prepared(runner, cli)
         else:
             candidate = active_source()
-            if candidate != source:
+            candidate_revision = source_revision(candidate)
+            if candidate != source or candidate_revision != active_revision:
                 candidate, runner, cli = prepare_frontier()
                 drain(process)
                 # A source cutover includes the supervisor itself, not only its
@@ -233,6 +244,7 @@ def main() -> int:
                 # potentially slow immutable-release build.
                 replace_supervisor(candidate)
                 source = candidate
+                active_revision = source_revision(candidate)
                 process = launch_prepared(runner, cli)
         time.sleep(2)
     if process.poll() is None:

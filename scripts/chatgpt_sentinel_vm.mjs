@@ -22,7 +22,6 @@ globalThis.btoa ??= value => Buffer.from(value, "binary").toString("base64");
 const H=0,U=1,W=2,G=3,K=4,q=5,J=6,Y=7,X=8,F=9,Z=10,Q=11,$=12,E=13,T=14,N=15,R=16,I=17,A=18,O=19,S=20,C=21,L=22,V=23,D=24,NOOP1=25,NOOP2=26,M=27,NOOP3=28,LESS=29,FN=30,MUL=33,DIV=34,SUB=35;
 const state = new Map();
 let steps = 0;
-let serial = Promise.resolve();
 let halted = false;
 
 function xor(value, secret) {
@@ -76,7 +75,13 @@ function initialize() {
 }
 
 function solve(payload, secret) {
-  return serial = serial.then(() => new Promise((resolve,reject) => {
+  // A Sentinel program can invoke opcode H to evaluate a nested program.  The
+  // old process-wide promise chain queued that nested evaluation behind the
+  // outer evaluation which was awaiting it, creating a self-deadlock until
+  // Python killed this process at its 30-second prepare timeout.  This CLI
+  // handles one top-level request per process, so isolation already provides
+  // serialization; nested programs must execute immediately.
+  return new Promise((resolve,reject) => {
     initialize(); steps=0; halted=false; state.set(R,secret); let done=false;
     const timer=setTimeout(()=>{ if(!done){done=true;halted=true;resolve(String(steps));}},500);
     state.set(G,value=>{if(!done){done=true;halted=true;clearTimeout(timer);resolve(btoa(String(value)));}});
@@ -84,7 +89,7 @@ function solve(payload, secret) {
     state.set(FN,(out,target,params,queue)=>{const array=Array.isArray(queue), names=array?params:[], instructions=(array?queue:params)||[];state.set(out,(...values)=>{if(done)return;const old=[...(state.get(F)||[])];if(array)for(let i=0;i<names.length;i++)state.set(names[i],values[i]);state.set(F,[...instructions]);return run().then(()=>state.get(target)).catch(String).finally(()=>state.set(F,old));});});
     try { state.set(F,JSON.parse(xor(atob(payload),String(state.get(R))))); run().catch(e=>{if(!done){done=true;clearTimeout(timer);resolve(btoa(`${steps}: ${String(e)}`));}}); }
     catch(e) { done=true;clearTimeout(timer);resolve(btoa(`${steps}: ${String(e)}`)); }
-  }));
+  });
 }
 
 process.stdout.write(await solve(dx,key));

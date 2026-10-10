@@ -63,6 +63,25 @@ def service_python(source: Path) -> Path | None:
     return None
 
 
+def newest_complete_python() -> Path | None:
+    """Cold-start from the newest published runtime while its successor builds."""
+    configured = Path(os.environ.get(
+        "COGNILODE_B4PT0R_RELEASE_ROOT",
+        "/runtime/b4pt0r-releases/locked-v3-computerusex",
+    ))
+    roots = [configured]
+    if configured.parent.is_dir():
+        roots.extend(path for path in configured.parent.iterdir()
+                     if path.is_dir() and path != configured)
+    candidates: list[tuple[int, Path]] = []
+    for root in roots:
+        for marker in root.glob("*/.complete"):
+            interpreter = marker.parent / "bin/python"
+            if interpreter.is_file():
+                candidates.append((marker.stat().st_mtime_ns, interpreter))
+    return max(candidates, default=(0, None))[1]
+
+
 def content_generation(current: Path) -> tuple[Path, str] | None:
     """Identify the executable closure rather than the checkout directory."""
     selected = current.resolve()
@@ -129,7 +148,11 @@ def main() -> int:
             time.sleep(5)
             continue
         selected, signature = generation
-        interpreter = service_python(selected)
+        # A container recreation must not take provider custody offline merely
+        # because the moving source frontier is ahead of its immutable build.
+        # Start the newest complete runtime, then the loop below changes over
+        # only after the exact frontier release is published.
+        interpreter = service_python(selected) or newest_complete_python()
         if interpreter is None:
             print(f"SDK service {options.script} waiting for matching immutable release", flush=True)
             time.sleep(2)

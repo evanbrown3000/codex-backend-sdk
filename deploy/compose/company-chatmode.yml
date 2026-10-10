@@ -452,6 +452,12 @@ services:
     restart: unless-stopped
     stop_grace_period: 2h
     network_mode: bridge
+    # Docker's default seccomp profile denies the unprivileged user namespace
+    # that Codex's inner read-only bubblewrap sandbox requires. Keep the
+    # broker unprivileged after socket setup and prohibit setuid elevation.
+    security_opt:
+      - seccomp:unconfined
+      - no-new-privileges:true
     user: "0:0"
     working_dir: /runtime/source/current
     entrypoint: [sh, -c]

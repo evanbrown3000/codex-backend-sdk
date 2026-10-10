@@ -165,6 +165,28 @@ def compose_service_hashes(project: str, compose: Path, env: dict[str, str]) -> 
             if not value.get("profiles") or active_profiles.intersection(value["profiles"])}
 
 
+def provider_mutations_active(runtime: Path) -> int | None:
+    """Read local provider custody state without observing the provider."""
+    path = runtime / "shared/provider.sock"
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
+            channel.settimeout(5)
+            channel.connect(str(path))
+            channel.sendall(b'{"operation":"active"}\n')
+            channel.shutdown(socket.SHUT_WR)
+            data = bytearray()
+            while b"\n" not in data and len(data) < 4096:
+                piece = channel.recv(4096)
+                if not piece:
+                    break
+                data.extend(piece)
+        reply = json.loads(data.split(b"\n", 1)[0])
+        active = reply.get("active")
+        return active if type(active) is int else None
+    except (OSError, ValueError, IndexError, TypeError):
+        return None
+
+
 def codex_builder_compiling(project: str) -> bool:
     """Defer a config-only builder replacement while its native build runs."""
     result = subprocess.run(["docker", "top", f"{project}-codex-builder-1", "-eo", "comm"],
@@ -388,6 +410,21 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
                         if deferred:
                             changed.remove("codex-builder")
                             print("company Compose deferring active native Codex build", flush=True)
+                        mutation_services = {"chatmode", "provider-transport"}.intersection(changed)
+                        active_mutations = (provider_mutations_active(runtime)
+                                            if mutation_services else 0)
+                        if mutation_services and active_mutations != 0:
+                            # Recreating either side severs the stream between
+                            # the actuator and credential transport. Keep the
+                            # previous hashes so reconciliation retries after
+                            # every admitted provider mutation reaches terminal.
+                            value = ("unknown" if active_mutations is None
+                                     else str(active_mutations))
+                            print("company Compose deferring provider custody replacement: "
+                                  + value + " active sends", flush=True)
+                            notify_service("WATCHDOG=1")
+                            time.sleep(2)
+                            continue
                         if changed:
                             if "provider-transport" in changed:
                                 ensure_chatmode_node(

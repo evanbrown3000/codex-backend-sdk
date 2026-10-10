@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""Credential holding ChatGPT Chat-mode transport behind a local Unix socket."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import socketserver
+import subprocess
+import sys
+import threading
+import time
+
+SENDER = Path(__file__).with_name("cognilode-b4pt0r-chatmode")
+COLLECTOR = Path(__file__).with_name("cognilode-b4pt0r-collect")
+COUNTER_LOCK = threading.Lock()
+ACTIVE_SENDS = 0
+DRAINING = False
+
+
+def transport(args: list[str], send_fence: dict | None = None) -> dict:
+    global ACTIVE_SENDS
+    if not isinstance(args, list) or len(args) > 150 or any(not isinstance(x, str) or len(x) > 4096 for x in args):
+        return {"exit_code": 64, "stderr": "invalid provider arguments"}
+    if len(args) < 3 or args[0] != "--auth-source" or args[1] not in {"codex", "chrome"} or args[2] not in {"send", "reconcile", "health"}:
+        return {"exit_code": 64, "stderr": "unsupported provider operation"}
+    verb = args[2]
+    if verb == "send" and (not isinstance(send_fence, dict) or
+            not all(send_fence.get(key) for key in
+                    ("job_id", "worker_id", "lease_token", "lease_generation", "device_id"))):
+        return {"exit_code": 64, "stderr": "queued provider send requires effect fence"}
+    if verb == "send":
+        with COUNTER_LOCK:
+            if DRAINING:
+                return {"exit_code": 75, "stdout": json.dumps({"ok": False,
+                        "state": "provider_transport_draining",
+                        "provider_acceptance_observed": False})}
+            ACTIVE_SENDS += 1
+    try:
+        try:
+            child_env = os.environ.copy()
+            if send_fence:
+                child_env["COGNILODE_CHATMODE_SEND_FENCE"] = json.dumps(send_fence, separators=(",", ":"))
+            result = subprocess.run([sys.executable, str(SENDER), *args], env=child_env,
+                                    capture_output=True, text=True,
+                                    timeout=1900 if verb == "send" else 300, check=False)
+            return {"exit_code": result.returncode, "stdout": result.stdout[-1048576:],
+                    "stderr": result.stderr[-1048576:]}
+        except subprocess.TimeoutExpired:
+            return {"exit_code": 124, "stderr": "provider transport deadline exceeded; reconcile exact mutation"}
+    finally:
+        if verb == "send":
+            with COUNTER_LOCK:
+                ACTIVE_SENDS -= 1
+
+
+class Handler(socketserver.StreamRequestHandler):
+    def handle(self):
+        global DRAINING
+        try:
+            request = json.loads(self.rfile.readline(1048576))
+            if request.get("operation") == "active":
+                with COUNTER_LOCK:
+                    response = {"active": ACTIVE_SENDS, "draining": DRAINING}
+            elif request.get("operation") == "drain":
+                with COUNTER_LOCK:
+                    DRAINING = True
+                    response = {"active": ACTIVE_SENDS, "draining": True}
+            elif request.get("operation") == "transport":
+                response = transport(request.get("args"), request.get("send_fence"))
+            else:
+                response = {"exit_code": 64, "stderr": "unsupported transport operation"}
+        except Exception as exc:
+            response = {"exit_code": 70, "stderr": type(exc).__name__}
+        self.wfile.write((json.dumps(response, separators=(",", ":")) + "\n").encode())
+
+
+class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+
+def collect_forever():
+    root = Path.home() / ".local/share/cognilode"
+    while True:
+        try:
+            result = subprocess.run([sys.executable, str(COLLECTOR),
+                                     "--dir", str(root / "b4pt0r-chatmode"),
+                                     "--dir", str(root / "handoffs"), "--recursive", "--limit", "40"],
+                                    capture_output=True, text=True, timeout=600, check=False)
+            print(json.dumps({"kind": "collector_cycle", "returncode": result.returncode,
+                              "at": time.time()}), flush=True)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(json.dumps({"kind": "collector_retry", "error": type(exc).__name__,
+                              "at": time.time()}), flush=True)
+        # Central grant permits one hydration per conversation per 120 seconds.
+        # Agent readers use the shared normalized delta store, never this loop.
+        time.sleep(120)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--socket", type=Path, required=True)
+    args = parser.parse_args()
+    args.socket.parent.mkdir(parents=True, exist_ok=True)
+    args.socket.unlink(missing_ok=True)
+    server = Server(str(args.socket), Handler)
+    os.chmod(args.socket, 0o660)
+    threading.Thread(target=collect_forever, daemon=True).start()
+    children = [
+        subprocess.Popen([sys.executable, str(Path(__file__).with_name("cognilode-chatmode-queue-worker")),
+                          "--device-id", os.environ.get("COGNILODE_ENVIRONMENT_ID", "company-container"),
+                          "--interval", "60"], start_new_session=True),
+        subprocess.Popen([sys.executable, str(Path(__file__).with_name("cognilode-chatmode-floor-watcher"))],
+                         start_new_session=True),
+    ]
+    try:
+        server.serve_forever()
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.terminate()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -180,7 +180,7 @@ class AgentMemoryClient:
         return dict(value)
 
     def ingest(self, observation: Mapping[str, Any]) -> Any:
-        return self._request("POST", self.legacy_endpoint, body={"operation": "ingest_conversation", **dict(observation)})
+        return self._request("POST", self.legacy_endpoint, body={"operation": "record_conversation", **dict(observation)})
 
     def admit_summary_result(
         self,

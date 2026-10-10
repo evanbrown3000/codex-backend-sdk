@@ -138,6 +138,7 @@ def main() -> int:
             if now < due:
                 continue
             process = subprocess.Popen([
+                str(CLI.rsplit("/", 1)[0] + "/python"),
                 str(HERE / "b4pt0r-com-batch"), str(batch),
                 "--state-root", str(state), "--cli", CLI,
             ])

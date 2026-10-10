@@ -9,6 +9,21 @@ if [[ $# != 1 || ! $1 =~ ^[0-9a-f]{40}$ ]]; then
 fi
 pin=$1
 repo=$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)
+source_url=${COGNILODE_CODEX_GIT_URL:-https://github.com/evanbrown3000/cognilode-codex.git}
+
+# A syntactically valid SHA is not a source revision. Verify the exact remote
+# commit before changing any release consumer, so a typo cannot stall the
+# always-on builder/source-sync loop.
+verify_repo=$(mktemp -d "${TMPDIR:-/tmp}/cognilode-codex-pin-verify.XXXXXXXX")
+trap 'rm -rf "$verify_repo"' EXIT
+git -C "$verify_repo" init --bare -q
+if ! git -C "$verify_repo" fetch -q --filter=blob:none --no-tags "$source_url" "$pin" ||
+   [[ $(git -C "$verify_repo" cat-file -t "$pin" 2>/dev/null) != commit ]]; then
+  echo "source_commit_unavailable pin=$pin" >&2
+  exit 69
+fi
+rm -rf "$verify_repo"
+trap - EXIT
 
 for attempt in 1 2 3; do
   git -C "$repo" fetch --quiet origin main

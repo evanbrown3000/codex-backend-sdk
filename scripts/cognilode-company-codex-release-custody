@@ -136,6 +136,41 @@ def link_release() -> None:
         temporary.unlink(missing_ok=True)
         temporary.symlink_to(f"../releases/{PIN}/{name}")
         temporary.replace(ROOT / "bin" / name)
+    publish_installation_receipt()
+
+
+def publish_installation_receipt() -> None:
+    """Publish one immutable receipt after every release link is observable."""
+    receipts = ROOT / "receipts"
+    receipts.mkdir(parents=True, exist_ok=True)
+    receipt = receipts / f"{PIN}-{TARGET}.json"
+    files = {name: {"sha256": digest(RELEASE / name), "size": (RELEASE / name).stat().st_size}
+             for name in RELEASE_FILES}
+    value = {
+        "schema": "cognilode.codex_installation.v1",
+        "environment_id": os.environ.get("COGNILODE_ENVIRONMENT_ID", "unknown"),
+        "source_commit": PIN,
+        "target": TARGET,
+        "files": files,
+        "active_binary": str((ROOT / "bin/codex").resolve(strict=True)),
+        "installed_at": time.time(),
+    }
+    if receipt.is_file():
+        prior = json.loads(receipt.read_text(encoding="utf-8"))
+        comparable = {key: value[key] for key in value if key != "installed_at"}
+        if {key: prior.get(key) for key in comparable} == comparable:
+            return
+    temporary = receipt.with_name(receipt.name + f".{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(value, sort_keys=True) + "\n")
+    temporary.replace(receipt)
+    ledger = ROOT / "events/installations.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(ledger, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(descriptor, (json.dumps(value, sort_keys=True) + "\n").encode())
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def install_remote(manifest: dict) -> None:

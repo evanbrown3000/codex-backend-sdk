@@ -195,6 +195,7 @@ services:
       AWS_SHARED_CREDENTIALS_FILE: /root/.aws/credentials
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
       COGNILODE_CODEX_INSTALL_ROOT: /codex
+      COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID:-evanpc-company-container}
       COGNILODE_CODEX_RELEASE_BUCKET: cognilode-ephemeral-artifacts-362928919715-us-west-2
       COGNILODE_AWS_CLI: /usr/bin/aws
       COGNILODE_AWS_PURPOSE: artifact-write

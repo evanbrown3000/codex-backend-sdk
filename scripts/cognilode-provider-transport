@@ -43,6 +43,13 @@ def option(args: list[str], name: str, default: str = "") -> str:
 
 def _broker_call(payload: dict, *, timeout: int) -> tuple[int, dict, str]:
     environment = os.environ.copy()
+    # The custody container is intentionally non-root and its image home is
+    # read-only. ComputerUseX exposes an explicit runtime-root contract; bind
+    # it to the durable shared runtime instead of falling back to ~/.local.
+    computerusex_runtime = Path(environment.setdefault(
+        "COMPUTERUSEX_RUNTIME_ROOT", "/runtime/computerusex"
+    ))
+    computerusex_runtime.mkdir(parents=True, exist_ok=True)
     source_root = str(Path(__file__).resolve().parent.parent)
     environment["PYTHONPATH"] = source_root + (
         os.pathsep + environment["PYTHONPATH"] if environment.get("PYTHONPATH") else ""

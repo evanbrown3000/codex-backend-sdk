@@ -1657,6 +1657,16 @@ def complete_from_result(job: dict, value: dict) -> bool:
         return False
     evidence = [{"kind": "provider_conversation", "ref": conversation_id},
                 {"kind": "central_conversation_readback", "ref": conversation_id}]
+    # Preserve provider-side upload identity in the common queue envelope so
+    # callers can establish a physical round trip without inspecting the
+    # ChatGPT transport's private receipt files.
+    attachment_rows = (job.get("attachment_refs")
+                       or (job.get("payload") or {}).get("attachment_refs") or [])
+    evidence.extend({"kind": "provider_uploaded_attachment",
+                     "ref": str(row.get("sha256") or row.get("ref") or ""),
+                     "name": row.get("name"), "sha256": row.get("sha256"),
+                     "size": row.get("size")}
+                    for row in attachment_rows if isinstance(row, dict))
     evidence.extend({"kind": "chatgpt_sandbox_artifact", "ref": row["sha256"], "path": row["path"],
                      "custody_ref": row.get("ref"), "custody_state": row.get("custody_state"),
                      **({"mirrors": row["mirrors"]} if row.get("mirrors") else {})} for row in files)

@@ -152,6 +152,60 @@ def physical_outputs(job: Mapping[str, Any]) -> list[str]:
     return found
 
 
+def memory_admitted(result: Mapping[str, Any]) -> bool:
+    """Use the send-path admission receipt; never issue a provider read here."""
+    pending: list[Mapping[str, Any]] = [result]
+    seen: set[int] = set()
+    while pending:
+        row = pending.pop(0)
+        if id(row) in seen:
+            continue
+        seen.add(id(row))
+        central = row.get("central_conversation_store")
+        if isinstance(central, Mapping) and central.get("stored") is True and central.get("central_readback_verified") is True:
+            return True
+        publication = row.get("agent_memory_publication")
+        if isinstance(publication, Mapping) and publication.get("ingested") is True:
+            return True
+        for child in row.values():
+            if isinstance(child, Mapping):
+                pending.append(child)
+    return False
+
+
+def wait_bootstrap_job(client: ProviderCommandClient, provider: str, job_id: str) -> dict[str, Any]:
+    """Wait through queue-authorized retries without losing bootstrap pacing."""
+    last_state = ""
+    while True:
+        value = scheduler_call({"operation": "get_job", "job_id": job_id})
+        job = value.get("job") if isinstance(value.get("job"), Mapping) else {}
+        state = str(job.get("state") or "")
+        if state == "queued" and int(job.get("priority") or 0) < ACCEPTANCE_PRIORITY:
+            scheduler_call({
+                "operation": "reprioritize_job", "job_id": job_id,
+                "priority": ACCEPTANCE_PRIORITY,
+                "parent_operation": {
+                    "operation_id": str(job.get("parent_operation_id") or "area1-four-provider-acceptance"),
+                    "automation_order": 3, "kind": "taskflow_plan",
+                },
+            })
+        if state == "queued" and state != last_state:
+            scheduler_call({"operation": "rhythm_fast_forward", "provider": provider, "slots": 1})
+        conversation_id = client.conversation_id(job)
+        provider_complete = (
+            state in {"complete", "completed", "provider_complete"}
+            or bool(job.get("completed_at") and conversation_id)
+            or bool(state == "effect_pending" and conversation_id)
+        )
+        if provider_complete or state in {"failed", "dead", "cancelled", "rejected"}:
+            if provider_complete and state == "effect_pending":
+                return {"ok": True, "job_id": job_id, "state": "completed",
+                        "conversation_id": conversation_id, "job": dict(job)}
+            return client.wait(job_id)
+        last_state = state
+        time.sleep(5)
+
+
 def source_packet(root: Path) -> Path:
     """Give the provider the actual SDK and browser-adapter sources."""
     source = Path(__file__).resolve().parents[1]

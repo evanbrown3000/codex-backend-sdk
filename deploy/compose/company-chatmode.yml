@@ -177,10 +177,10 @@ services:
       COGNILODE_CHATMODE_PORTABLE: "1"
       COGNILODE_CHATMODE_RUNTIME_EPOCH: bounded-drain-20261010
       COGNILODE_CHATMODE_DRAIN_GRACE_SECONDS: "120"
-      # Later .com adapters are promoted explicitly after the preceding
-      # provider's terminal acceptance gate; cold start must preserve enough
-      # process capacity for the proven ChatGPT.com actuator.
-      COGNILODE_HOSTED_RHYTHM_PROVIDERS: ${COGNILODE_HOSTED_RHYTHM_PROVIDERS:-chatgpt.com}
+      # Provider populations have independent clocks and workers.  Keep every
+      # native fallback available so a broken ChatGPT route cannot prevent
+      # Gemini, Claude, or Anthropic from repairing it.
+      COGNILODE_HOSTED_RHYTHM_PROVIDERS: ${COGNILODE_HOSTED_RHYTHM_PROVIDERS:-chatgpt.com,gemini.com,claude.com,anthropic.com}
       # The centrally-custodied provider browser is attached to the company
       # network; provider actuators must never fall back to a host/personal
       # browser on the unrelated Docker bridge.

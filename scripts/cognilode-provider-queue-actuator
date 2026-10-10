@@ -232,7 +232,12 @@ def main() -> int:
                         "providers": {args.provider: {
                             "enabled": True, "authentication": "both", "attachments": True,
                             "artifact_downloads": True, "continuation": True,
-                            "models": [], "reasoning_modes": [], "max_concurrency": 2_147_483_647,
+                            "models": (["gpt-5-6-thinking", "gpt-5.6", "gpt-5.6-sol",
+                                        "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "auto"]
+                                       if args.provider == "chatgpt.com" else []),
+                            "reasoning_modes": (["medium", "high", "xhigh", "max", "extended"]
+                                                if args.provider == "chatgpt.com" else []),
+                            "max_concurrency": 2_147_483_647,
                         }},
                     },
                 },

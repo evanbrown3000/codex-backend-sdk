@@ -49,7 +49,7 @@ def run(payload):
         if value.get('ok') is not True: raise RuntimeError('central_conversation_read_failed')
         return {'ok':True,'action':action,'result':value}
     if action in {'environment_list','environment_current','environment_select'}:
-        name={'environment_list':'node_list','environment_current':'route_get',
+        name={'environment_list':'environment_list','environment_current':'environment_current',
               'environment_select':'environment_select'}[action]
         arguments={'actor_id':actor}
         if action=='environment_select':

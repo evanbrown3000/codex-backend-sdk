@@ -103,11 +103,22 @@ services:
           --window-size=1600,1000 https://gemini.google.com/app &
         child=$$!
         trap 'kill -TERM "$$child" 2>/dev/null || true; wait "$$child" || true' TERM INT
-        while ! wget -q -O /dev/null http://127.0.0.1:9333/json/version; do
+        while ! python3 -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:9333/json/version",timeout=2).read()'; do
           kill -0 "$$child"
           sleep 1
         done
-        socat TCP-LISTEN:9334,fork,reuseaddr TCP:127.0.0.1:9333 & relay=$$!
+        python3 -c 'import socket,threading
+        def copy(a,b):
+          try:
+            while data:=a.recv(65536): b.sendall(data)
+          except OSError: pass
+          try: b.shutdown(socket.SHUT_WR)
+          except OSError: pass
+        def serve(c):
+          u=socket.create_connection(("127.0.0.1",9333)); threading.Thread(target=copy,args=(c,u),daemon=True).start(); copy(u,c); c.close(); u.close()
+        s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(("0.0.0.0",9334)); s.listen()
+        while True:
+          c,_=s.accept(); threading.Thread(target=serve,args=(c,),daemon=True).start()' & relay=$$!
         wait "$$child"
         kill -TERM "$$relay" 2>/dev/null || true
     volumes:

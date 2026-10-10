@@ -34,8 +34,16 @@ def provider_seconds(job: Mapping[str, Any]) -> float:
     """Measure only provider-side execution, never queue or broker waiting."""
     result = job.get("normalized_provider_result") if isinstance(job.get("normalized_provider_result"), Mapping) else {}
     receipt = result.get("provider_receipt") if isinstance(result.get("provider_receipt"), Mapping) else {}
-    started = receipt.get("started_at") or result.get("provider_started_at")
-    completed = receipt.get("completed_at") or result.get("provider_completed_at")
+    nested = receipt.get("provider_receipt") if isinstance(receipt.get("provider_receipt"), Mapping) else {}
+    elapsed = nested.get("elapsed_seconds") or receipt.get("elapsed_seconds")
+    if isinstance(elapsed, (int, float)):
+        return float(elapsed)
+    started = (nested.get("provider_started_at") or nested.get("started_at")
+               or receipt.get("provider_started_at") or receipt.get("started_at")
+               or result.get("provider_started_at") or result.get("started_at"))
+    completed = (nested.get("provider_completed_at") or nested.get("completed_at")
+                 or receipt.get("provider_completed_at") or receipt.get("completed_at")
+                 or result.get("provider_completed_at") or result.get("completed_at"))
     if started is None or completed is None:
         return 0.0
     try:

@@ -269,8 +269,11 @@ class ChatModeOperations:
             attachments=attachments,
             user_message_id=user_message_id,
         )
+        provider_started_at = time.time()
         response = self._client.chatgpt.conversations.create_stream(payload)
         streamed = self._consume_stream(response, message_id)
+        streamed["provider_started_at"] = provider_started_at
+        streamed["provider_completed_at"] = time.time()
         resolved_conversation_id = str(streamed.get("conversation_id") or conversation_id or "")
         result: dict[str, Any] = {
             "user_message_id": message_id,

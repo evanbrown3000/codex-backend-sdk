@@ -237,6 +237,10 @@ class Bridge:
         if thread_id.startswith("chatgpt:"):
             conversation_id = thread_id.split(":", 1)[1]
             conversation = self.provider.chatgpt.conversations.retrieve(conversation_id)
+            try:
+                self.memory.ingest_chatgpt_conversation(conversation)
+            except Exception:
+                pass
             return _provider_thread(conversation_id, conversation)
         if thread_id.startswith("memory:"):
             return self._memory_read(thread_id.split(":", 1)[1])

@@ -12,6 +12,7 @@ from typing import Any
 from . import OpenAI
 from .agent_memory import AgentMemoryClient
 from .remote_shell import RemoteShellClient
+from .storage import load_tokens, token_needs_refresh
 
 
 def _emit(value: Any) -> None:
@@ -42,7 +43,20 @@ def _chatgpt(args: argparse.Namespace) -> Any:
     if args.chatgpt_command == "search":
         return client.chatgpt.conversations.search(args.query)
     if args.chatgpt_command == "read":
-        return client.chatgpt.conversations.retrieve(args.conversation_id)
+        conversation = client.chatgpt.conversations.retrieve(args.conversation_id)
+        result: dict[str, Any] = {"conversation": conversation}
+        if not args.no_memory_ingest:
+            try:
+                result["agent_memory"] = AgentMemoryClient().ingest_chatgpt_conversation(
+                    conversation
+                )
+            except Exception as error:
+                result["agent_memory"] = {
+                    "ingested": False,
+                    "error": type(error).__name__,
+                    "message": str(error),
+                }
+        return result
     if args.chatgpt_command == "upload":
         return client.chatgpt.operations.upload_attachments(args.path)
     if args.chatgpt_command == "send":
@@ -112,6 +126,7 @@ def _memory(args: argparse.Namespace) -> Any:
         return client.read(
             args.conversation_id,
             reader_id=args.reader_id,
+            after=args.after,
             full=args.full,
             peek=args.peek,
             projection=args.projection,
@@ -119,6 +134,19 @@ def _memory(args: argparse.Namespace) -> Any:
     if args.memory_command == "render":
         return {"conversation_id": args.conversation_id, "markdown": client.render_markdown(args.conversation_id)}
     raise ValueError(f"Unknown memory command: {args.memory_command}")
+
+
+def _auth(args: argparse.Namespace) -> Any:
+    del args
+    store = load_tokens()
+    if store is None:
+        return {"authenticated": False}
+    return {
+        "authenticated": True,
+        "account_id": store.account_id,
+        "plan_type": store.plan_type,
+        "refresh_required": token_needs_refresh(store),
+    }
 
 
 def _transfer(args: argparse.Namespace) -> Any:
@@ -144,6 +172,9 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="b4pt0r", description=__doc__)
     providers = root.add_subparsers(dest="provider", required=True)
 
+    auth = providers.add_parser("auth")
+    auth.add_subparsers(dest="auth_command", required=True).add_parser("status")
+
     chatgpt = providers.add_parser("chatgpt")
     chat = chatgpt.add_subparsers(dest="chatgpt_command", required=True)
     listing = chat.add_parser("list")
@@ -154,6 +185,7 @@ def parser() -> argparse.ArgumentParser:
     searching.add_argument("query")
     reading = chat.add_parser("read")
     reading.add_argument("conversation_id")
+    reading.add_argument("--no-memory-ingest", action="store_true")
     upload = chat.add_parser("upload")
     upload.add_argument("path", nargs="+")
     send = chat.add_parser("send")
@@ -205,6 +237,7 @@ def parser() -> argparse.ArgumentParser:
     read = mem.add_parser("read")
     read.add_argument("conversation_id")
     read.add_argument("--reader-id", required=True)
+    read.add_argument("--after")
     read.add_argument("--full", action="store_true")
     read.add_argument("--peek", action="store_true")
     read.add_argument("--projection", default="read-model")
@@ -225,7 +258,9 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
-        if args.provider == "chatgpt":
+        if args.provider == "auth":
+            result = _auth(args)
+        elif args.provider == "chatgpt":
             result = _chatgpt(args)
         elif args.provider == "remote":
             result = _remote(args)

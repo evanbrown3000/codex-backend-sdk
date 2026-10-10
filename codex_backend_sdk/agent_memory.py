@@ -81,6 +81,7 @@ class AgentMemoryClient:
         conversation_id: str,
         *,
         reader_id: str,
+        after: str | None = None,
         full: bool = False,
         peek: bool = False,
         projection: str = "read-model",
@@ -94,6 +95,7 @@ class AgentMemoryClient:
             )
         return self.changes(
             conversation_id,
+            after=after,
             reader_id=reader_id,
             peek=str(peek).lower(),
             projection=projection,
@@ -151,3 +153,42 @@ class AgentMemoryClient:
             "terminal": turn.get("terminal") is True,
         }
         return self.ingest(observation)
+
+    def ingest_chatgpt_conversation(
+        self,
+        conversation: Mapping[str, Any],
+        *,
+        environment_id: str | None = None,
+        account_id: str | None = None,
+    ) -> Any:
+        provider_id = str(conversation.get("conversation_id") or conversation.get("id") or "")
+        mapping = conversation.get("mapping") if isinstance(conversation.get("mapping"), Mapping) else {}
+        messages: list[Mapping[str, Any]] = []
+        current = conversation.get("current_node")
+        visited: set[str] = set()
+        while isinstance(current, str) and current and current not in visited:
+            visited.add(current)
+            node = mapping.get(current)
+            if not isinstance(node, Mapping):
+                break
+            message = node.get("message")
+            if isinstance(message, Mapping):
+                messages.append(message)
+            current = node.get("parent")
+        messages.reverse()
+        return self.ingest(
+            {
+                "schema": "memory_stock.conversation_observation.v1",
+                "provider": "chatgpt",
+                "provider_conversation_id": provider_id,
+                "conversation_id": f"chatgpt:{provider_id}",
+                "environment_id": environment_id or os.environ.get("COGNILODE_REMOTE_ENVIRONMENT_ID"),
+                "provider_account_id": account_id or os.environ.get("B4PT0R_CHATGPT_ACCOUNT_ID"),
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "source": {
+                    "type": "b4pt0r_sdk_provider_read",
+                    "provenance": "provider_native_conversation_graph",
+                },
+                "messages": messages,
+            }
+        )

@@ -1821,6 +1821,18 @@ def main(argv: list[str] | None = None) -> int:
     except CapabilityError as exc:
         print(json.dumps({"ok": False, "state": exc.code, "error": str(exc)}, sort_keys=True), file=sys.stderr)
         return 2
+    except Exception as exc:
+        # The unified actuator contract always returns a normalized envelope.
+        # Uncaught transport/library exceptions previously produced only a
+        # traceback, which the queue could neither classify nor improve on the
+        # next authorized attempt.
+        print(json.dumps({
+            "ok": False,
+            "state": "provider_error",
+            "error": type(exc).__name__,
+            "message": str(exc)[:2000],
+        }, sort_keys=True), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

@@ -507,7 +507,9 @@ services:
     restart: unless-stopped
     network_mode: "service:remote-shell"
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
-    command: [tunnel, run, --token-file, /relay/tunnel-token]
+    # This environment has no usable UDP route to the edge; QUIC loops on
+    # network-unreachable while the registered node appears healthy locally.
+    command: [tunnel, --protocol, "${COGNILODE_TUNNEL_PROTOCOL:-http2}", run, --token-file, /relay/tunnel-token]
     volumes:
       - company_relay_custody:/relay:ro
     depends_on:

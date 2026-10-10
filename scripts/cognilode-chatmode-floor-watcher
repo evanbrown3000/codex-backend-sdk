@@ -67,6 +67,19 @@ def watch_provider(sender, provider: str, status_root: Path) -> None:
             if include_status:
                 next_status_at = time.monotonic() + 300
             status = result.get("scheduler_status")
+            if not isinstance(status, dict) and include_status:
+                # The existing tick already carries the next due time. Keep
+                # that frontier visible while the matching site projection
+                # rolls out; no second read or local scheduling authority.
+                status = {"schema": "cognilode.rhythm_scheduler_status.v1",
+                          "provider": provider, "observed_at_unix": time.time(),
+                          "tick_status": result.get("status"),
+                          "tick_reason": result.get("reason"),
+                          "slot_index": result.get("slot_index"),
+                          "projected_next_slot_at": result.get("due_at") or
+                            ((result.get("clock") or {}).get("pacing") or {}).get("next_due_at"),
+                          "rolling_24h": None,
+                          "metric_state": "server_projection_pending"}
             if isinstance(status, dict):
                 status_root.mkdir(parents=True, exist_ok=True)
                 path = status_root / (provider.replace(".", "-") + ".json")

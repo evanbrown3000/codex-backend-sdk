@@ -464,7 +464,8 @@ class Bridge:
                     attachments=input_paths,
                 )
             else:
-                rendered = self.memory.render_markdown(conversation_id)
+                reduced = self.memory.reduced_rollout(conversation_id) if requested_provider_kind == "codex" else {}
+                rendered = "" if reduced else self.memory.render_markdown(conversation_id)
                 result = self.provider.continue_from_memory(
                     source_conversation_id=conversation_id,
                     prompt=prompt,
@@ -474,6 +475,7 @@ class Bridge:
                     model=str(model) if model else None,
                     effort=str(effort) if effort else None,
                     rendered_conversation=rendered,
+                    reduced_rollout=str(reduced.get("content") or ""),
                     attachments=input_paths,
                 )
             collected = self._collected_turn(result) if result.get("queued") else dict(result)

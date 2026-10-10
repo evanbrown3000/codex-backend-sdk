@@ -164,6 +164,17 @@ class AgentMemoryClient:
             raise RuntimeError("Agent Memory response omitted selected prompt foreground")
         return dict(value)
 
+    def reduced_rollout(self, conversation_id: str) -> dict[str, Any]:
+        value = self._request(
+            "GET",
+            f"{self.endpoint}/{quote(conversation_id, safe='')}/reduced-rollout",
+        )
+        if isinstance(value, Mapping) and isinstance(value.get("result"), Mapping):
+            value = value["result"]
+        if not isinstance(value, Mapping) or not str(value.get("content") or "").strip():
+            raise RuntimeError("Agent Memory response omitted reduced Codex rollout")
+        return dict(value)
+
     def ingest(self, observation: Mapping[str, Any]) -> Any:
         return self._request("POST", self.legacy_endpoint, body={"operation": "ingest_conversation", **dict(observation)})
 

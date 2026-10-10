@@ -118,6 +118,13 @@ Agent Memory service origin is normalized to the existing conversation,
 ingestion, and foreground routes, so the broker can use the same client against
 the central container or the Cognilode relay.
 
+When an Agent Memory conversation is continued through Codex, the bridge now
+requests the central reduced Codex-rollout projection and stages it as
+`conversation.jsonl`. Native Codex sources retain compact session and turn
+continuation metadata; imported ChatGPT sources are explicitly marked imported
+context and retain their separate provider identities. ChatGPT destinations
+continue to receive the ReadModel Markdown projection.
+
 ## App Server pass-through bridge
 
 `cognilode-b4pt0r-app-server` (also installed as

@@ -232,12 +232,16 @@ class ProviderCommandClient:
         model: str | None = None,
         effort: str | None = None,
         rendered_conversation: str | None = None,
+        reduced_rollout: str | None = None,
         attachments: Sequence[str] = (),
     ) -> dict[str, Any]:
         kind = destination_provider.rstrip("/").removesuffix(".com")
         provider = "chatgpt.com" if kind == "chatgpt" else "codex.research"
         refs = [self.stage_file(path) for path in attachments]
-        if rendered_conversation:
+        if reduced_rollout:
+            refs.insert(0, self.stage_text(reduced_rollout, name="conversation.jsonl"))
+            prompt = "First, please read the attached reduced Codex conversation rollout in full, then continue from that conversation.\n\n" + prompt
+        elif rendered_conversation:
             refs.insert(0, self.stage_text(rendered_conversation))
             prompt = "First, please read the attached conversation.md in full, then continue from that conversation.\n\n" + prompt
         return self._enqueue({
@@ -249,5 +253,6 @@ class ProviderCommandClient:
             "model": model,
             "reasoning_effort": effort,
             "context_delivery": "central_normalized_conversation",
+            "context_format": "reduced_codex_rollout" if reduced_rollout else "read_model_markdown",
             "attachment_refs": refs,
         })

@@ -28,6 +28,7 @@ TOKEN_FILE = Path(os.environ.get('COGNILODE_OPERATOR_TOKEN_FILE',
     '/home/worker/.config/cognilode/operator-bearer'))
 MARKER_ROOT = Path(os.environ.get('COGNILODE_ACCEPTANCE_ROOT', '/runtime/acceptance'))
 RECONCILE_FRONTIER = MARKER_ROOT / 'rollout-pointer-reconcile.json'
+RECONCILE_WAKE = threading.Event()
 UUID = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,40}$')
 
 
@@ -77,6 +78,15 @@ def reconcile_loop() -> None:
                 raise RuntimeError('verified rollout pointer reconciliation unavailable')
             print(json.dumps({'rollout_pointer_reconcile': result}, separators=(',', ':')),
                 flush=True)
+            if result.get('inserted'):
+                # A newly committed pointer changes the eligible test input.
+                # Release the old quota-held candidate without repeating its
+                # staged upload or reading the provider.
+                pin = source_pin()
+                if not (MARKER_ROOT / f'central-rollout-{pin}.json').is_file():
+                    save_pending(pin, {'source_pin': pin,
+                        'candidate_source': 'committed-index-pending', 'retry_at': 0})
+                    RECONCILE_WAKE.set()
             delay = 300 if result.get('has_more') else 900
         except Exception as error:
             print(json.dumps({'rollout_pointer_reconcile': 'held',
@@ -193,6 +203,16 @@ def run() -> dict:
         # Keep its writer outbox intact but stop demanding it as a test input.
         pending = {'source_pin': pin, 'candidate_source': 'committed-index-pending'}
         save_pending(pin, pending)
+    if pending.get('candidate_source') == 'committed-index' and \
+            not pending.get('pointer_index_verified'):
+        # Older daemon generations recorded their stock-selected candidate as
+        # committed-index. Validate once against the actual committed index,
+        # then persist the selected identity across normal retries.
+        selected_id, selected_stock = candidate(pin)
+        pending = {'source_pin': pin, 'conversation_id': selected_id,
+            'stock_thread_id': selected_stock, 'candidate_source': 'committed-index',
+            'pointer_index_verified': True, 'retry_at': 0}
+        save_pending(pin, pending)
     deadline = pending.get('retry_at', 0)
     wait = math.ceil(deadline - time.time()) if isinstance(deadline, (int, float)) else 0
     if wait > 0:
@@ -205,7 +225,7 @@ def run() -> dict:
         conversation_id, stock_thread_id = candidate(pin)
         save_pending(pin, {'source_pin': pin, 'conversation_id': conversation_id,
             'stock_thread_id': stock_thread_id, 'candidate_source': 'committed-index',
-            'retry_at': 0})
+            'pointer_index_verified': True, 'retry_at': 0})
     # Keep imported ChatGPT rollouts outside the Codex-origin publisher's
     # session tree. This prevents a read-only acceptance from republishing an
     # external conversation as though it were a new Codex-authored thread.
@@ -310,5 +330,9 @@ if __name__ == '__main__':
                 'thread identity mismatch' in detail or \
                 'Model provider `` not found' in detail:
                 sys.exit(1)
-            time.sleep(max(delay, retry_after))
+            if daemon:
+                RECONCILE_WAKE.wait(timeout=max(delay, retry_after))
+                RECONCILE_WAKE.clear()
+            else:
+                time.sleep(max(delay, retry_after))
             delay = min(900, delay * 2)

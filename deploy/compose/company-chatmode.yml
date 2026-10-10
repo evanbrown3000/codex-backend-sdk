@@ -38,8 +38,8 @@ services:
     restart: unless-stopped
     network_mode: bridge
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
-    working_dir: /company/codex-backend-sdk
-    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-central-credential-sync]
+    working_dir: /runtime/source/current/codex-backend-sdk
+    entrypoint: [python3, /runtime/source/current/codex-backend-sdk/scripts/cognilode-central-credential-sync]
     command:
       - --credential
       - cognilode/chatmode/codex-auth=/home/worker/.codex/auth.json

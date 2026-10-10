@@ -4,35 +4,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import json
 import shutil
-import subprocess
 import sys
 
 
-def _operator_capability() -> bytes:
-    container = os.environ.get("COGNILODE_CLIENT_CONTAINER", "cognilode-primary-workspace")
-    source = os.environ.get(
-        "COGNILODE_CONTAINER_OPERATOR_TOKEN",
-        "/opt/cognilode/runtime/control-secrets/operator-token",
-    )
-    result = subprocess.run(
-        ["docker", "exec", container, "cat", source],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if result.returncode or not result.stdout.strip():
-        raise SystemExit("Central operator custody is unavailable from the company container.")
-    return result.stdout.strip()
-
-
 def main() -> int:
-    capability = _operator_capability()
-    descriptor = os.memfd_create("cognilode-operator-capability", flags=0)
-    os.write(descriptor, capability)
-    os.lseek(descriptor, 0, os.SEEK_SET)
-    os.set_inheritable(descriptor, True)
-
     executable_dir = Path(sys.executable).resolve().parent
     bridge = executable_dir / "b4pt0r-app-server"
     if not bridge.is_file():
@@ -48,6 +25,18 @@ def main() -> int:
     if not app_image.is_file():
         raise SystemExit(f"B4PT0R Desktop AppImage is missing: {app_image}")
 
+    # The desktop receives an operation capability, never a copied operator or
+    # provider credential.  The singular company custody container performs
+    # Agent Memory, remote-shell, and queue-admission calls on its behalf.
+    custody_container = os.environ.get(
+        "COGNILODE_CLIENT_CONTAINER",
+        "cognilode-company-runtime-chatmode-central-1",
+    )
+    broker_command = json.dumps([
+        "docker", "exec", "-i", custody_container,
+        "python3",
+        "/runtime/source/current/codex-backend-sdk/scripts/b4pt0r-provider-broker",
+    ])
     env = os.environ.copy()
     env.update({
         "APPIMAGE_EXTRACT_AND_RUN": "1",
@@ -55,7 +44,9 @@ def main() -> int:
         "CODEX_NATIVE_EXECUTABLE": env.get(
             "CODEX_NATIVE_EXECUTABLE", str(Path.home() / ".local/bin/codex")
         ),
-        "COGNILODE_OPERATOR_TOKEN_FILE": f"/proc/self/fd/{descriptor}",
+        "B4PT0R_PROVIDER_BROKER_COMMAND": env.get(
+            "B4PT0R_PROVIDER_BROKER_COMMAND", broker_command
+        ),
         "COGNILODE_REMOTE_SHELL_ENDPOINT": env.get(
             "COGNILODE_REMOTE_SHELL_ENDPOINT",
             "https://cognilode.com/api/operator/remote-shell/mcp",

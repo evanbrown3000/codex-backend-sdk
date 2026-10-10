@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -26,6 +27,34 @@ TOKEN_FILE = Path(os.environ.get('COGNILODE_OPERATOR_TOKEN_FILE',
     '/home/worker/.config/cognilode/operator-bearer'))
 MARKER_ROOT = Path(os.environ.get('COGNILODE_ACCEPTANCE_ROOT', '/runtime/acceptance'))
 UUID = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,40}$')
+
+
+class RetryDeferred(RuntimeError):
+    def __init__(self, seconds: int):
+        super().__init__(f'central rollout pending retry_after_seconds={seconds}')
+
+
+def pending_path(pin: str) -> Path:
+    return MARKER_ROOT / f'central-rollout-{pin}.pending.json'
+
+
+def pending_state(pin: str) -> dict:
+    try:
+        value = json.loads(pending_path(pin).read_text())
+        if isinstance(value, dict) and value.get('source_pin') == pin and \
+                UUID.fullmatch(str(value.get('conversation_id') or '')):
+            return value
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def save_pending(pin: str, value: dict) -> None:
+    MARKER_ROOT.mkdir(parents=True, exist_ok=True)
+    target = pending_path(pin)
+    temporary = target.with_name(target.name + f'.{os.getpid()}.tmp')
+    temporary.write_text(json.dumps(value, separators=(',', ':')) + '\n')
+    temporary.replace(target)
 
 
 def stock(body: dict) -> dict:
@@ -99,7 +128,18 @@ def run() -> dict:
     marker = MARKER_ROOT / f'central-rollout-{pin}.json'
     if marker.is_file():
         return json.loads(marker.read_text())
-    conversation_id, stock_thread_id = candidate(pin)
+    pending = pending_state(pin)
+    deadline = pending.get('retry_at', 0)
+    wait = math.ceil(deadline - time.time()) if isinstance(deadline, (int, float)) else 0
+    if wait > 0:
+        raise RetryDeferred(wait)
+    if pending:
+        conversation_id = pending['conversation_id']
+        stock_thread_id = str(pending.get('stock_thread_id') or '')
+    else:
+        conversation_id, stock_thread_id = candidate(pin)
+        save_pending(pin, {'source_pin': pin, 'conversation_id': conversation_id,
+            'stock_thread_id': stock_thread_id, 'retry_at': 0})
     # Keep imported ChatGPT rollouts outside the Codex-origin publisher's
     # session tree. This prevents a read-only acceptance from republishing an
     # external conversation as though it were a new Codex-authored thread.
@@ -160,6 +200,7 @@ def run() -> dict:
     temporary = marker.with_name(marker.name + f'.{os.getpid()}.tmp')
     temporary.write_text(json.dumps(result, separators=(',', ':')) + '\n')
     temporary.replace(marker)
+    pending_path(pin).unlink(missing_ok=True)
     return result
 
 
@@ -174,6 +215,15 @@ if __name__ == '__main__':
             detail = str(error)[:220]
             advice = re.search(r'retry_after_seconds=(\d+)', detail)
             retry_after = min(86400, int(advice.group(1))) if advice else 0
+            if retry_after and not isinstance(error, RetryDeferred):
+                try:
+                    pin = source_pin()
+                    pending = pending_state(pin)
+                    if pending:
+                        pending['retry_at'] = time.time() + retry_after
+                        save_pending(pin, pending)
+                except (OSError, RuntimeError, ValueError):
+                    pass
             print(json.dumps({'ok': False, 'state': 'pending' if daemon else 'failed',
                 'error': type(error).__name__, 'detail': detail,
                 'retry_after_seconds': retry_after},

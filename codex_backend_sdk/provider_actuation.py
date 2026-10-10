@@ -637,27 +637,40 @@ class UnifiedProviderActuator:
                 completed_at=datetime.now(timezone.utc).isoformat(),
                 parent_operation=asdict(request.parent_operation) if request.parent_operation else None,
             )
-            publication = self.publisher._publish({
-                "schema": "memory_stock.conversation_observation.v1",
-                "provider": request.provider,
-                "provider_conversation_id": conversation_id,
-                "conversation_id": conversation_id or "operation:" + request.operation_id,
-                "provider_user_message_id": user_message_id,
-                "provider_account_id": str(custody["account_id"]),
-                "operation_id": request.operation_id,
-                "observed_at": envelope.completed_at,
-                "source": {"type": "b4pt0r_provider_actuator", "provenance": "normalized_result"},
-                "messages": [
-                    {"id": user_message_id, "author": {"role": "user"},
-                     "content": {"content_type": "text", "parts": [request.prompt]}},
-                    {"id": assistant_message_id, "author": {"role": "assistant"},
-                     "content": {"content_type": "text", "parts": [assistant_text]}},
-                ],
-                "attachments": list(request.attachments),
-                "artifacts": artifacts,
-                "terminal": terminal,
-                "normalized_provider_result": envelope.to_dict(),
-            }, require_admission=True)
+            # A prepare failure happened before a provider conversation or user
+            # message existed.  It is already durably emitted as an operational
+            # provider_error event above; fabricating an empty conversation and
+            # waiting through the required-admission window only strands the
+            # transport generation and delays the safe retry containing the
+            # source fix.  Conversation admission begins at provider acceptance.
+            if accepted or conversation_id or user_message_id:
+                publication = self.publisher._publish({
+                    "schema": "memory_stock.conversation_observation.v1",
+                    "provider": request.provider,
+                    "provider_conversation_id": conversation_id,
+                    "conversation_id": conversation_id or "operation:" + request.operation_id,
+                    "provider_user_message_id": user_message_id,
+                    "provider_account_id": str(custody["account_id"]),
+                    "operation_id": request.operation_id,
+                    "observed_at": envelope.completed_at,
+                    "source": {"type": "b4pt0r_provider_actuator", "provenance": "normalized_result"},
+                    "messages": [
+                        {"id": user_message_id, "author": {"role": "user"},
+                         "content": {"content_type": "text", "parts": [request.prompt]}},
+                        {"id": assistant_message_id, "author": {"role": "assistant"},
+                         "content": {"content_type": "text", "parts": [assistant_text]}},
+                    ],
+                    "attachments": list(request.attachments),
+                    "artifacts": artifacts,
+                    "terminal": terminal,
+                    "normalized_provider_result": envelope.to_dict(),
+                }, require_admission=True)
+            else:
+                publication = {
+                    "ingested": False,
+                    "state": "preaccept_operational_event_only",
+                    "event_ids": list(event_ids),
+                }
             envelope.provider_receipt["agent_memory_publication"] = publication
             return envelope
         except Exception as exc:

@@ -1,0 +1,21 @@
+[Unit]
+Description=Reconcile the containerized Cognilode environment from central source
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=COMPANY_UID=1000
+Environment=COMPANY_GID=1000
+Environment=COMPANY_REPOS_ROOT=/home/evan/Projects
+Environment=COMPANY_RUNTIME_ROOT=/home/evan/.local/share/cognilode/company-runtime
+Environment=COMPANY_SOURCE_ROOT=/home/evan/.local/share/cognilode/company-runtime/shared/source
+Environment=AWS_AUTH_ROOT=/home/evan/.aws
+Environment=COGNILODE_ENVIRONMENT_ID=evanpc-company-container
+Environment=COGNILODE_ENVIRONMENT_SYNC_SECONDS=300
+ExecStart=/home/evan/.local/share/cognilode/company-runtime/shared/source/current/codex-backend-sdk/scripts/cognilode-company-container-bootstrap
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

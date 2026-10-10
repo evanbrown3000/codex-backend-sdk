@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import time
 
 
 SCRIPTS = Path(os.environ.get('COGNILODE_COMPANY_SOURCE_ROOT', '/runtime/source')) / 'current/codex-backend-sdk/scripts'
+CODEX_SOURCE = Path(os.environ.get('COGNILODE_COMPANY_SOURCE_ROOT', '/runtime/source')) / 'current/cognilode-codex'
 BOOT_WRAPPER = Path(__file__).resolve()
 STOP = False
 
@@ -20,18 +22,38 @@ def stop(_signum, _frame):
     STOP = True
 
 
+def selected_pin() -> str:
+    try:
+        source = CODEX_SOURCE.resolve(strict=True)
+    except OSError:
+        return ""
+    pin = source.name
+    if not re.fullmatch(r"[0-9a-f]{40}", pin):
+        return ""
+    observed = subprocess.run(
+        ["git", "-c", f"safe.directory={source}", "-C", str(source), "rev-parse", "HEAD"],
+        capture_output=True, text=True, timeout=30,
+    )
+    return pin if observed.returncode == 0 and observed.stdout.strip() == pin else ""
+
+
 def main() -> None:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     Path(os.environ['HOME']).mkdir(parents=True, exist_ok=True)
     while not STOP:
         selected = (SCRIPTS / 'cognilode-company-codex-release-custody').resolve()
-        if not selected.is_file():
+        pin = selected_pin()
+        if not selected.is_file() or not pin:
             time.sleep(5)
             continue
-        print(f'Codex release custody source generation {selected}', flush=True)
-        child = subprocess.Popen([sys.executable, str(selected)], env=os.environ.copy())
-        while not STOP and child.poll() is None and selected == (SCRIPTS / 'cognilode-company-codex-release-custody').resolve():
+        print(f'Codex release custody source generation {selected} for {pin}', flush=True)
+        env = os.environ.copy()
+        env['COGNILODE_CODEX_SOURCE_COMMIT'] = pin
+        child = subprocess.Popen([sys.executable, str(selected)], env=env)
+        while (not STOP and child.poll() is None and
+               selected == (SCRIPTS / 'cognilode-company-codex-release-custody').resolve() and
+               pin == selected_pin()):
             time.sleep(5)
         if child.poll() is None:
             child.terminate()

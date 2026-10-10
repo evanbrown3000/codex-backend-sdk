@@ -659,7 +659,8 @@ exit 2
         query = provider_id[:8] or str(conversation_id or "")[:16]
         searched = (control_call("conversations", "search", str(query), "--limit", "1")
                     if control_ok(conversations) else None)
-        readback = (control_call("conversations", "read", str(conversation_id))
+        readback = (control_call("conversations", "read", str(conversation_id),
+                                 "--reader-id", "evanpc-managed-control-readback")
                     if searched and searched.get("ok") is True and isinstance(conversation_id, str)
                     else None)
         environments = (control_call("environments", "list")

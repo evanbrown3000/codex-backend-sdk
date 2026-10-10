@@ -170,8 +170,14 @@ def wait_bootstrap_job(client: ProviderCommandClient, provider: str, job_id: str
         provider_complete = (
             state in {"complete", "completed", "provider_complete"}
             or bool(job.get("completed_at") and conversation_id)
+            or bool(state == "effect_pending" and conversation_id)
         )
         if provider_complete or state in {"failed", "dead", "cancelled"}:
+            if provider_complete and state == "effect_pending":
+                return {
+                    "ok": True, "job_id": job_id, "state": "completed",
+                    "conversation_id": conversation_id, "job": dict(job),
+                }
             return client.wait(job_id)
         last_state = state
         time.sleep(5)

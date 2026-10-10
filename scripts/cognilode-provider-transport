@@ -23,6 +23,14 @@ DRAINING = False
 
 
 def runtime_python() -> Path:
+    # This transport already runs inside an immutable, completed SDK release.
+    # Provider mutations admitted to this generation must finish with that
+    # same generation; chasing the mutable `current` source link creates a
+    # send outage during every release build and violates drain semantics.
+    incumbent = Path(sys.executable).resolve()
+    incumbent_root = incumbent.parent.parent
+    if incumbent.is_file() and (incumbent_root / ".complete").is_file():
+        return incumbent
     source = Path(os.environ.get(
         "COGNILODE_B4PT0R_SDK_ROOT", "/runtime/source/current/codex-backend-sdk"
     )).resolve()

@@ -50,6 +50,15 @@ def _broker_call(payload: dict, *, timeout: int) -> tuple[int, dict, str]:
         "COMPUTERUSEX_RUNTIME_ROOT", "/runtime/computerusex"
     ))
     computerusex_runtime.mkdir(parents=True, exist_ok=True)
+    if str(payload.get("provider") or "") in {
+        "gemini.com", "anthropic.com", "claude.com"
+    }:
+        # Some historical ComputerUseX modules still derive auxiliary paths
+        # from HOME rather than the runtime-root contract. Keep those paths in
+        # the same singular writable custody volume; never the image home.
+        provider_home = Path("/runtime/provider-home")
+        provider_home.mkdir(parents=True, exist_ok=True)
+        environment["HOME"] = str(provider_home)
     source_root = str(Path(__file__).resolve().parent.parent)
     environment["PYTHONPATH"] = source_root + (
         os.pathsep + environment["PYTHONPATH"] if environment.get("PYTHONPATH") else ""

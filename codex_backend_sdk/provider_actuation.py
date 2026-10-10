@@ -262,15 +262,26 @@ class ChatGPTB4PT0RAdapter:
             prompt_text = "First, read the attached conversation.md in full, then " + prompt_text
             conversation_id = None
             parent_message_id = None
+        # Public workforce names are stable across the unified API; translate
+        # them only at the provider adapter boundary to ChatGPT's current wire
+        # identifiers.  The queue and provenance continue to retain the
+        # caller-requested model and effort.
+        wire_model = {
+            "gpt-5.6-sol": "gpt-5-6-thinking",
+        }.get(str(request.model or ""), str(request.model or ""))
+        wire_effort = {
+            "max": "xhigh",
+            "extra-high": "xhigh",
+        }.get(str(request.reasoning_effort or ""), str(request.reasoning_effort or "xhigh"))
         args = [*self.command, "--auth-source", "codex", "send", "--prompt", prompt_text,
                 "--queue-job-id", request.operation_id,
-                "--effort", request.reasoning_effort or "xhigh"]
+                "--effort", wire_effort]
         if conversation_id:
             args += ["--conversation-id", conversation_id]
         if parent_message_id:
             args += ["--parent-message-id", parent_message_id]
-        if request.model:
-            args += ["--model", request.model]
+        if wire_model:
+            args += ["--model", wire_model]
         if request.artifact_directory:
             args += ["--output-dir", request.artifact_directory]
         for path in attachments:

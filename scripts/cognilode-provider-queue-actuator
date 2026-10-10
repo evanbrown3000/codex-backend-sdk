@@ -34,6 +34,7 @@ def fence(job: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "job_id": str(job["id"]),
         "worker_id": str(job.get("claimed_by") or ""),
+        "device_id": str(job.get("assigned_device") or ""),
         "lease_token": str(lease.get("token") or job.get("lease_token") or ""),
         "lease_generation": int(lease.get("generation") or job.get("lease_generation") or 0),
     }

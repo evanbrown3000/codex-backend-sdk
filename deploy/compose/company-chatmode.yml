@@ -189,7 +189,9 @@ services:
     working_dir: /company/codex-backend-sdk
     entrypoint: [python3, /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-codex-release-custody-runtime]
     environment:
-      HOME: /root
+      HOME: /tmp/cognilode-codex-release-custody
+      AWS_CONFIG_FILE: /root/.aws/config
+      AWS_SHARED_CREDENTIALS_FILE: /root/.aws/credentials
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
       COGNILODE_CODEX_SOURCE_COMMIT: e25eec578706a51f52d3031ae60d81aae7408e0f
       COGNILODE_CODEX_INSTALL_ROOT: /codex

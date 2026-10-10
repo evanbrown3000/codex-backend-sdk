@@ -23,6 +23,7 @@ def stop(_signum, _frame):
 def main() -> None:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+    Path(os.environ['HOME']).mkdir(parents=True, exist_ok=True)
     while not STOP:
         selected = (SCRIPTS / 'cognilode-company-codex-release-custody').resolve()
         if not selected.is_file():

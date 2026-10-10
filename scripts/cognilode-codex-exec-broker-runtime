@@ -19,7 +19,7 @@ ACTIVE_FILE = SOCKET.with_suffix(".active")
 DRAIN_FILE = SOCKET.with_suffix(".draining")
 SANDBOX_READY = SOCKET.with_suffix(".sandbox-ready.json")
 BWRAP = Path("/usr/bin/bwrap")
-BWRAP_CACHE = Path("/runtime/tools/codex-bubblewrap")
+BWRAP_CACHE = Path("/var/cache/cognilode-bwrap")
 STOP = False
 
 
@@ -50,8 +50,9 @@ def ensure_bubblewrap() -> None:
     """Install signed Debian bubblewrap into this container, caching its package.
 
     The workspace image is intentionally immutable and has no bwrap. The
-    package archive lives in the company runtime volume so a container
-    recreation does not redownload it. No host package or image is changed.
+    package archive lives in a broker-only root-owned Docker volume so a
+    container recreation does not redownload it. No host package or image is
+    changed, and workers cannot replace a package later installed as root.
     """
     if BWRAP.is_file() and os.access(BWRAP, os.X_OK):
         return
@@ -64,7 +65,8 @@ def ensure_bubblewrap() -> None:
         try:
             record = json.loads(manifest.read_text())
             candidate = BWRAP_CACHE / record["name"]
-            if (candidate.name.startswith("bubblewrap_") and candidate.suffix == ".deb"
+            if (record["name"] == candidate.name and
+                    candidate.name.startswith("bubblewrap_") and candidate.suffix == ".deb"
                     and candidate.is_file() and hashlib.sha256(candidate.read_bytes()).hexdigest() == record["sha256"]):
                 archive = candidate
         except (OSError, KeyError, ValueError, TypeError):

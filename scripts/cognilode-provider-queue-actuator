@@ -421,7 +421,16 @@ def reject_prohibited_elapsed_time_padding(job: Mapping[str, Any]) -> bool:
         return False
     scheduler_call({
         "operation": "complete_job", **fence(job),
-        "conversation_id": None, "effect_evidence": [], "artifacts": [],
+        "conversation_id": None,
+        # Scheduler completion always requires durable evidence.  A policy
+        # rejection has no provider-side effect, but the rejecting scheduler
+        # decision is itself the terminal effect and must be recorded rather
+        # than raising and requeueing the prohibited prompt forever.
+        "effect_evidence": [{
+            "kind": "scheduler_policy_rejection",
+            "ref": "prohibited_elapsed_time_padding",
+        }],
+        "artifacts": [],
         "normalized_provider_result": {
             "schema": "cognilode.provider_result.v1",
             "state": "invalid_prompt", "terminal": True, "accepted": False,

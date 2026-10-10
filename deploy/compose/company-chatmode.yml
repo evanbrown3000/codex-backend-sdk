@@ -117,13 +117,7 @@ services:
           try: b.shutdown(socket.SHUT_WR)
           except OSError: pass
         def serve(c):
-          u=socket.create_connection(("127.0.0.1",9333)); head=b""
-          while b"\r\n\r\n" not in head and len(head)<262144:
-            part=c.recv(65536)
-            if not part: break
-            head+=part
-          lines=head.split(b"\r\n"); lines=[b"Host: 127.0.0.1:9333" if x.lower().startswith(b"host:") else x for x in lines]; u.sendall(b"\r\n".join(lines))
-          threading.Thread(target=copy,args=(c,u),daemon=True).start(); copy(u,c); c.close(); u.close()
+          u=socket.create_connection(("127.0.0.1",9333)); threading.Thread(target=copy,args=(c,u),daemon=True).start(); copy(u,c); c.close(); u.close()
         s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(("0.0.0.0",9334)); s.listen()
         while True:
           c,_=s.accept(); threading.Thread(target=serve,args=(c,),daemon=True).start()' & relay=$$!

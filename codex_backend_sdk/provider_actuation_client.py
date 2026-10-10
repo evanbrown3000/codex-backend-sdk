@@ -31,7 +31,9 @@ class ProviderActuationClient:
         )
         rows = [row for row in completed.stdout.splitlines() if row.strip()]
         if not rows:
-            raise RuntimeError("credential custody broker returned no result")
+            detail = completed.stderr.strip()[-2000:]
+            raise RuntimeError("credential custody broker returned no result" +
+                               ((": " + detail) if detail else ""))
         result = json.loads(rows[-1])
         if not isinstance(result, dict):
             raise RuntimeError("credential custody broker returned a non-object result")

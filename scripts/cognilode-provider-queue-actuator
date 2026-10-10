@@ -497,6 +497,11 @@ def main() -> int:
                 )
                 process(job, client)
             except Exception as exc:
+                print(json.dumps({
+                    "kind": "provider_actuator_exception", "provider": args.provider,
+                    "job_id": job_id, "error_type": type(exc).__name__,
+                    "error": str(exc)[:4000],
+                }, sort_keys=True), flush=True)
                 # A crashed thread must never strand a claimed lease.  The
                 # scheduler remains the sole retry authority and preserves the
                 # same fenced job identity for the next permitted attempt.

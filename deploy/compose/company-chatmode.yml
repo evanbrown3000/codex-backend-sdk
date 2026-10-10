@@ -70,6 +70,7 @@ services:
       - ${COMPANY_REPOS_ROOT}:/company:ro
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime:ro
       - company_auth:/home/worker/.codex
+      - memory_data:/runtime/agent-memory:ro
       - company_operator:/home/worker/.config/cognilode
       - company_deploy_custody:/deploy
       - company_relay_custody:/relay

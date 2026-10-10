@@ -375,6 +375,7 @@ class ComputerUseXProviderAdapter:
             "Use the installed ComputerUseX tools to complete this provider operation. "
             "Do not merely describe how to do it. Open the provider, submit the exact prompt, "
             "wait for the terminal response, collect returned files, and write the complete "
+            "ComputerUseX HAR when prompting fails, and write the complete "
             f"ComputerUseX provider receipt as JSON to {response_file}.\n"
             f"Provider: {self.provider}\nMode: {request.mode}\n"
             f"Conversation: {request.conversation_id or 'new'}\n"

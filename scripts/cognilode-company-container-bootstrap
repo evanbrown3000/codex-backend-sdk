@@ -687,6 +687,11 @@ exit 2
         runtime_event["managed_control_readback_event_id"] = verification["event_id"]
     else:
         verification = None
+        # A cooldown is only justified after a complete readback. Keeping the
+        # marker after a partial/failed attempt suppresses the event-driven
+        # retry for five minutes and can strand otherwise successful control
+        # operations without terminal evidence.
+        attempt_marker.unlink(missing_ok=True)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     with ledger.open("a+", encoding="utf-8") as stream:
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX)

@@ -186,37 +186,13 @@ def main() -> int:
         )
         SUPERVISORS.append(thread)
         thread.start()
-    retry: dict[str, tuple[int, float]] = {}
+    # Historical ``batch.json`` directories predate the provider scheduler.
+    # Replaying them here creates a second mutation route which bypasses queue
+    # pacing, credential leases and parent-operation provenance.  They remain
+    # readable evidence, but production actuation is exclusively performed by
+    # the provider queue workers supervised above.
     while not STOP:
-        now = time.time()
-        for batch in ROOT.glob("*/batch.json"):
-            state = batch.parent / "state"
-            if complete(state):
-                retry.pop(str(batch), None)
-                continue
-            failures, due = retry.get(str(batch), (0, 0.0))
-            if now < due:
-                continue
-            process = subprocess.Popen([
-                str(CLI.rsplit("/", 1)[0] + "/python"),
-                str(HERE / "b4pt0r-com-batch"), str(batch),
-                "--state-root", str(state), "--cli", CLI,
-            ])
-            while not STOP and process.poll() is None:
-                time.sleep(1)
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
-            failures = 0 if process.returncode == 0 else failures + 1
-            retry[str(batch)] = (failures, time.time() + min(900, 15 * (2 ** min(failures, 6))))
-            if STOP:
-                break
-        if not STOP:
-            time.sleep(5)
+        time.sleep(5)
     for thread in SUPERVISORS:
         thread.join(timeout=max(300, float(os.environ.get(
             "COGNILODE_PROVIDER_GENERATION_DRAIN_SECONDS", "2700"

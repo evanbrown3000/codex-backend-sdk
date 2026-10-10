@@ -123,7 +123,7 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
     workers: list[tuple[list[str], dict[str, str]]] = []
     event_publisher = HERE / "cognilode-provider-event-publisher"
     if event_publisher.is_file():
-        workers.append(([sys.executable, str(event_publisher)], {}))
+        workers.append(([str(CLI.rsplit("/", 1)[0] + "/python"), str(event_publisher)], {}))
     # Area 2 is a separate domain implementation.  B4PT0R only supervises its
     # durable process beside the Area 1 actuators; it neither owns nor embeds
     # scheduling policy.

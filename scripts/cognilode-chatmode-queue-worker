@@ -380,6 +380,24 @@ def attachment_paths(job: dict) -> list[Path]:
             path = Path(ref).expanduser()
         else:
             path = Path(ref).expanduser() if ref and not ref.startswith(("https://", "http://", "s3://")) else None
+        # The queue contract uses the container-stable ``/runtime`` namespace.
+        # During the bootstrap transition some producers materialized that
+        # namespace beneath their durable worker state while correctly writing
+        # the stable locator into D1.  Resolve that one namespace indirection
+        # here instead of turning a recoverable, already-custodied input into a
+        # provider retry or depending on machine-local AWS credentials.
+        if (path and path.is_absolute() and not path.is_file()
+                and str(path).startswith("/runtime/queue-inputs/")):
+            relative = path.relative_to("/runtime/queue-inputs")
+            roots = [Path(value).expanduser() for value in os.environ.get(
+                "COGNILODE_QUEUE_INPUT_ROOTS",
+                "/home/worker/.local/share/cognilode/company-runtime/shared/queue-inputs",
+            ).split(os.pathsep) if value.strip()]
+            for root in roots:
+                candidate = root / relative
+                if candidate.is_file():
+                    path = candidate
+                    break
         if not path or not path.is_absolute() or not path.is_file():
             mirrors = [] if isinstance(row, str) else list(row.get("mirrors") or [])
             if ref.startswith(("https://", "s3://")):

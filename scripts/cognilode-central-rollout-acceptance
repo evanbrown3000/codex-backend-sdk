@@ -67,6 +67,27 @@ def stock(body: dict) -> dict:
 
 
 def candidate(pin: str) -> tuple[str, str]:
+    # Prefer a pointer already committed by the sole Drive writer. This D1
+    # index read cannot stage an object or hydrate a provider conversation.
+    try:
+        token = TOKEN_FILE.read_text().strip().removeprefix('Bearer ').strip()
+        committed = request_json(BASE, '/api/operator/codex-rollouts?limit=20',
+            token, method='GET', timeout=30)
+    except (OSError, RuntimeError):
+        committed = {}
+    for item in (committed.get('items') or [])[:20]:
+        provider_id = str(item.get('conversation_id') or '')
+        if not UUID.fullmatch(provider_id):
+            continue
+        try:
+            preview = stock({'action': 'read', 'selector': 'chatgpt:' + provider_id,
+                'reader_id': 'codex-release-acceptance:' + pin[:12],
+                'limit': 1, 'peek': True})
+        except RuntimeError:
+            continue
+        last_seq = preview.get('last_seq')
+        if isinstance(last_seq, int) and 0 <= last_seq <= 500:
+            return provider_id, str(preview.get('conversation', {}).get('thread_id') or '')
     offset = 0
     for _ in range(10):
         page = stock({'action': 'list', 'provider': 'chatgpt', 'limit': 50,

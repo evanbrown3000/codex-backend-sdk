@@ -137,7 +137,10 @@ def recover_terminal(job: Mapping[str, Any]) -> bool:
     job_id = str(job.get("id") or "")
     generation = int(job.get("lease_generation") or (job.get("lease") or {}).get("generation") or 0)
     prefix = f"{job_id}:queue-lease:{generation}:"
-    root = Path(os.environ.get("COGNILODE_CHATMODE_WORK_ROOT", "/runtime/worker/b4pt0r-chatmode"))
+    root = Path(os.environ.get(
+        "COGNILODE_CHATMODE_WORK_ROOT",
+        str(Path.home() / ".local/share/cognilode/b4pt0r-chatmode"),
+    ))
     candidates: list[tuple[int, Path, Mapping[str, Any]]] = []
     for path in root.glob("**/*.sse.receipt.json"):
         try:

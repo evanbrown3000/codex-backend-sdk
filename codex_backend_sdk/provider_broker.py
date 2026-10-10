@@ -258,6 +258,28 @@ def _send(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 def execute(payload: Mapping[str, Any]) -> Any:
     operation = str(payload.get("operation") or "")
+    if operation == "embedding":
+        texts = payload.get("input")
+        if isinstance(texts, str):
+            texts = [texts]
+        if not isinstance(texts, list) or not texts or len(texts) > 128:
+            return {"ok": False, "error": "embedding_input_must_contain_1_to_128_texts"}
+        normalized = [str(value) for value in texts]
+        if sum(len(value) for value in normalized) > 1_000_000:
+            return {"ok": False, "error": "embedding_input_too_large"}
+        model = str(payload.get("model") or "text-embedding-3-small")
+        client = OpenAI().authenticate()
+        response = client.embeddings.create(
+            input=normalized,
+            model=model,
+            dimensions=payload.get("dimensions") or 1536,
+        )
+        return {
+            "ok": True,
+            "model": model,
+            "vectors": [list(row.embedding) for row in response.data],
+            "usage": response.usage.model_dump() if response.usage is not None else {},
+        }
     if operation == "provider_capabilities":
         authority = _lease_authority()
         actuator = _actuator(authority)

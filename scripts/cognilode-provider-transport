@@ -208,6 +208,13 @@ class Handler(socketserver.StreamRequestHandler):
                     response = {"active": ACTIVE_SENDS, "draining": True}
             elif request.get("operation") == "transport":
                 response = transport(request.get("args"), request.get("send_fence"))
+            elif request.get("operation") == "embedding":
+                code, result, stderr = _broker_call(dict(request), timeout=180)
+                response = result if not code else {
+                    "ok": False,
+                    "error": str(result.get("error") or "embedding_provider_error"),
+                    "message": str(result.get("message") or stderr)[-1000:],
+                }
             else:
                 response = {"exit_code": 64, "stderr": "unsupported transport operation"}
         except Exception as exc:

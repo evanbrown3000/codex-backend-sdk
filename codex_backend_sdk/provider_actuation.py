@@ -303,10 +303,11 @@ class ComputerUseXProviderAdapter:
 
     def _call(self, name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
         source = Path(os.environ.get(
-            "COMPUTERUSEX_SOURCE", "/workspace/cognilode/source/current/automation-computeruse-vision/src"
+            "COMPUTERUSEX_SOURCE", "/runtime/source/current/automation-computeruse-vision/src"
         ))
+        legacy = Path("/workspace/cognilode/source/current/automation-computeruse-vision/src")
         local = Path.home() / "Projects/automation-computeruse-vision/src"
-        for candidate in (source, local):
+        for candidate in (source, legacy, local):
             if candidate.is_dir() and str(candidate) not in sys.path:
                 sys.path.insert(0, str(candidate))
         module = importlib.import_module("computerusex.web_agent_mcp_server")
@@ -320,7 +321,7 @@ class ComputerUseXProviderAdapter:
             "provider": self.provider, "create": True, "continue": True,
             "resume": True, "fork": "logical", "attachments": True,
             "terminal_stream": False, "terminal_collection": True,
-            "returned_files": False, "transport": "computerusex_native_web",
+            "returned_files": True, "transport": "computerusex_native_web",
             "browser_observation": "mutation_bound_terminal_collection_only",
         }
 
@@ -332,26 +333,43 @@ class ComputerUseXProviderAdapter:
                 "request_id": request.operation_id,
             })
             conversation_id = str(forked.get("conversation_id") or "") or None
-        if not conversation_id and request.attachments:
+        browser_turn = bool(request.attachments or request.metadata.get("browser_transport"))
+        if not conversation_id and browser_turn:
             opened = self._call("conversation.create", {
                 "provider": self.provider, "request_id": request.operation_id,
                 "transport": "browser",
             })
             conversation_id = str(opened.get("conversation_id") or "") or None
-        attachment_receipts = []
-        for path in request.attachments:
-            attachment_receipts.append(self._call("conversation.attach", {
-                "provider": self.provider, "conversation_id": conversation_id,
-                "path": path, "request_id": request.operation_id,
-            }))
+        if browser_turn:
+            source = Path(os.environ.get(
+                "COMPUTERUSEX_SOURCE", "/runtime/source/current/automation-computeruse-vision/src"
+            ))
+            for candidate in (source, Path("/workspace/cognilode/source/current/automation-computeruse-vision/src"),
+                              Path.home() / "Projects/automation-computeruse-vision/src"):
+                if candidate.is_dir() and str(candidate) not in sys.path:
+                    sys.path.insert(0, str(candidate))
+            runtime = importlib.import_module("computerusex.web_agent_runtime")
+            result = runtime.run_web_agent(
+                self.provider,
+                request.prompt,
+                attachment=list(request.attachments),
+                timeout_seconds=float(request.metadata.get("timeout_seconds", 900)),
+                stable_seconds=float(request.metadata.get("stable_seconds", 2.5)),
+            )
+            result.setdefault("conversation_id", conversation_id)
+            result.setdefault("complete_response_read", bool(result.get("ok") and result.get("response")))
+            submission = result.get("submission") if isinstance(result.get("submission"), Mapping) else {}
+            result.setdefault("provider_acceptance_observed", bool(
+                submission.get("submit_attempted") and submission.get("provider_visible_reconciliation")
+            ))
+            result["downloaded_files"] = list(result.get("response_downloaded_files") or [])
+            return result
         result = self._call("conversation.prompt", {
             "provider": self.provider, "conversation_id": conversation_id,
             "prompt": request.prompt, "request_id": request.operation_id,
             "transport": "auto",
             "timeout_seconds": request.metadata.get("timeout_seconds", 900),
         })
-        if attachment_receipts:
-            result["attachments"] = attachment_receipts
         return result
 
 
@@ -439,7 +457,8 @@ class UnifiedProviderActuator:
                     conversation_id=conversation_id,
                 ))
             artifacts: list[dict[str, Any]] = []
-            candidates = raw.get("downloaded_files") or raw.get("artifacts") or []
+            candidates = (raw.get("downloaded_files") or raw.get("response_downloaded_files")
+                          or raw.get("response_downloads") or raw.get("artifacts") or [])
             for item in candidates if isinstance(candidates, list) else []:
                 row = dict(item) if isinstance(item, Mapping) else {"path": str(item)}
                 path = str(row.get("path") or "")

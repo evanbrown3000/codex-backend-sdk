@@ -502,6 +502,19 @@ def main() -> int:
                               "error": type(exc).__name__ + ":" + str(exc)[:300]}), flush=True)
         if not STOP and not DRAINING:
             time.sleep(max(1.0, args.interval))
+    # A source-generation handoff must drain accepted provider turns rather
+    # than converting every source update into a retry.  The batch supervisor
+    # deliberately grants this process a long drain window; remain alive so
+    # the existing transport and collector can publish their terminal result.
+    drain_deadline = time.monotonic() + max(300.0, float(os.environ.get(
+        "COGNILODE_PROVIDER_GENERATION_DRAIN_SECONDS", "2700"
+    )))
+    while time.monotonic() < drain_deadline:
+        with lock:
+            if not active:
+                break
+        time.sleep(1.0)
+
     # A source-generation handoff must not strand jobs after begin_effect.
     # Provider transports are deliberately isolated in daemon threads so the
     # actuator can continue heartbeating, but daemon threads disappear when

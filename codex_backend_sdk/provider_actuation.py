@@ -172,10 +172,28 @@ class AgentMemoryEventPublisher:
             stream.write(line)
             stream.flush()
             os.fsync(stream.fileno())
-        try:
-            return {"ingested": True, "receipt": self.memory.ingest(observation)}
-        except Exception as exc:
-            return {"ingested": False, "error": type(exc).__name__, "outbox": str(self.outbox)}
+        deadline = time.monotonic() + float(os.environ.get(
+            "B4PT0R_AGENT_MEMORY_ADMISSION_SECONDS", "120"
+        ))
+        last: Exception | None = None
+        while True:
+            try:
+                return {"ingested": True, "receipt": self.memory.ingest(observation)}
+            except Exception as exc:
+                last = exc
+                response = getattr(exc, "response", None)
+                status = int(getattr(response, "status_code", 0) or 0)
+                # Schema/auth rejection is definitive. Capacity and network
+                # failures are retried here so terminal provider completion
+                # carries an actual Agent Memory admission receipt rather than
+                # merely leaving an outbox entry for a later operator.
+                if status and status < 500:
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(5)
+        return {"ingested": False, "error": type(last).__name__ if last else "admission_failed",
+                "outbox": str(self.outbox)}
 
     def emit(
         self,

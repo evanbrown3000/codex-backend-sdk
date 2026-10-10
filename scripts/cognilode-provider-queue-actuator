@@ -511,6 +511,11 @@ def reject_prohibited_elapsed_time_padding(job: Mapping[str, Any]) -> bool:
 def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
     if reject_prohibited_elapsed_time_padding(job):
         return
+    # An ambiguous completion acknowledgement can leave the scheduler's
+    # durable terminal receipt on a requeued generation.  Recover that exact
+    # accepted turn before authorizing another external provider effect.
+    if int(job.get("lease_generation") or 0) > 1 and recover_terminal(job):
+        return
     # Scheduler admission persists the full payload; materialize its intent
     # into the shared join ledger before attachment work or begin_effect.
     persist_admission_intent(job)

@@ -23,6 +23,7 @@ const H=0,U=1,W=2,G=3,K=4,q=5,J=6,Y=7,X=8,F=9,Z=10,Q=11,$=12,E=13,T=14,N=15,R=16
 const state = new Map();
 let steps = 0;
 let serial = Promise.resolve();
+let halted = false;
 
 function xor(value, secret) {
   let result = "";
@@ -31,11 +32,15 @@ function xor(value, secret) {
 }
 
 async function run() {
-  while ((state.get(F) || []).length > 0) {
+  while (!halted && (state.get(F) || []).length > 0) {
     const [op, ...args] = state.get(F).shift() || [];
     const result = state.get(op)?.(...args);
     if (result && typeof result.then === "function") await result;
     steps++;
+    // Opaque programs may keep replenishing the instruction queue. Yield so
+    // the protocol's 500 ms fallback timer can fire instead of being starved
+    // by an unbounded synchronous microtask chain.
+    if ((steps & 255) === 0) await new Promise(resolve => setImmediate(resolve));
   }
 }
 
@@ -72,10 +77,10 @@ function initialize() {
 
 function solve(payload, secret) {
   return serial = serial.then(() => new Promise((resolve,reject) => {
-    initialize(); steps=0; state.set(R,secret); let done=false;
-    const timer=setTimeout(()=>{ if(!done){done=true;resolve(String(steps));}},500);
-    state.set(G,value=>{if(!done){done=true;clearTimeout(timer);resolve(btoa(String(value)));}});
-    state.set(K,value=>{if(!done){done=true;clearTimeout(timer);reject(new Error(btoa(String(value))));}});
+    initialize(); steps=0; halted=false; state.set(R,secret); let done=false;
+    const timer=setTimeout(()=>{ if(!done){done=true;halted=true;resolve(String(steps));}},500);
+    state.set(G,value=>{if(!done){done=true;halted=true;clearTimeout(timer);resolve(btoa(String(value)));}});
+    state.set(K,value=>{if(!done){done=true;halted=true;clearTimeout(timer);reject(new Error(btoa(String(value))));}});
     state.set(FN,(out,target,params,queue)=>{const array=Array.isArray(queue), names=array?params:[], instructions=(array?queue:params)||[];state.set(out,(...values)=>{if(done)return;const old=[...(state.get(F)||[])];if(array)for(let i=0;i<names.length;i++)state.set(names[i],values[i]);state.set(F,[...instructions]);return run().then(()=>state.get(target)).catch(String).finally(()=>state.set(F,old));});});
     try { state.set(F,JSON.parse(xor(atob(payload),String(state.get(R))))); run().catch(e=>{if(!done){done=true;clearTimeout(timer);resolve(btoa(`${steps}: ${String(e)}`));}}); }
     catch(e) { done=true;clearTimeout(timer);resolve(btoa(`${steps}: ${String(e)}`)); }

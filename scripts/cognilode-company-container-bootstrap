@@ -621,9 +621,11 @@ exit 2
         attempt_tmp.write_text(str(time.time()), encoding="ascii")
         attempt_tmp.replace(attempt_marker)
         conversations = control_call("conversations", "list", "--limit", "1")
-        items = (conversations or {}).get("items") or []
-        conversation_id = items[0].get("id") if items and isinstance(items[0], dict) else None
-        query = (items[0].get("title") if items and isinstance(items[0], dict) else None) or "Codex"
+        items = ((conversations or {}).get("items") or
+                 (conversations or {}).get("conversations") or [])
+        conversation_row = items[0] if items and isinstance(items[0], dict) else {}
+        conversation_id = (conversation_row.get("id") or conversation_row.get("conversation_id"))
+        query = conversation_row.get("title") or "Codex"
         searched = (control_call("conversations", "search", str(query), "--limit", "1")
                     if conversations and conversations.get("ok") is True else None)
         readback = (control_call("conversations", "read", str(conversation_id))

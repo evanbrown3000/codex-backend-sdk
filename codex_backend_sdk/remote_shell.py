@@ -51,7 +51,7 @@ class RemoteShellClient:
                 reply = self._broker.call("managed_control_request", {
                     "action": typed, "actor_id": self.actor_id,
                     "arguments": dict(arguments or {})})
-                return reply["result"]
+                return reply["result"]["result"]
             return self._broker.call(
                 "remote_shell_request",
                 {"name": name, "arguments": dict(arguments or {}), "actor_id": self.actor_id},

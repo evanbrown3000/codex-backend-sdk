@@ -106,7 +106,7 @@ class AgentMemoryClient:
             reply = self._broker.call("managed_control_request", {
                 "action": "conversation_list", "arguments": {
                     "limit": limit, "cursor": cursor, "provider": filters.get("provider", "chatgpt.com")}})
-            return reply["result"]
+            return reply["result"]["result"]
         params = {"limit": limit, "projection": projection, **filters}
         if cursor:
             params["offset"] = cursor
@@ -120,7 +120,7 @@ class AgentMemoryClient:
             reply = self._broker.call("managed_control_request", {
                 "action": "conversation_search", "arguments": {
                     "query": query, "limit": limit, "provider": filters.get("provider", "chatgpt.com")}})
-            return reply["result"]
+            return reply["result"]["result"]
         params = {"q": query, "limit": limit, "projection": projection, **filters}
         if cursor:
             params["offset"] = cursor
@@ -154,7 +154,7 @@ class AgentMemoryClient:
                 "action": "conversation_read", "arguments": {
                     "conversation_id": conversation_id, "reader_id": reader_id,
                     "after": after, "full": full, "peek": peek, "projection": projection}})
-            return reply["result"]
+            return reply["result"]["result"]
         return self.get(
             conversation_id,
             cursor=None if full else after,

@@ -9,22 +9,20 @@ services:
     network_mode: bridge
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
     working_dir: /company/codex-backend-sdk
-    entrypoint: [python3, /company/codex-backend-sdk/scripts/cognilode-http-gate]
+    entrypoint: [sh, -c]
     command:
-      - --socket
-      - /runtime/http-gate/gate.sock
-      - --state
-      - /runtime/http-gate
-      - --fallback-log
-      - /runtime/http-gate/fallback.jsonl
-      - --environment
-      - ${COGNILODE_ENVIRONMENT_ID}
-      - --aws
-      - /usr/bin/aws
+      - |
+        while ! test -f /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-source-generation; do sleep 2; done
+        exec python3 /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-source-generation \
+          --script cognilode-http-gate --drain-socket /runtime/http-gate/gate.sock --no-drain -- \
+          --socket /runtime/http-gate/gate.sock --state /runtime/http-gate \
+          --fallback-log /runtime/http-gate/fallback.jsonl \
+          --environment ${COGNILODE_ENVIRONMENT_ID} --aws /usr/bin/aws
     environment:
       HOME: /home/worker
       COGNILODE_HTTP_GATE_BYPASS: "1"
       COGNILODE_AWS_PURPOSE: secrets-read
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
       COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
       PATH: /usr/bin:/usr/local/bin:/bin
     volumes:

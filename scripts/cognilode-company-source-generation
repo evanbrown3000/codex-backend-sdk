@@ -50,6 +50,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--script", required=True)
     parser.add_argument("--drain-socket", type=Path, required=True)
+    parser.add_argument("--no-drain", action="store_true",
+                        help="restart a non-mutating local service on source change")
     parser.add_argument("args", nargs=argparse.REMAINDER)
     options = parser.parse_args()
     if "/" in options.script or options.script.startswith("."):
@@ -72,6 +74,8 @@ def main() -> int:
         if child.poll() is None:
             last_report = 0.0
             while child.poll() is None:
+                if options.no_drain:
+                    break
                 active = drain(options.drain_socket)
                 if active == 0:
                     break

@@ -22,6 +22,40 @@ import time
 STOP = False
 
 
+def service_python() -> Path:
+    """Return the newest complete immutable SDK interpreter.
+
+    The generation supervisor is deliberately bootstrapped by the container's
+    system Python, but SDK services import packaged dependencies (requests,
+    Universe Storage, ComputerUseX) that live in the immutable B4PT0R release.
+    Running children with ``sys.executable`` therefore made every provider
+    attempt fail before transport.  Only published ``.complete`` releases are
+    eligible, including completed predecessor generations during a cold build.
+    """
+    explicit = os.environ.get("COGNILODE_SOURCE_GENERATION_PYTHON", "").strip()
+    if explicit:
+        candidate = Path(explicit)
+        if candidate.is_file():
+            return candidate
+    configured = Path(os.environ.get(
+        "COGNILODE_B4PT0R_RELEASE_ROOT",
+        "/runtime/b4pt0r-releases/locked-v3-computerusex",
+    ))
+    roots = [configured]
+    if configured.parent.is_dir():
+        roots.extend(
+            path for path in configured.parent.iterdir()
+            if path.is_dir() and path != configured
+        )
+    candidates: list[tuple[int, Path]] = []
+    for root in roots:
+        for marker in root.glob("*/.complete"):
+            interpreter = marker.parent / "bin" / "python"
+            if interpreter.is_file():
+                candidates.append((marker.stat().st_mtime_ns, interpreter))
+    return max(candidates, default=(0, Path(sys.executable)))[1]
+
+
 def content_generation(current: Path) -> tuple[Path, str] | None:
     """Identify the executable closure rather than the checkout directory."""
     selected = current.resolve()
@@ -89,7 +123,8 @@ def main() -> int:
             continue
         selected, signature = generation
         print(f"SDK service {options.script} source generation {selected}", flush=True)
-        child = subprocess.Popen([sys.executable, str(selected), *child_args], env=os.environ.copy())
+        child = subprocess.Popen([str(service_python()), str(selected), *child_args],
+                                 env=os.environ.copy())
         while child.poll() is None and not STOP:
             active_generation = content_generation(current)
             if active_generation is None or active_generation[1] != signature:

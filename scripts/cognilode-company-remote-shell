@@ -93,7 +93,7 @@ def drive_rollout(payload):
 
 def stock_conversation(payload):
     """Read indexed normalized stock locally; never poll a provider."""
-    if not isinstance(payload,dict) or payload.get('action') not in ('search','list','read','status'):
+    if not isinstance(payload,dict) or payload.get('action') not in ('search','list','read','context','status'):
         raise ValueError('invalid conversation stock operation')
     if len(str(payload.get('selector') or ''))>200 or len(str(payload.get('query') or ''))>1000:
         raise ValueError('conversation stock selector or query too long')

@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Promote one reviewed source commit through an isolated worktree. The normal
+# source-sync and site publisher then adopt the resulting main revision.
+set -euo pipefail
+
+if [[ $# -lt 3 || $# -gt 4 ]]; then
+  echo "usage: $0 REPOSITORY COMMIT BRANCH [ATTEMPTS]" >&2
+  exit 64
+fi
+
+repo=$1
+change=$2
+branch=$3
+attempts=${4:-3}
+[[ $attempts =~ ^[1-9][0-9]*$ ]] || { echo 'invalid attempts' >&2; exit 64; }
+[[ $branch =~ ^[A-Za-z0-9._/-]+$ ]] || { echo 'invalid branch' >&2; exit 64; }
+repo=$(git -C "$repo" rev-parse --show-toplevel)
+git -C "$repo" cat-file -e "${change}^{commit}"
+remote=$(git -C "$repo" remote get-url origin)
+[[ -n $remote ]] || { echo 'origin remote unavailable' >&2; exit 69; }
+
+for ((try=1; try<=attempts; try++)); do
+  git -C "$repo" fetch --quiet origin "$branch"
+  base=$(git -C "$repo" rev-parse "origin/$branch")
+  if git -C "$repo" merge-base --is-ancestor "$change" "$base"; then
+    echo "already_promoted branch=$branch commit=$change head=$base"
+    exit 0
+  fi
+  worktree=$(mktemp -d "${TMPDIR:-/tmp}/cognilode-promote.XXXXXXXX")
+  cleanup() {
+    git -C "$repo" worktree remove --force "$worktree" >/dev/null 2>&1 || true
+    rmdir "$worktree" >/dev/null 2>&1 || true
+  }
+  trap cleanup EXIT
+  git -C "$repo" worktree add --quiet --detach "$worktree" "$base"
+  if ! git -C "$worktree" cherry-pick --empty=drop "$change"; then
+    git -C "$worktree" cherry-pick --abort >/dev/null 2>&1 || true
+    echo "promotion_conflict branch=$branch commit=$change base=$base" >&2
+    exit 1
+  fi
+  promoted=$(git -C "$worktree" rev-parse HEAD)
+  if git -C "$worktree" push --quiet origin "HEAD:refs/heads/$branch"; then
+    echo "promoted branch=$branch source=$change head=$promoted"
+    exit 0
+  fi
+  cleanup
+  trap - EXIT
+  if (( try == attempts )); then
+    echo "promotion_raced branch=$branch source=$change attempts=$attempts" >&2
+    exit 75
+  fi
+done

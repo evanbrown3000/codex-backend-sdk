@@ -231,7 +231,10 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
     acceptance_seed = Path(os.environ.get(
         "COGNILODE_PROVIDER_ACCEPTANCE_ROOT", "/runtime/area1-acceptance"
     )) / "area1-provider-source.zip"
-    if acceptance.is_file() and acceptance_seed.is_file():
+    # Runtime state may publish the acceptance seed after this immutable
+    # generation starts. Keep the sequencer supervised from startup rather
+    # than requiring an operator-triggered container restart.
+    if acceptance.is_file():
         workers.append(([str(CLI.rsplit("/", 1)[0] + "/python"), str(acceptance)], {}))
     # ComputerUseX remains the domain-owned browser adapter.  B4PT0R owns the
     # singular queue-to-actuator boundary for every non-ChatGPT .com provider,
@@ -258,7 +261,7 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
             # Listing all four here is safe because `_onboarding_ready` keeps
             # later platforms incapable of consuming unrelated queued work
             # until every predecessor has produced accepted provider proof.
-            if provider in requested or acceptance_seed.is_file():
+            if provider in requested or acceptance.is_file():
                 worker_environment = {"PYTHONPATH": pythonpath}
                 worker_environment.update(provider_generation_environment(interpreter))
                 workers.append(([

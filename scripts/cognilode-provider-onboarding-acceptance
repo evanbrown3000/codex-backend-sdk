@@ -267,9 +267,12 @@ def prompt_for(provider: str, following: str | None) -> str:
 def main() -> int:
     root = Path(os.environ.get("COGNILODE_PROVIDER_ACCEPTANCE_ROOT", "/runtime/area1-acceptance"))
     seed = root / "area1-provider-source.zip"
-    if not seed.is_file():
-        raise SystemExit("acceptance seed packet is unavailable")
     root.mkdir(parents=True, exist_ok=True)
+    # Discovery and source publication are independent daemons. Remain
+    # resident when discovery starts first so a late seed activates the
+    # sequence without manual intervention.
+    while not seed.is_file():
+        time.sleep(5)
     state_path = root / "four-provider-proof.json"
     proof: dict[str, Any] = json.loads(state_path.read_text()) if state_path.is_file() else {
         "schema": "cognilode.four_provider_acceptance.v1", "providers": []

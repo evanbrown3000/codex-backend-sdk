@@ -91,6 +91,15 @@ def release_for(source: Path) -> tuple[Path, Path]:
                 str(release / "bin" / "python"), "-m", "pip", "install",
                 "--no-cache-dir", "--no-deps", str(computerusex),
             ], check=True, timeout=300)
+            # The hosted-provider adapter imports ComputerUseX's MCP surface
+            # directly. ComputerUseX is installed without its internal domain
+            # dependencies above, so install the one public runtime extra that
+            # surface actually requires rather than discovering it after a
+            # scheduler-authorized provider effect has begun.
+            subprocess.run([
+                str(release / "bin" / "python"), "-m", "pip", "install",
+                "--no-cache-dir", "mcp>=1.0,<2",
+            ], check=True, timeout=300)
         (release / ".complete").write_text(revision + "\n", encoding="utf-8")
     return source / "scripts" / "b4pt0r-com-batch-daemon", release / "bin" / "b4pt0r"
 

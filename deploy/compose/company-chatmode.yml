@@ -171,6 +171,7 @@ services:
     environment:
       HOME: /home/worker
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+      COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID:-evanpc-company-container}
       COGNILODE_SOURCE_SYNC_INTERVAL: "300"
       COGNILODE_SOURCE_SYNC_GENERATION: full-history-v1
       COGNILODE_AWS_PURPOSE: secrets-read

@@ -11,6 +11,7 @@ import json
 import hashlib
 from pathlib import Path
 import shutil
+import sqlite3
 import socket
 import subprocess
 import sys
@@ -167,6 +168,21 @@ def compose_service_hashes(project: str, compose: Path, env: dict[str, str]) -> 
 
 def provider_mutations_active(runtime: Path, *, drain: bool = False) -> int | None:
     """Read or fence local provider custody without observing the provider."""
+    # The transport counter is the live-process view; the scheduler's
+    # effect-pending rows are the durable mutation view.  Container replacement
+    # is safe only when both are empty.  Relying on the socket alone created a
+    # race where a generation handoff briefly reported zero while a fenced
+    # queue operation was still awaiting its terminal receipt.
+    durable_active = 0
+    database = runtime / "shared/provider-scheduler/scheduler.sqlite3"
+    try:
+        with sqlite3.connect(database, timeout=5) as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM provider_jobs WHERE state = 'effect_pending'"
+            ).fetchone()
+        durable_active = int(row[0]) if row else 0
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return None
     path = runtime / "shared/provider.sock"
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
@@ -183,7 +199,7 @@ def provider_mutations_active(runtime: Path, *, drain: bool = False) -> int | No
                 data.extend(piece)
         reply = json.loads(data.split(b"\n", 1)[0])
         active = reply.get("active")
-        return active if type(active) is int else None
+        return max(active, durable_active) if type(active) is int else None
     except (OSError, ValueError, IndexError, TypeError):
         return None
 

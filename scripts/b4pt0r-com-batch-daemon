@@ -9,6 +9,7 @@ import hashlib
 from pathlib import Path
 import subprocess
 import signal
+import sqlite3
 import sys
 import threading
 import time
@@ -162,6 +163,27 @@ def _onboarding_ready(program: list[str]) -> bool:
     return all(prior in completed for prior in order[:order.index(provider)])
 
 
+def _provider_effect_in_flight(program: list[str]) -> bool:
+    """Keep an actuator's complete process tree intact during provider work."""
+    if "--provider" not in program:
+        return False
+    provider = program[program.index("--provider") + 1]
+    path = Path(os.environ.get(
+        "COGNILODE_PROVIDER_SCHEDULER_DB", "/runtime/provider-scheduler/scheduler.sqlite3"
+    ))
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2) as connection:
+            row = connection.execute(
+                "SELECT 1 FROM provider_jobs WHERE provider=? "
+                "AND state IN ('claimed','effect_pending') LIMIT 1", (provider,),
+            ).fetchone()
+        return row is not None
+    except (OSError, sqlite3.Error):
+        # A temporarily unreadable scheduler is not evidence that an external
+        # provider mutation is safe to interrupt.
+        return True
+
+
 def supervise(program: list[str], extra_environment: dict[str, str] | None = None) -> None:
     environment = os.environ.copy()
     environment.update(extra_environment or {})
@@ -187,6 +209,12 @@ def supervise(program: list[str], extra_environment: dict[str, str] | None = Non
         while not STOP and process.poll() is None:
             _, active_signature = _sdk_worker_generation(program)
             if active_signature != signature:
+                worker_name = Path(selected[1]).name if len(selected) > 1 else "external"
+                if (worker_name in {
+                    "cognilode-provider-queue-actuator", "cognilode-chatmode-queue-worker",
+                } and _provider_effect_in_flight(program)):
+                    time.sleep(1)
+                    continue
                 break
             time.sleep(1)
         if process.poll() is None:

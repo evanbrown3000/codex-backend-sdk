@@ -11,6 +11,21 @@ import requests
 _MAX_ERROR_DETAIL_CHARS = 4_000
 
 
+def _require_central_http_gate(method: str, url: str) -> None:
+    """Require the custody-owned gate whenever a broker supplies its socket.
+
+    Importing lazily keeps the SDK provider-focused while allowing the custody
+    runtime to inject its policy package through ``PYTHONPATH``.
+    """
+    import os
+
+    if not os.environ.get("COGNILODE_HTTP_GATE_SOCKET"):
+        return
+    from control_exec.http_gate_client import require
+
+    require(method, url)
+
+
 def raise_for_status_with_detail(response: requests.Response) -> None:
     """Raise the usual HTTPError while retaining a bounded backend error body."""
     try:
@@ -41,6 +56,7 @@ def request_with_retries(
     last_error: requests.RequestException | None = None
     for attempt in range(max_retries + 1):
         try:
+            _require_central_http_gate(method, url)
             request = session.request if use_session else requests.request
             response = request(method, url, **kwargs)
             if should_retry_response(response, attempt, max_retries=max_retries):

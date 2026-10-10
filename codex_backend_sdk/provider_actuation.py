@@ -26,6 +26,7 @@ import uuid
 
 from .agent_memory import AgentMemoryClient
 from .attachment_custody import commit_returned_artifact
+from .generation_fence import require_generation
 from .provider_leases import ProviderLeaseAuthority
 
 
@@ -533,6 +534,7 @@ class UnifiedProviderActuator:
 
     def prompt(self, request: ProviderPromptRequest) -> ProviderResultEnvelope:
         request = request.normalized()
+        require_generation({"capability": request.capability_lease})
         started = datetime.now(timezone.utc).isoformat()
         event_ids: list[str] = []
         custody = self.leases.redeem(

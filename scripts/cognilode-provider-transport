@@ -16,6 +16,8 @@ import threading
 import time
 import uuid
 
+from codex_backend_sdk.generation_fence import GenerationManifest, require_generation
+
 SENDER = Path(__file__).with_name("cognilode-b4pt0r-chatmode")
 COLLECTOR = Path(__file__).with_name("cognilode-b4pt0r-collect")
 COUNTER_LOCK = threading.Lock()
@@ -25,34 +27,12 @@ DRAINING = False
 
 
 def runtime_python() -> Path:
-    # This transport already runs inside an immutable, completed SDK release.
-    # Provider mutations admitted to this generation must finish with that
-    # same generation; chasing the mutable `current` source link creates a
-    # send outage during every release build and violates drain semantics.
-    # A venv interpreter is commonly a symlink to the base interpreter.
-    # Resolving it discards the immutable release directory and makes every
-    # source-frontier change look as if no incumbent release exists.
-    incumbent = Path(sys.executable)
-    incumbent_root = incumbent.parent.parent
-    if incumbent.is_file() and (incumbent_root / ".complete").is_file():
-        return incumbent
-    source = Path(os.environ.get(
-        "COGNILODE_B4PT0R_SDK_ROOT", "/runtime/source/current/codex-backend-sdk"
-    )).resolve()
-    release_root = Path(os.environ.get(
-        "COGNILODE_B4PT0R_RELEASE_ROOT", "/runtime/b4pt0r-releases/locked-v3-computerusex"
-    ))
-    try:
-        revision = subprocess.check_output(
-            ["git", "-C", str(source), "rev-parse", "HEAD"], text=True, timeout=15
-        ).strip()
-    except (OSError, subprocess.SubprocessError):
-        revision = source.name
-    selected = release_root / revision / "bin/python"
-    if selected.is_file() and (selected.parent.parent / ".complete").is_file():
+    manifest = GenerationManifest.load()
+    manifest.validate()
+    selected = Path(manifest.runtime_python)
+    if selected.is_file():
         return selected
-    raise RuntimeError("current immutable B4PT0R custody runtime unavailable")
-
+    raise RuntimeError("immutable generation runtime unavailable")
 
 def option(args: list[str], name: str, default: str = "") -> str:
     try:
@@ -83,6 +63,13 @@ def b4pt0r_send(args: list[str], send_fence: dict) -> dict:
     prompt_file = Path(option(args, "--prompt-file"))
     job_id = option(args, "--queue-job-id")
     provider_attempt = option(args, "--provider-attempt", "0")
+    # The queue's begin_effect response carries the scheduler's real expiry;
+    # the actuator passes its remaining budget through this option. Avoid a
+    # shorter transport/client timeout that would orphan an accepted turn.
+    try:
+        turn_timeout = max(60, int(option(args, "--timeout", "1800")))
+    except ValueError:
+        turn_timeout = 1800
     if not prompt_file.is_file() or not job_id:
         return {"exit_code": 64, "stderr": "queued prompt input unavailable"}
     artifact_root = Path.home() / ".local/share/cognilode/b4pt0r-chatmode" / (
@@ -130,9 +117,10 @@ def b4pt0r_send(args: list[str], send_fence: dict) -> dict:
             "origin": str(send_fence.get("origin") or "provider_queue"),
             "taskflow_node": send_fence.get("taskflow_node"),
         },
-        "metadata": {"provider_attempt": provider_attempt, "queue_job_id": job_id},
+        "metadata": {"provider_attempt": provider_attempt, "queue_job_id": job_id,
+                     "timeout_seconds": turn_timeout},
     }
-    completed_code, value, completed_stderr = _broker_call(payload, timeout=2100)
+    completed_code, value, completed_stderr = _broker_call(payload, timeout=turn_timeout + 120)
     if value.get("accepted") is not True or value.get("terminal") is not True:
         return {"exit_code": completed_code or 70,
                 "stdout": json.dumps(value, separators=(",", ":")),
@@ -173,6 +161,7 @@ def transport(args: list[str], send_fence: dict | None = None) -> dict:
                     ("job_id", "worker_id", "lease_token", "lease_generation", "device_id"))):
         return {"exit_code": 64, "stderr": "queued provider send requires effect fence"}
     if verb == "send":
+        require_generation(send_fence)
         with COUNTER_LOCK:
             if DRAINING:
                 return {"exit_code": 75, "stdout": json.dumps({"ok": False,
@@ -283,6 +272,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--socket", type=Path, required=True)
     args = parser.parse_args()
+    GenerationManifest.load().validate()
     args.socket.parent.mkdir(parents=True, exist_ok=True)
     # Only one credential-bearing mutation server may own a custody socket.
     # Hold the lock for the process lifetime; a parallel recovery invocation

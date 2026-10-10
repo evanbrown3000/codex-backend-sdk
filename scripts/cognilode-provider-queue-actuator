@@ -8,6 +8,7 @@ crosses the fenced effect boundary, and reports the normalized provider result.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -44,6 +45,21 @@ def fence(job: Mapping[str, Any]) -> dict[str, Any]:
         "lease_token": str(lease.get("token") or job.get("lease_token") or ""),
         "lease_generation": int(lease.get("generation") or job.get("lease_generation") or 0),
     }
+
+
+def lease_remaining_seconds(job: Mapping[str, Any], *, fallback: int = 3600) -> int:
+    """Use the scheduler's persisted effect lease, not a generation timeout."""
+    lease = job.get("lease") if isinstance(job.get("lease"), Mapping) else {}
+    until = lease.get("until") or job.get("lease_until")
+    if isinstance(until, (int, float)):
+        return max(1, int(float(until) - time.time()))
+    if isinstance(until, str) and until:
+        try:
+            parsed = datetime.fromisoformat(until.replace("Z", "+00:00"))
+            return max(1, int((parsed - datetime.now(timezone.utc)).total_seconds()))
+        except ValueError:
+            pass
+    return fallback
 
 
 def local_attachment(row: object) -> str:
@@ -238,12 +254,13 @@ def chatgpt_transport(job: Mapping[str, Any], attachments: tuple[str, ...]) -> d
     )
     requested_effort = str(job.get("reasoning_effort") or "xhigh")
     effort = {"max": "xhigh", "extended": "xhigh"}.get(requested_effort, requested_effort)
+    turn_timeout = max(60, lease_remaining_seconds(job))
     args = [
         "--auth-source", "codex", "send", "--prompt-file", str(prompt_file),
         "--queue-job-id", job_id,
         "--model", model,
         "--effort", effort,
-        "--timeout", "1800", "--provider-attempt", str(job.get("lease_generation") or 1),
+        "--timeout", str(turn_timeout), "--provider-attempt", str(job.get("lease_generation") or 1),
         "--provider-account-id", "central-custody",
     ]
     conversation_id = str(job.get("conversation_id") or "")
@@ -273,7 +290,7 @@ def chatgpt_transport(job: Mapping[str, Any], attachments: tuple[str, ...]) -> d
     }}
     path = os.environ.get("COGNILODE_PROVIDER_SOCKET", "/runtime/provider.sock")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(2400); connection.connect(path)
+        connection.settimeout(turn_timeout + 180); connection.connect(path)
         connection.sendall((json.dumps(request, separators=(",", ":")) + "\n").encode())
         connection.shutdown(socket.SHUT_WR)
         chunks = []
@@ -351,6 +368,10 @@ def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
     boundary = scheduler_call({"operation": "begin_effect", **fence(job)})
     if boundary.get("send_authorized") is not True:
         return
+    if isinstance(boundary.get("job"), Mapping):
+        # begin_effect returns the authoritative post-authorization lease. All
+        # downstream transport waits are derived from that actual expiry.
+        job = dict(boundary["job"])
     parent = job.get("parent_operation") if isinstance(job.get("parent_operation"), Mapping) else {}
     operation_id = str(parent.get("operation_id") or job.get("parent_operation_id") or job["id"])
     result = chatgpt_transport(job, attachments) if job["provider"] == "chatgpt.com" else client.prompt(
@@ -372,6 +393,23 @@ def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
         metadata={"timeout_seconds": 1800, "queue_job_id": job["id"]},
     )
     if result.get("accepted") is not True or result.get("terminal") is not True:
+        if result.get("accepted") is True:
+            # Acceptance has crossed the external-effect boundary. A missing
+            # terminal response is not retry authorization: collect a local
+            # terminal receipt if it appears, otherwise hold the fenced job
+            # until its actual scheduler effect lease expires.
+            expiry = time.monotonic() + lease_remaining_seconds(job)
+            while time.monotonic() < expiry:
+                if recover_terminal(job):
+                    return
+                time.sleep(min(5.0, max(0.1, expiry - time.monotonic())))
+            scheduler_call({
+                "operation": "release_job", **fence(job),
+                "provider_state": "accepted_turn_without_terminal_receipt",
+                "reason": "accepted_turn_waited_until_effect_lease_expiry",
+                "retry_after_seconds": 1,
+            })
+            return
         provider_error = result.get("provider_error") or {}
         reason = str(provider_error.get("code") or result.get("state") or "provider_incomplete")
         detail = str(provider_error.get("message") or "").strip()

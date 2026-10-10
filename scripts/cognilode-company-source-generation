@@ -105,6 +105,59 @@ def content_generation(current: Path) -> tuple[Path, str] | None:
     return selected, digest.hexdigest()
 
 
+def generation_environment(
+    selected: Path, signature: str, interpreter: Path,
+) -> dict[str, str]:
+    """Publish a complete manifest before provider-custody cutover."""
+    environment = os.environ.copy()
+    if selected.name != "cognilode-provider-transport":
+        return environment
+    executable_root = selected.parent.parent.resolve()
+    source_revision = executable_root.name
+    runtime_python = str(interpreter)
+    runtime_fingerprint = hashlib.sha256(
+        f"{source_revision}|{runtime_python}".encode()
+    ).hexdigest()
+    transport_version = hashlib.sha256(selected.read_bytes()).hexdigest()
+    generation_id = hashlib.sha256(
+        "|".join((source_revision, signature, runtime_fingerprint, transport_version)).encode()
+    ).hexdigest()
+    manifest = {
+        "generation_id": generation_id,
+        "source_revision": source_revision,
+        "runtime_fingerprint": runtime_fingerprint,
+        "provider_transport_version": transport_version,
+        "fence_identity": signature,
+        "runtime_python": runtime_python,
+        "executable_root": str(executable_root),
+    }
+    manifest_root = Path(os.environ.get(
+        "COGNILODE_GENERATION_MANIFEST_ROOT", "/runtime/provider-generations"
+    ))
+    manifest_root.mkdir(parents=True, exist_ok=True)
+    manifest_path = manifest_root / f"{generation_id}.json"
+    if not manifest_path.is_file():
+        temporary = manifest_path.with_suffix(f".tmp-{os.getpid()}")
+        with temporary.open("w", encoding="utf-8") as stream:
+            json.dump(manifest, stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(manifest_path)
+        directory = os.open(manifest_root, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    environment.update({
+        "COGNILODE_GENERATION_MANIFEST": str(manifest_path),
+        "COGNILODE_RUNTIME_GENERATION_FINGERPRINT": runtime_fingerprint,
+        "COGNILODE_PROVIDER_TRANSPORT_VERSION": transport_version,
+        "COGNILODE_GENERATION_FENCE_IDENTITY": signature,
+    })
+    return environment
+
+
 def request_stop(_signum, _frame):
     global STOP
     STOP = True
@@ -189,8 +242,9 @@ def main() -> int:
         # generation's children, leaving multiple queue consumers alive.  Own
         # the generation as one process group so the already-drained handoff
         # retires the whole tree atomically.
+        child_environment = generation_environment(selected, signature, interpreter)
         child = subprocess.Popen([str(interpreter), str(selected), *child_args],
-                                 env=os.environ.copy(), start_new_session=True)
+                                 env=child_environment, start_new_session=True)
         pending_signature: str | None = None
         pending_since = 0.0
         stability_seconds = float(os.environ.get(

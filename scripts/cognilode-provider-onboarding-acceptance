@@ -152,6 +152,21 @@ def memory_admitted(result: Mapping[str, Any]) -> bool:
     return False
 
 
+def wait_bootstrap_job(client: ProviderCommandClient, provider: str, job_id: str) -> dict[str, Any]:
+    """Wait through queue-authorized retries without losing bootstrap pacing."""
+    last_state = ""
+    while True:
+        value = scheduler_call({"operation": "get_job", "job_id": job_id})
+        job = value.get("job") if isinstance(value.get("job"), Mapping) else {}
+        state = str(job.get("state") or "")
+        if state == "queued" and state != last_state:
+            scheduler_call({"operation": "rhythm_fast_forward", "provider": provider, "slots": 1})
+        if state in {"complete", "completed", "provider_complete", "failed", "dead", "cancelled"}:
+            return client.wait(job_id)
+        last_state = state
+        time.sleep(5)
+
+
 def source_packet(root: Path) -> Path:
     """Give the provider the actual SDK and browser-adapter sources."""
     source = Path(__file__).resolve().parents[1]
@@ -287,7 +302,7 @@ def main() -> int:
                 # Acceptance is an explicit bootstrap operation, not ordinary
                 # production cadence. Release one preserved biological slot.
                 scheduler_call({"operation": "rhythm_fast_forward", "provider": provider, "slots": 1})
-            result = client.wait(job_id)
+            result = wait_bootstrap_job(client, provider, job_id)
             job = result.get("job") if isinstance(result.get("job"), Mapping) else {}
             proof["inflight"].pop(provider, None)
             reasons: list[str] = []

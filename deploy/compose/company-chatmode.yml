@@ -218,6 +218,10 @@ services:
       # reach terminal receipt or their real scheduler expiry.
       COGNILODE_PROVIDER_SCHEDULER_DB: /runtime/provider-scheduler/scheduler.sqlite3
       COMPUTERUSEX_CDP_ENDPOINT: ${COMPUTERUSEX_CDP_ENDPOINT:-http://127.0.0.1:9334}
+      COGNILODE_PROVIDER_CODEX_RECOVERY: "1"
+      COMPUTERUSEX_MODIFIED_CODEX: /codex/bin/codex
+      COMPUTERUSEX_CODEX_STATE: /home/worker/.local/share/cognilode/computerusex/modified-codex
+      COMPUTERUSEX_SOURCE: /runtime/source/current/automation-computeruse-vision/src
       # Provider receipts, network captures and returned physical artifacts
       # must survive immutable chatmode container rotation.  ComputerUseX's
       # default ~/.local/state path is not a custody mount in this service.
@@ -231,6 +235,7 @@ services:
       - company_node_runtime:/node-runtime:ro
       - company_auth:/home/worker/.codex
       - company_browser:/custody/browser:ro
+      - company_codex_release:/codex:ro
       - company_operator:/home/worker/.config/cognilode:ro
       - ${COMPANY_RUNTIME_ROOT}/worker:/home/worker/.local/share/cognilode
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime

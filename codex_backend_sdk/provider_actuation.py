@@ -368,9 +368,9 @@ class ComputerUseXProviderAdapter:
         os.environ.setdefault("XDG_DATA_HOME", "/runtime/worker/xdg-data")
         os.environ.setdefault("XDG_STATE_HOME", "/runtime/worker/xdg-state")
         os.environ.setdefault("XDG_CACHE_HOME", "/runtime/worker/xdg-cache")
-        # A .com provider adapter must never consume Codex quota as a hidden
-        # recovery path. Queue-authorized retries remain provider-native.
-        os.environ["COGNILODE_PROVIDER_CODEX_RECOVERY"] = "0"
+        # Recovery is a desired-state policy.  Do not erase an explicitly
+        # enabled ComputerUseX/Modified-Codex fallback inside the adapter.
+        os.environ.setdefault("COGNILODE_PROVIDER_CODEX_RECOVERY", "0")
         source = Path(os.environ.get(
             "COMPUTERUSEX_SOURCE", "/runtime/source/current/automation-computeruse-vision/src"
         ))
@@ -406,7 +406,10 @@ class ComputerUseXProviderAdapter:
             "Use the installed ComputerUseX tools to complete this provider operation. "
             "Do not merely describe how to do it. Open the provider, submit the exact prompt, "
             "wait for the terminal response, collect returned files, and write the complete "
-            "ComputerUseX HAR when prompting fails, and write the complete "
+            "ComputerUseX HAR/network trace. Use that successful browser trace to recover the "
+            "provider's public HTTP request method and move the existing provider adapter to "
+            "that HTTP method without creating another queue, transport, or job identity. "
+            "Preserve the unified prompt/readback API and write the complete "
             f"ComputerUseX provider receipt as JSON to {response_file}.\n"
             f"Provider: {self.provider}\nMode: {request.mode}\n"
             f"Conversation: {request.conversation_id or 'new'}\n"
@@ -459,7 +462,7 @@ class ComputerUseXProviderAdapter:
             # ComputerUseX's ChatGPT-only package guards here can invoke the
             # legacy Modified Codex repair path before the native browser turn.
             os.environ["COMPUTERUSEX_SKIP_IMPORT_GUARDS"] = "1"
-            os.environ["COGNILODE_PROVIDER_CODEX_RECOVERY"] = "0"
+            os.environ.setdefault("COGNILODE_PROVIDER_CODEX_RECOVERY", "0")
             os.environ.setdefault("COMPUTERUSEX_RUNTIME_ROOT", "/runtime/worker/computerusex")
             os.environ.setdefault("XDG_DATA_HOME", "/runtime/worker/xdg-data")
             os.environ.setdefault("XDG_STATE_HOME", "/runtime/worker/xdg-state")

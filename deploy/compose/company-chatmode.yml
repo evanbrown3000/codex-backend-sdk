@@ -275,6 +275,18 @@ services:
           # socket inode can leave clients unable to reach the central queue.
           # Treat socket loss as a source-generation failure and let this
           # permanent owner re-exec the currently selected source.
+          ready=0
+          for attempt in $$(seq 1 30); do
+            if ! kill -0 $$child 2>/dev/null; then break; fi
+            if test -S /runtime/provider-scheduler.sock; then ready=1; break; fi
+            sleep 1
+          done
+          if test $$ready -eq 0; then
+            kill -TERM $$child 2>/dev/null || true
+            wait $$child 2>/dev/null || true
+            sleep 2
+            continue
+          fi
           while kill -0 $$child 2>/dev/null && test -S /runtime/provider-scheduler.sock && test "$$(readlink -f /runtime/source/current/control-execution-runtime)" = "$$source"; do sleep 2; done
           kill -TERM $$child 2>/dev/null || true
           wait $$child 2>/dev/null || true

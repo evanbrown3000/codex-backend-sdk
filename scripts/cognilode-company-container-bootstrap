@@ -985,21 +985,26 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
                             "chatmode", "provider-transport",
                             "provider-scheduler", "returned-product-actuator",
                         }.intersection(changed)
+                        deferred_mutation_services: set[str] = set()
                         active_mutations = (provider_mutations_active(runtime)
                                             if mutation_services else 0)
                         if mutation_services and active_mutations != 0:
                             # Recreating either side severs the stream between
-                            # the actuator and credential transport. Keep the
-                            # previous hashes so reconciliation retries after
-                            # every admitted provider mutation reaches terminal.
+                            # the actuator and credential transport. Defer only
+                            # that custody boundary. Unrelated services (for
+                            # example the credential lease broker and storage
+                            # adapters) must still converge while a long-running
+                            # provider turn is active; otherwise continuous work
+                            # can permanently starve unrelated infrastructure.
                             value = ("unknown" if active_mutations is None
                                      else str(active_mutations))
                             print("company Compose deferring provider custody replacement: "
                                   + value + " active sends", flush=True)
                             notify_service("WATCHDOG=1")
-                            time.sleep(2)
-                            continue
-                        if mutation_services:
+                            deferred_mutation_services = set(mutation_services)
+                            changed = [name for name in changed
+                                       if name not in deferred_mutation_services]
+                        elif mutation_services:
                             # Close admission after observing zero so a rhythm
                             # tick cannot start another turn between the check
                             # and Docker replacement. The scheduler will retain
@@ -1028,6 +1033,11 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
                             applied_hashes["codex-builder"] = previous_hashes["codex-builder"]
                         elif deferred:
                             applied_hashes.pop("codex-builder", None)
+                        for service in deferred_mutation_services:
+                            if service in previous_hashes:
+                                applied_hashes[service] = previous_hashes[service]
+                            else:
+                                applied_hashes.pop(service, None)
                         save_service_hashes(service_hash_path, applied_hashes)
                     except subprocess.TimeoutExpired as exc:
                         if "chatmode" in changed:

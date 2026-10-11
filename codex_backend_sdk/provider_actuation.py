@@ -59,6 +59,14 @@ class ParentOperation:
     def validate(self) -> None:
         if not self.operation_id or not self.origin:
             raise ValueError("higher-order parent provenance is incomplete")
+        # A direct, explicitly user-authorized first-order provider operation
+        # is not a queue/RPE/TaskFlow child and must not be forced to invent a
+        # higher-order parent.  Keep the exception narrow and explicit; every
+        # other provider mutation retains the established order-2+ fence.
+        if self.automation_order == 1 and self.origin == "user_explicit_first_order":
+            if self.taskflow_node:
+                raise ValueError("first-order provider authorization cannot name a TaskFlow node")
+            return
         if self.automation_order < 2:
             raise ValueError("provider actuation requires order-2-or-higher parent provenance")
 

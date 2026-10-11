@@ -1065,7 +1065,12 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
                     except (KeyError, ValueError) as exc:
                         print(f"company Compose reconciliation pending: {exc}", flush=True)
                     else:
-                        if not deferred:
+                        # The file-level digest is complete only when every
+                        # service in that Compose generation is complete.  The
+                        # per-service ledger above records safe partial
+                        # convergence; retaining the old file digest makes the
+                        # next loop retry only the deferred custody services.
+                        if not deferred and not deferred_mutation_services:
                             applied_digest = digest
                             applied_compose = candidate
                             temporary = digest_path.with_suffix(".tmp")

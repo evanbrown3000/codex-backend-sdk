@@ -374,6 +374,10 @@ services:
       # This non-custody process tree can therefore adopt repaired actuator,
       # event-publisher and floor-watcher source as one immutable generation.
       COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
+      # Host-networked queue workers cannot resolve Compose DNS. Attachment
+      # custody is the loopback-only Universe Storage authority on this host.
+      UNIVERSE_STORAGE_ENDPOINT: http://127.0.0.1:8765
+      UNIVERSE_STORAGE_OPERATOR_PASSWORD_FILE: /home/worker/.config/cognilode/operator-bearer
       COGNILODE_CHATMODE_DRAIN_GRACE_SECONDS: "120"
       # Provider populations have independent clocks and workers.  Keep every
       # native fallback available so a broken ChatGPT route cannot prevent

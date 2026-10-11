@@ -244,6 +244,18 @@ def tool(name,a):
         return {'ok':True,'process_id':p.id,'terminated':True}
     raise ValueError('unknown tool')
 
+def central_tool(name,args,rid):
+    token=OPERATOR_TOKEN_FILE.read_text().strip()
+    if not token: raise RuntimeError('operator custody capability unavailable')
+    body=json.dumps({'jsonrpc':'2.0','id':rid,'method':'tools/call',
+        'params':{'name':name,'arguments':args}},separators=(',',':')).encode()
+    request=urllib.request.Request(CENTRAL+'/api/operator/remote-shell/mcp',data=body,
+        method='POST',headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
+    with urllib.request.urlopen(request,timeout=60) as response:
+        value=json.load(response)
+    if value.get('error'): raise RuntimeError(value['error'].get('message','central relay error'))
+    return value.get('result') or {}
+
 def heartbeat():
     while True:
         try:
@@ -296,8 +308,12 @@ class H(BaseHTTPRequestHandler):
             if method=='initialize': result={'protocolVersion':'2025-06-18','capabilities':{'tools':{}},'serverInfo':{'name':'cognilode-company-remote-shell','version':'3.0.0'}}
             elif method=='tools/list': result={'tools':[{'name':x,'description':x,'inputSchema':{'type':'object'}} for x in ('shell_execute','shell_start','shell_poll','shell_write','shell_terminate')]}
             elif method=='tools/call':
-                v=tool(payload.get('params',{}).get('name',''),payload.get('params',{}).get('arguments') or {})
-                result={'content':[{'type':'text','text':json.dumps(v)}],'isError':not v.get('ok',False)}
+                name=payload.get('params',{}).get('name',''); arguments=payload.get('params',{}).get('arguments') or {}
+                if name in ('node_list','environment_list','environment_current','environment_select','exec_command','write_stdin'):
+                    result=central_tool(name,arguments,rid)
+                else:
+                    v=tool(name,arguments)
+                    result={'content':[{'type':'text','text':json.dumps(v)}],'isError':not v.get('ok',False)}
             else: return self.sendj({'jsonrpc':'2.0','id':rid,'error':{'code':-32601,'message':'unknown method'}})
             self.sendj({'jsonrpc':'2.0','id':rid,'result':result})
         except Exception as e:

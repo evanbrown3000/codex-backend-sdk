@@ -65,6 +65,10 @@ services:
       - cognilode/chatmode/codex-auth
       - --writer-secret
       - cognilode/memory-drive/rclone-config
+      - --operator-password-file
+      - /home/worker/.config/cognilode/operator-bearer
+      - --serve-port
+      - "18892"
     environment:
       HOME: /home/worker
       COGNILODE_AWS_PURPOSE: secrets-write

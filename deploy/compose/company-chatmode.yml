@@ -335,7 +335,8 @@ services:
       # The provider population is desired state, not a host bootstrap option.
       # A stale host override previously collapsed this back to ChatGPT-only
       # and made the independent Gemini/Claude/Anthropic queues inert.
-      COGNILODE_HOSTED_RHYTHM_PROVIDERS: "chatgpt.com,gemini.com,claude.com,anthropic.com,codex.research"
+      COGNILODE_HOSTED_RHYTHM_PROVIDERS: "chatgpt.com,gemini.com,claude.com,anthropic.com"
+      COGNILODE_CODEX_RESEARCH_ACTUATOR: "1"
       # The centrally-custodied provider browser is attached to the company
       # network; provider actuators must never fall back to a host/personal
       # browser on the unrelated Docker bridge.

@@ -294,10 +294,16 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
             # Provider populations have independent clocks and workers.  Keep
             # every native fallback available so a broken ChatGPT route cannot
             # prevent Gemini, Claude, or Anthropic from repairing it.
-            "chatgpt.com,gemini.com,claude.com,anthropic.com,codex.research",
+            "chatgpt.com,gemini.com,claude.com,anthropic.com",
         ).split(",")
         if value.strip()
     }
+    # Installed Codex is quota-scheduled, not biologically clocked.  Keep its
+    # actuator available without advertising it to the .com rhythm caller.
+    if os.environ.get("COGNILODE_CODEX_RESEARCH_ACTUATOR", "1").strip().casefold() not in {
+        "0", "false", "no", "off",
+    }:
+        requested.add("codex.research")
     workers: list[tuple[list[str], dict[str, str]]] = []
     # The authenticated privacy export is a provider-owned source stream, not
     # a one-time host migration.  Keep the recovered bounded adapter under the

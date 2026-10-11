@@ -261,6 +261,11 @@ services:
       - company_operator:/home/worker/.config/cognilode:ro
       - ${COMPANY_RUNTIME_ROOT}/worker:/home/worker/.local/share/cognilode
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
+      # Installed-Codex output paths cross the provider-transport and exec
+      # broker boundary.  Mount the same worker namespace at the broker's
+      # validated /runtime/worker path so terminal output is not written into
+      # a different, shadowed directory beneath the shared runtime mount.
+      - ${COMPANY_RUNTIME_ROOT}/worker:/runtime/worker
     depends_on:
       - http-gate
       - credential-sync

@@ -144,6 +144,13 @@ def main() -> int:
         result = raw.get("result", raw)
         if isinstance(result, dict) and result.get("structuredContent") is not None:
             result = result["structuredContent"]
+    elif operation == "provider_scheduler_request":
+        from codex_backend_sdk.provider_scheduler_client import scheduler_call
+        request_payload = payload.get("payload")
+        if not isinstance(request_payload, dict):
+            result = {"ok": False, "error": "provider_scheduler_payload_required"}
+        else:
+            result = scheduler_call(request_payload, timeout=120)
     elif operation == "chatgpt_continue":
         result = provider_send(payload)
     else:

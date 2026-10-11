@@ -132,7 +132,14 @@ class ProviderCommandClient:
             "rhythm_read", "rhythm_tick", "rhythm_device_heartbeat",
             "queue_ledger", "codex_admit", "codex_budget_update", "provider_cooldown",
         }
-        if scheduler_available() or str(payload.get("operation") or "") in scheduler_operations:
+        if scheduler_available():
+            return scheduler_call(payload, timeout=min(self.timeout, 240))
+        if self.command and str(payload.get("operation") or "") in scheduler_operations:
+            value = self.call("provider_scheduler_request", {"payload": dict(payload)})
+            if isinstance(value, Mapping) and value.get("ok") is False:
+                raise RuntimeError(str(value.get("error") or "provider scheduler rejected operation"))
+            return dict(value)
+        if str(payload.get("operation") or "") in scheduler_operations:
             return scheduler_call(payload, timeout=min(self.timeout, 240))
         if not self.token and self.command:
             value = self.call("agent_memory_request", {

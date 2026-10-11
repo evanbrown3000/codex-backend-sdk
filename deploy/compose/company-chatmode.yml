@@ -342,6 +342,10 @@ services:
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
       - company_codex_release:/codex:ro
       - company_auth:/home/worker/.codex
+      # Operation-scoped provider brokers may read the singular custodied
+      # browser token database to mint short-lived provider session leases.
+      # The volume is read-only; raw credentials never leave this container.
+      - company_browser:/custody/browser:ro
       - memory_data:/runtime/agent-memory:ro
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
     depends_on:

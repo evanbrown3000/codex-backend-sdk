@@ -350,7 +350,7 @@ def codex_device_id() -> str:
     return match.group(1) if match else ""
 
 
-def codex_identity() -> tuple[object, dict, str]:
+def codex_identity(*, require_device: bool = True) -> tuple[object, dict, str]:
     from curl_cffi import requests
 
     auth_path = Path.home() / ".codex/auth.json"
@@ -362,8 +362,8 @@ def codex_identity() -> tuple[object, dict, str]:
     account_id = str(tokens.get("account_id") or "")
     if not token or not account_id:
         raise CapabilityError("codex_auth_incomplete", "Codex auth omitted access token or account ID")
-    device_id = codex_device_id()
-    if not device_id:
+    device_id = codex_device_id() if require_device else ""
+    if require_device and not device_id:
         raise CapabilityError("codex_device_missing", "Codex Desktop device ID not found")
     session = requests.Session(impersonate=DEFAULT_IMPERSONATE, timeout=120)
     return session, {

@@ -558,7 +558,10 @@ def run(url_file: Path, *, maximum: int, state_root: Path = STATE_ROOT) -> dict:
         # profile.  Reuse the same singular custody identity as B4PT0R's native
         # Chat-mode transport instead of creating an environment-local browser
         # credential dependency for archival range reads.
-        session, auth, device_id = sender.codex_identity()
+        # Archive range reads use the custody-held account credential but do
+        # not perform a provider mutation and therefore do not need to mint or
+        # persist a provider device identity in this read-only worker.
+        session, auth, device_id = sender.codex_identity(require_device=False)
         session.headers.update(sender.app_headers(auth, device_id=device_id))
         try:
             source = AuthenticatedRangeFile(session, url, retry_hook=defer_source_retry)

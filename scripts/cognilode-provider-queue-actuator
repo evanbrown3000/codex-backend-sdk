@@ -35,6 +35,14 @@ CHATGPT_DEFAULT_CONCURRENCY = 10
 MAX_ACTUATION_CONCURRENCY = 32
 
 
+def timestamp(value: object) -> float:
+    if value in (None, ""):
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+
+
 def provider_backend_ready(provider: str) -> bool:
     """Publish availability only when the mutation backend is reachable."""
     if provider == "chatgpt.com":
@@ -280,7 +288,7 @@ def recover_terminal(job: Mapping[str, Any]) -> bool:
         ))
         receipt_root = runtime_root / "durable" / "web_agents" / profile
         prompt_sha = hashlib.sha256(str(job.get("prompt") or "").encode()).hexdigest()
-        effect_started = float(job.get("effect_started_at") or 0)
+        effect_started = timestamp(job.get("effect_started_at"))
         operation_prefix = f"{job_id}:lease:"
         candidates: list[tuple[int, Path, Mapping[str, Any]]] = []
         for path in receipt_root.glob(f"web-agent-{profile}-*.json"):
@@ -294,7 +302,7 @@ def recover_terminal(job: Mapping[str, Any]) -> bool:
                         and not str(row.get("operation_id")).startswith(operation_prefix))
                     or row.get("ok") is not True
                     or str(row.get("status") or "") != "response_collected"
-                    or float(row.get("completed_at") or 0) < effect_started):
+                    or timestamp(row.get("completed_at")) < effect_started):
                 continue
             candidates.append((path.stat().st_mtime_ns, path, row))
         if not candidates:
@@ -398,7 +406,7 @@ def recover_provider_error(job: Mapping[str, Any]) -> bool:
             rows = stream.read().splitlines()
     except OSError:
         return False
-    effect_started = float(job.get("effect_started_at") or 0)
+    effect_started = timestamp(job.get("effect_started_at"))
     for raw in reversed(rows):
         try:
             event = json.loads(raw)

@@ -12,17 +12,21 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import hashlib
+import http.cookiejar
 import importlib
 import json
 import os
 from pathlib import Path
 import shlex
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 from typing import Any, Callable, Mapping, Protocol, Sequence
 import uuid
+from urllib.parse import urlencode
+from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
 
 from .agent_memory import AgentMemoryClient
 from .attachment_custody import commit_returned_artifact
@@ -441,6 +445,127 @@ class ComputerUseXProviderAdapter:
     def __init__(self, provider: str) -> None:
         self.provider = normalize_provider(provider)
 
+    @staticmethod
+    def _google_refresh_tokens() -> list[str]:
+        """Read company-custodied Chrome refresh tokens without exporting them."""
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+        database = Path(os.environ.get(
+            "B4PT0R_GOOGLE_TOKEN_DB",
+            "/custody/browser/profile/Default/Web Data",
+        ))
+        if not database.is_file():
+            return []
+        connection = sqlite3.connect(f"file:{database}?immutable=1", uri=True)
+        try:
+            rows = connection.execute(
+                "select encrypted_token from token_service order by service"
+            ).fetchall()
+        finally:
+            connection.close()
+        key = hashlib.pbkdf2_hmac("sha1", b"peanuts", b"saltysalt", 1, 16)
+        values: list[str] = []
+        for (encrypted,) in rows:
+            data = bytes(encrypted)
+            if data.startswith((b"v10", b"v11")):
+                data = data[3:]
+            try:
+                decryptor = Cipher(algorithms.AES(key), modes.CBC(b" " * 16)).decryptor()
+                clear = decryptor.update(data) + decryptor.finalize()
+                padding = clear[-1]
+                if 1 <= padding <= 16:
+                    clear = clear[:-padding]
+                value = clear.decode("utf-8")
+            except Exception:
+                continue
+            if value and value not in values:
+                values.append(value)
+        return values
+
+    @staticmethod
+    def _google_web_cookies(refresh_token: str) -> list[dict[str, Any]]:
+        """Exchange a custody token for short-lived Google web cookies."""
+        encoded = urlencode({
+            "client_id": os.environ.get(
+                "B4PT0R_GOOGLE_CLIENT_ID", "77185425430.apps.googleusercontent.com"
+            ),
+            "client_secret": os.environ.get(
+                "B4PT0R_GOOGLE_CLIENT_SECRET", "OTJgUOQcT7lO7GsGZq2G4IlT"
+            ),
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        }).encode()
+        with urlopen(Request("https://oauth2.googleapis.com/token", data=encoded), timeout=30) as response:
+            access_token = str(json.load(response)["access_token"])
+        request = Request(
+            "https://www.google.com/accounts/OAuthLogin?source=ChromiumBrowser&issueuberauth=1",
+            headers={"Authorization": "OAuth " + access_token},
+        )
+        with urlopen(request, timeout=30) as response:
+            uberauth = response.read().decode("utf-8").strip()
+        if not uberauth or "<" in uberauth:
+            raise RuntimeError("Google did not issue a web-session capability")
+        jar = http.cookiejar.CookieJar()
+        opener = build_opener(HTTPCookieProcessor(jar))
+        merge = "https://accounts.google.com/MergeSession?" + urlencode({
+            "source": "ChromiumBrowser",
+            "continue": "https://gemini.google.com/app",
+            "uberauth": uberauth,
+        })
+        with opener.open(Request(merge), timeout=45) as response:
+            response.read(1)
+        cookies: list[dict[str, Any]] = []
+        for cookie in jar:
+            item: dict[str, Any] = {
+                "name": cookie.name,
+                "value": cookie.value,
+                "domain": cookie.domain,
+                "path": cookie.path or "/",
+                "secure": bool(cookie.secure),
+            }
+            if cookie.expires:
+                item["expires"] = float(cookie.expires)
+            cookies.append(item)
+        if not cookies:
+            raise RuntimeError("Google web-session exchange returned no cookies")
+        return cookies
+
+    def _ensure_gemini_session(self) -> None:
+        """Restore Gemini login inside each operation lease when it expires."""
+        if self.provider != "gemini.com":
+            return
+        from playwright.sync_api import sync_playwright
+
+        endpoint = os.environ.get("COMPUTERUSEX_CDP_ENDPOINT", "http://127.0.0.1:9334")
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.connect_over_cdp(endpoint)
+            if not browser.contexts:
+                raise RuntimeError("provider browser has no persistent context")
+            context = browser.contexts[0]
+            page = next((candidate for candidate in context.pages
+                         if "gemini.google.com" in candidate.url), None)
+            if page is None:
+                page = context.new_page()
+                page.goto("https://gemini.google.com/app", wait_until="domcontentloaded", timeout=60_000)
+            body = page.locator("body").inner_text(timeout=20_000)
+            if "Sign in to save activity" not in body and "Ready when you are" in body:
+                return
+            failures: list[str] = []
+            for refresh_token in self._google_refresh_tokens():
+                try:
+                    context.add_cookies(self._google_web_cookies(refresh_token))
+                    page.goto("https://gemini.google.com/app", wait_until="domcontentloaded", timeout=60_000)
+                    page.wait_for_timeout(2_000)
+                    body = page.locator("body").inner_text(timeout=20_000)
+                    if "Sign in to save activity" not in body and "Ready when you are" in body:
+                        return
+                except Exception as exc:
+                    failures.append(type(exc).__name__)
+            raise RuntimeError(
+                "custodied Google tokens could not establish Gemini session: "
+                + ",".join(failures or ["no_refresh_tokens"])
+            )
+
     def _call(self, name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
         # This adapter imports only the provider-facing ComputerUseX surface.
         # ChatGPT browser guard installation belongs to the ChatGPT actuator,
@@ -570,6 +695,7 @@ class ComputerUseXProviderAdapter:
                     sys.path.insert(0, str(candidate))
             runtime = importlib.import_module("computerusex.web_agent_runtime")
             try:
+                self._ensure_gemini_session()
                 result = runtime.run_web_agent(
                     self.provider,
                     request.prompt,

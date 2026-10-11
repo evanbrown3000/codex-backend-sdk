@@ -91,7 +91,7 @@ def _lease_authority() -> ProviderLeaseAuthority:
             }
             for provider in ("gemini.com", "claude.com", "anthropic.com")
         ] + [{
-            "provider": "codex.research", "account_id": "central-codex",
+            "provider": "codex.research", "account_id": "central-custody",
             "custody_ref": "runtime:codex-exec-broker",
             "capabilities": {"attachments": False, "artifact_downloads": False,
                              "continuation": True, "models": ["gpt-6-luna"],

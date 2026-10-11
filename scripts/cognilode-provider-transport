@@ -68,7 +68,18 @@ def _broker_call(payload: dict, *, timeout: int) -> tuple[int, dict, str]:
     # the operation remains generation-fenced by the scheduler and no secret
     # leaves this process.
     current_computerusex = Path("/runtime/source/current/automation-computeruse-vision/src")
+    # `__file__` is resolved through the immutable generation checkout above.
+    # Without this explicit current-repository root, provider_broker and
+    # provider_actuation were still imported from that old checkout even while
+    # ComputerUseX itself came from the converged source tree.  That split
+    # silently discarded unified-adapter fixes (and produced stale parent/CDP
+    # behavior) on every newly spawned broker.  Prefer the converged backend
+    # package, retain the generation checkout as a fallback, then append the
+    # image's declared support paths.
+    current_backend = Path("/runtime/source/current/codex-backend-sdk")
     python_roots = [source_root]
+    if current_backend.is_dir():
+        python_roots.insert(0, str(current_backend))
     if current_computerusex.is_dir():
         python_roots.insert(0, str(current_computerusex))
     if environment.get("PYTHONPATH"):

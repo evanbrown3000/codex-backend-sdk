@@ -266,9 +266,13 @@ def supervise(program: list[str], extra_environment: dict[str, str] | None = Non
             }
             if mutation_worker and _provider_effect_in_flight(program, process.pid):
                 # Accepted/in-turn provider effects outlive source generations.
-                # Keep this supervisor alive until the worker has recorded a
-                # terminal receipt; a fixed drain timeout would kill daemon
-                # threads and lose that accepted turn.
+                # First ask the actuator to enter its cooperative drain.  Its
+                # SIGTERM handler stops *new* claims while retaining every
+                # already-authorized provider thread until terminal receipt.
+                # Waiting without this signal let a retiring generation keep
+                # accepting fresh turns forever, so a repaired successor could
+                # never become the active provider population.
+                process.terminate()
                 process.wait()
             else:
                 process.terminate()

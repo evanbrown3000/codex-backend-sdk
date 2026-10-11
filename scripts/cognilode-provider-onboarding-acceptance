@@ -235,15 +235,16 @@ def wait_bootstrap_job(client: ProviderCommandClient, provider: str, job_id: str
         # Keep this process as a result consumer and let the independent
         # provider rhythm release every attempt normally.
         conversation_id = client.conversation_id(job)
+        # A bound conversation only identifies where an effect must resume;
+        # it is not terminal provider evidence.  In particular, recovered
+        # Gemini continuations remain effect_pending while the browser is
+        # working.  Admit only the scheduler's terminal projection (which is
+        # itself written after provider receipt/artifact normalization).
         provider_complete = (
             state in {"complete", "completed", "provider_complete"}
             or bool(job.get("completed_at") and conversation_id)
-            or bool(state == "effect_pending" and conversation_id)
         )
         if provider_complete or state in {"failed", "dead", "cancelled", "rejected"}:
-            if provider_complete and state == "effect_pending":
-                return {"ok": True, "job_id": job_id, "state": "completed",
-                        "conversation_id": conversation_id, "job": dict(job)}
             return client.wait(job_id)
         time.sleep(5)
 

@@ -991,11 +991,23 @@ class UnifiedProviderActuator:
             raise ValueError("leased account differs from requested account")
         adapter = self.adapters[request.provider]
         try:
-            prepared = str(request.metadata.get("memory_context") or "") == "prepared"
+            prepared_path = next((Path(value) for value in request.attachments
+                                  if Path(value).name == "AGENT_MEMORY_FOREGROUND.md"), None)
+            prepared = (str(request.metadata.get("memory_context") or "") == "prepared"
+                        or prepared_path is not None)
             prepared_meta = request.metadata.get("agent_memory_foreground")
             if prepared:
                 if not isinstance(prepared_meta, Mapping):
-                    raise RuntimeError("prepared Agent Memory foreground metadata is missing")
+                    if prepared_path is None or not prepared_path.is_file():
+                        raise RuntimeError("prepared Agent Memory foreground metadata is missing")
+                    prepared_bytes = prepared_path.read_bytes()
+                    prepared_meta = {
+                        "persona_id": str(request.metadata.get("memory_persona") or "company"),
+                        "content_sha256": hashlib.sha256(prepared_bytes).hexdigest(),
+                        "selected_tokens": max(1, len(prepared_bytes) // 4),
+                        "foreground_handle": "prepared-attachment:" + prepared_path.name,
+                        "task_context_handles": [],
+                    }
                 memory_meta = {
                     "persona_id": prepared_meta.get("persona_id"),
                     "content_sha256": str(prepared_meta.get("content_sha256") or ""),

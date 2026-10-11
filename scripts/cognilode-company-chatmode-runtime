@@ -453,6 +453,24 @@ def prepare_while_live(process: subprocess.Popen) -> tuple[Path, Path, Path]:
 
 
 def main() -> int:
+    # Provider generations are clients of the elected central Agent Memory
+    # authority.  Older container definitions injected a host-local facade;
+    # correct that at the source-owned supervisor boundary so immutable source
+    # convergence repairs the running population without requiring a Docker
+    # recreate or inheriting environment-local memory authority.
+    central_memory = os.environ.get(
+        "COGNILODE_CENTRAL_AGENT_MEMORY_ENDPOINT",
+        "https://cognilode.com/api/operator/conversations",
+    )
+    os.environ["AGENT_MEMORY_ENDPOINT"] = central_memory
+    os.environ["AGENT_MEMORY_INGEST_ENDPOINT"] = os.environ.get(
+        "COGNILODE_CENTRAL_AGENT_MEMORY_INGEST_ENDPOINT",
+        "https://cognilode.com/api/operator/agent-memory",
+    )
+    os.environ["AGENT_MEMORY_INVENTORY_ENDPOINT"] = os.environ.get(
+        "COGNILODE_CENTRAL_AGENT_MEMORY_INVENTORY_ENDPOINT",
+        "https://cognilode.com/api/operator/inventory/events",
+    )
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     reap_inherited_drains()

@@ -32,7 +32,8 @@ class ProviderActuationClient:
         rows = [row for row in completed.stdout.splitlines() if row.strip()]
         if not rows:
             detail = completed.stderr.strip()[-2000:]
-            raise RuntimeError("credential custody broker returned no result" +
+            status = "exit_status=" + str(completed.returncode)
+            raise RuntimeError("credential custody broker returned no result: " + status +
                                ((": " + detail) if detail else ""))
         # Native browser adapters may emit diagnostics from imported provider
         # libraries after the broker's receipt.  The transport contract is the

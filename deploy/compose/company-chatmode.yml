@@ -6,6 +6,7 @@ services:
     tmpfs: *company_aws_cli_cache
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
+    network_mode: bridge
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
     working_dir: /runtime/source/current/codex-backend-sdk
     entrypoint: [sh, -c]
@@ -35,7 +36,6 @@ services:
     tmpfs: *company_aws_cli_cache
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
-    network_mode: bridge
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
     working_dir: /runtime/source/current/codex-backend-sdk
     entrypoint: [python3, /runtime/source/current/codex-backend-sdk/scripts/cognilode-central-credential-sync]

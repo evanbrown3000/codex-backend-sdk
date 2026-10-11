@@ -99,6 +99,7 @@ class ProviderLeaseAuthority:
             "gemini": "gemini.com", "gemini.com": "gemini.com",
             "claude": "claude.com", "claude.com": "claude.com",
             "anthropic": "anthropic.com", "anthropic.com": "anthropic.com",
+            "codex": "codex.research", "codex.research": "codex.research",
         }
         try:
             return aliases[value.strip().casefold()]

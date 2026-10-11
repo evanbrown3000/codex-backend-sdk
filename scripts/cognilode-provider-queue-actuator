@@ -1118,13 +1118,28 @@ def main() -> int:
                         "environment": args.device_id, "accounts": [account],
                         "providers": {args.provider: {
                             "enabled": backend_ready,
-                            "authentication": ("both" if args.provider in {"chatgpt.com", "codex.research"} else "guest"),
-                            "attachments": args.provider in {"chatgpt.com", "codex.research"},
-                            "artifact_downloads": args.provider in {"chatgpt.com", "codex.research"},
+                            # Gemini is executed by ComputerUseX against the
+                            # singular managed-browser custody profile.  The
+                            # live profile exposes the authenticated Pro model,
+                            # native file input, and response downloads; the
+                            # guest-only declaration prevented the scheduler
+                            # from ever assigning the physical work packets
+                            # those already implemented paths consume.
+                            "authentication": ("both" if args.provider in {
+                                "chatgpt.com", "codex.research", "gemini.com"
+                            } else "guest"),
+                            "attachments": args.provider in {
+                                "chatgpt.com", "codex.research", "gemini.com"
+                            },
+                            "artifact_downloads": args.provider in {
+                                "chatgpt.com", "codex.research", "gemini.com"
+                            },
                             "continuation": True,
                             "models": (["gpt-5-6-thinking", "gpt-5.6", "gpt-5.6-sol",
                                         "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "auto"]
-                                       if args.provider in {"chatgpt.com", "codex.research"} else []),
+                                       if args.provider in {"chatgpt.com", "codex.research"}
+                                       else (["gemini-3.1-pro", "auto"]
+                                             if args.provider == "gemini.com" else [])),
                             "reasoning_modes": ["low", "medium", "high", "xhigh", "max", "extended"],
                             "max_concurrency": max_concurrency,
                         }},

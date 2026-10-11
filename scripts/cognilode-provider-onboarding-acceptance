@@ -412,7 +412,30 @@ def main() -> int:
                 packet_identity.update(hashlib.sha256(Path(inherited_path).read_bytes()).digest())
             request_id = (f"area1-sequential-{provider.split('.')[0]}-attempt-{attempt}-"
                           + packet_identity.hexdigest()[:12])
-            job_id = str(proof["inflight"].get(provider) or "")
+            # Source generations can overlap an already-started provider
+            # effect.  Re-adopt that durable effect instead of trusting a
+            # newer queued projection in the proof file and accidentally
+            # sending the same provider prompt twice.  An effect with a bound
+            # conversation is the strongest continuation evidence, followed
+            # by any other effectful/claimed job and only then queued work.
+            listed = scheduler_call({
+                "operation": "list_jobs", "provider": provider,
+                "parent_operation_id": "area1-four-provider-acceptance", "limit": 500,
+            })
+            active = [row for row in listed.get("jobs") or [] if isinstance(row, Mapping)
+                      and str(row.get("state") or "") in {"effect_pending", "claimed", "queued"}]
+            rank = {"effect_pending": 0, "claimed": 1, "queued": 2}
+            active.sort(key=lambda row: (
+                rank.get(str(row.get("state") or ""), 9),
+                0 if str(row.get("conversation_id") or "") else 1,
+                float(row.get("created_at") or 0),
+                str(row.get("id") or ""),
+            ))
+            adopted = str(active[0].get("id") or "") if active else ""
+            job_id = adopted or str(proof["inflight"].get(provider) or "")
+            if adopted and proof["inflight"].get(provider) != adopted:
+                proof["inflight"][provider] = adopted
+                state_path.write_text(json.dumps(proof, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
             if not job_id:
                 continuation_conversation = ""
                 continuation_parent = ""

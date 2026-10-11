@@ -271,7 +271,11 @@ services:
           while ! test -f /runtime/source/current/control-execution-runtime/scripts/cognilode-provider-scheduler; do sleep 2; done
           source=$$(readlink -f /runtime/source/current/control-execution-runtime)
           PYTHONPATH="$$source/src" python3 "$$source/scripts/cognilode-provider-scheduler" & child=$$!
-          while kill -0 $$child 2>/dev/null && test "$$(readlink -f /runtime/source/current/control-execution-runtime)" = "$$source"; do sleep 2; done
+          # A live PID is insufficient: stale generations or a replaced
+          # socket inode can leave clients unable to reach the central queue.
+          # Treat socket loss as a source-generation failure and let this
+          # permanent owner re-exec the currently selected source.
+          while kill -0 $$child 2>/dev/null && test -S /runtime/provider-scheduler.sock && test "$$(readlink -f /runtime/source/current/control-execution-runtime)" = "$$source"; do sleep 2; done
           kill -TERM $$child 2>/dev/null || true
           wait $$child 2>/dev/null || true
           sleep 1

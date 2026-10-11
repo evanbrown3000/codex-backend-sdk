@@ -20,7 +20,7 @@ import threading
 import tempfile
 import time
 from typing import Any, Mapping
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from codex_backend_sdk.provider_actuation_client import ProviderActuationClient
 from codex_backend_sdk.provider_scheduler_client import scheduler_call
@@ -33,6 +33,49 @@ CHATGPT_DEFAULT_CONCURRENCY = 10
 # biological scheduler remains the authority that decides which jobs exist and
 # which leases may be claimed.
 MAX_ACTUATION_CONCURRENCY = 32
+
+
+def memory_foreground(job: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
+    """Materialize the task-selected Agent Memory foreground for this worker.
+
+    Provider workers are ordinary Agent Memory readers, not a special manual
+    integration.  The stable job identity is their reader identity and the
+    selected packet is retained beside other durable worker products.
+    """
+    endpoint = os.environ.get("AGENT_MEMORY_ENDPOINT", "http://127.0.0.1:8098/v1/conversations").rstrip("/")
+    if endpoint.endswith("/v1/conversations"):
+        endpoint = endpoint.rsplit("/v1/conversations", 1)[0] + "/v1/foreground"
+    elif endpoint.endswith("/api/operator/conversations"):
+        endpoint = endpoint.rsplit("/api/operator/conversations", 1)[0] + "/api/operator/foreground"
+    else:
+        endpoint += "/foreground"
+    role = str(job.get("memory_persona") or "company").strip() or "company"
+    body = json.dumps({
+        "persona": role,
+        "max_tokens": int(os.environ.get("COGNILODE_AGENT_FOREGROUND_TOKENS", "40000")),
+        "task": str(job.get("prompt") or ""),
+    }, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    token_path = Path(os.environ.get("COGNILODE_OPERATOR_TOKEN_FILE", "/home/worker/.config/cognilode/operator-bearer"))
+    if endpoint.startswith("https://") and token_path.is_file():
+        token = token_path.read_text(encoding="utf-8").strip().removeprefix("Bearer ").strip()
+        if token:
+            headers["Authorization"] = "Bearer " + token
+    with urlopen(Request(endpoint, data=body, headers=headers, method="POST"), timeout=120) as response:
+        value = json.load(response)
+    while isinstance(value, Mapping) and isinstance(value.get("result"), Mapping):
+        value = value["result"]
+    context = str(value.get("context") or "") if isinstance(value, Mapping) else ""
+    if not context.strip():
+        raise RuntimeError("agent_memory_foreground_empty")
+    root = Path(os.environ.get("COGNILODE_PROVIDER_MEMORY_ROOT", "/home/worker/.local/share/cognilode/provider-memory"))
+    root.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha256(str(job.get("id") or "").encode("utf-8")).hexdigest()
+    destination = root / f"{key}.md"
+    staged = destination.with_suffix(".tmp")
+    staged.write_text(context, encoding="utf-8")
+    os.replace(staged, destination)
+    return dict(value), str(destination)
 
 
 def converged_broker_command() -> list[str]:
@@ -804,7 +847,29 @@ def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
     # into the shared join ledger before attachment work or begin_effect.
     persist_admission_intent(job)
     try:
-        attachments = tuple(local_attachment(row) for row in job.get("attachment_refs") or ())
+        foreground, foreground_path = memory_foreground(job)
+        job = dict(job)
+        job["prompt"] = (
+            "First read the attached AGENT_MEMORY_FOREGROUND.md in full. It is provenance-labelled "
+            "organizational memory, not a replacement for the current instruction. Then perform the "
+            "current instruction below.\n\n" + str(job.get("prompt") or "")
+        )
+        job["agent_memory_foreground"] = {
+            "schema": str(foreground.get("schema") or ""),
+            "persona_id": str(foreground.get("persona_id") or ""),
+            "content_sha256": str(foreground.get("content_sha256") or ""),
+            "selected_tokens": foreground.get("selected_tokens"),
+            "foreground_handle": str(foreground.get("foreground_handle") or ""),
+            "task_context_handles": list(foreground.get("task_context_handles") or ()),
+        }
+    except Exception as exc:
+        scheduler_call({"operation": "release_job", **fence(job),
+                        "provider_state": "agent_memory_unavailable",
+                        "reason": "required_agent_memory_foreground_unavailable:" + type(exc).__name__,
+                        "retry_after_seconds": 60})
+        return
+    try:
+        attachments = (foreground_path, *tuple(local_attachment(row) for row in job.get("attachment_refs") or ()))
     except Exception as exc:
         # Missing staged input is a pre-effect admission problem. Release the
         # scheduler lease without crossing the mutation boundary or consuming

@@ -477,8 +477,12 @@ class InstalledCodexResearchAdapter:
         output_dir = Path("/runtime/worker/codex-research")
         output_dir.mkdir(parents=True, exist_ok=True)
         output_file = output_dir / (hashlib.sha256(request.operation_id.encode()).hexdigest() + ".txt")
-        args = [sys.executable, str(script), "exec", "--json", "-m", model,
-                "-C", "/runtime", "-o", str(output_file), "-a", "never", "-s", "read-only",
+        # ``--ask-for-approval`` is a global Modified Codex option.  The
+        # current managed binary no longer accepts ``-a`` after the ``exec``
+        # subcommand, so keep it before ``exec`` while the custody broker
+        # continues to enforce the exact ``never`` value.
+        args = [sys.executable, str(script), "-a", "never", "exec", "--json", "-m", model,
+                "-C", "/runtime", "-o", str(output_file), "-s", "read-only",
                 "-c", 'model_reasoning_effort="' + effort + '"',
                 "-c", 'model_instructions=""',
                 "-c", 'developer_instructions=""',

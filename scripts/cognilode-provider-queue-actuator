@@ -52,9 +52,19 @@ def memory_foreground(job: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
         else:
             endpoint += "/foreground"
     role = str(job.get("memory_persona") or "company").strip() or "company"
+    provider = str(job.get("provider") or "")
+    # Authenticated/attachment-capable workers receive the full 40K-token
+    # right-edge frontier as a physical file.  Current guest browser surfaces
+    # advertise text-only custody and enforce a much smaller composer limit;
+    # request the largest useful task-selected projection that fits their
+    # truthful capability rather than letting the UI silently discard the
+    # beginning of an 80K-character prompt.
+    default_tokens = (os.environ.get("COGNILODE_BROWSER_FOREGROUND_TOKENS", "5000")
+                      if provider in {"gemini.com", "claude.com", "anthropic.com"}
+                      else os.environ.get("COGNILODE_AGENT_FOREGROUND_TOKENS", "40000"))
     body = json.dumps({
         "persona": role,
-        "max_tokens": int(os.environ.get("COGNILODE_AGENT_FOREGROUND_TOKENS", "40000")),
+        "max_tokens": int(default_tokens),
         "task": str(job.get("prompt") or ""),
     }, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     headers = {"Content-Type": "application/json", "Accept": "application/json",

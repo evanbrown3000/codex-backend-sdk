@@ -565,6 +565,34 @@ def provider_transport(job: Mapping[str, Any], attachments: tuple[str, ...],
                                 "priority": int(job.get("priority") or 0)})
         if quota.get("admitted") is not True:
             raise RuntimeError("codex_quota_admission_denied:" + str(quota.get("reason") or "unknown"))
+    else:
+        # ChatGPT owns the long-lived transport socket and is handled by
+        # chatgpt_transport().  Gemini/Claude/Anthropic are independent native
+        # browser providers. Coupling them to that socket makes an accepted
+        # ChatGPT stream pin its old generation and reject every other .com
+        # provider as ``generation draining``. Launch the existing B4PT0R
+        # custody broker from the converged source for this one fenced
+        # operation; the actuator's non-daemon job thread retains it through
+        # terminal collection during a source handoff.
+        return client.prompt(
+            str(job["provider"]),
+            str(job.get("conversation_id") or "") or None,
+            str(job.get("prompt") or ""),
+            attachments,
+            operation_id=str(job["id"]) + ":lease:" + str(job.get("lease_generation") or 0),
+            account_id=str(job.get("assigned_account") or "primary"),
+            parent_operation={
+                "operation_id": str(parent.get("operation_id") or job.get("parent_operation_id") or job["id"]),
+                "automation_order": int(parent.get("automation_order") or job.get("parent_automation_order") or 2),
+                "origin": str(parent.get("kind") or job.get("parent_kind") or "provider_queue"),
+                "taskflow_node": parent.get("taskflow_node"),
+            },
+            mode="continue" if job.get("conversation_id") else "create",
+            parent_message_id=str(job.get("parent_message_id") or "") or None,
+            model=str(job.get("model") or "") or None,
+            reasoning_effort=str(job.get("reasoning_effort") or "") or None,
+            metadata={"timeout_seconds": turn_timeout, "queue_job_id": str(job["id"])},
+        )
     # Every .com mutation crosses the same custody-resident socket.  Spawning
     # browser-provider brokers as actuator children coupled accepted Gemini,
     # Claude, and Anthropic turns to source-generation handoffs: a converged

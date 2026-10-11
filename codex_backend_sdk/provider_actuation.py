@@ -44,8 +44,9 @@ def _verified_artifact(row: Mapping[str, Any]) -> bool:
     if isinstance(receipt, Mapping):
         return bool(receipt.get("ref") and receipt.get("sha256")
                     and int(receipt.get("size") or 0) > 0)
-    if row.get("custody_state") == "committed" and row.get("ref"):
-        return bool(row.get("sha256") and int(row.get("size") or 0) > 0)
+    if row.get("ref") and row.get("sha256"):
+        # Includes pre-committed B4PT0R/Universe Storage receipts.
+        return int(row.get("size") or row.get("bytes") or 0) > 0
     # A provider adapter may have independently read back a Drive-custodied
     # artifact, without retaining an extra local binary copy.
     if receipt == "google_drive" and row.get("uri"):
@@ -66,7 +67,11 @@ def _semantic_result_defects(
     if not isinstance(policy, Mapping):
         policy = request.metadata
     defects: list[str] = []
-    if not terminal or not assistant_text.strip():
+    # Streaming/accepted-only receipts are not failed terminal deliverables.
+    # Preserve their active fence; evaluate quality only at claimed terminal.
+    if not terminal:
+        return defects
+    if not assistant_text.strip():
         defects.append("missing_substantive_terminal_assistant")
     minimum_chars = int(policy.get("minimum_assistant_chars") or 0)
     if minimum_chars > 0 and len(assistant_text.strip()) < minimum_chars:
@@ -737,7 +742,7 @@ class UnifiedProviderActuator:
                 assistant_text=assistant_text, artifacts=artifacts,
             ) if accepted else []
             raw["result_quality_admission"] = {
-                "accepted": bool(accepted and not defects),
+                "accepted": bool(accepted and provider_terminal_observed and not defects),
                 "provider_terminal_observed": provider_terminal_observed,
                 "verified_artifact_count": len(artifacts),
                 "defects": defects,

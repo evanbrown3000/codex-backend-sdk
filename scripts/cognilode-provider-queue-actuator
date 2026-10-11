@@ -561,6 +561,7 @@ def provider_transport(job: Mapping[str, Any], attachments: tuple[str, ...],
             "kind": str(parent.get("kind") or parent.get("origin") or job.get("parent_kind") or ""),
         }
         quota = scheduler_call({"operation": "codex_admit", "parent_operation": quota_parent,
+                                "selected_provider": "codex.research",
                                 "estimated_cost": float(job.get("estimated_codex_cost") or 1.0),
                                 "priority": int(job.get("priority") or 0)})
         if quota.get("admitted") is not True:

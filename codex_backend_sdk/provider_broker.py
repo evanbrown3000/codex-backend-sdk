@@ -496,9 +496,18 @@ def main() -> int:
         result = execute(payload)
     except Exception as exc:
         result = {"ok": False, "error": type(exc).__name__, "message": str(exc)}
-    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")), flush=True)
     return 0 if not isinstance(result, Mapping) or result.get("ok") is not False else 2
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Provider libraries can leave telemetry/executor threads alive after the
+    # one-shot result has been emitted.  This broker is an operation-scoped
+    # subprocess, not a daemon: retaining those threads strands the parent
+    # actuator generation and falsely fences every later browser turn.  Flush
+    # the sole response and end the process regardless of imported library
+    # thread lifetime.
+    status = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(status)

@@ -60,9 +60,20 @@ def _broker_call(payload: dict, *, timeout: int) -> tuple[int, dict, str]:
         provider_home.mkdir(parents=True, exist_ok=True)
         environment["HOME"] = str(provider_home)
     source_root = str(Path(__file__).resolve().parent.parent)
-    environment["PYTHONPATH"] = source_root + (
-        os.pathsep + environment["PYTHONPATH"] if environment.get("PYTHONPATH") else ""
-    )
+    # The custody process is deliberately long lived, while provider adapters
+    # converge independently.  Running a new operation against the adapter
+    # bundled into the custody process' original immutable Python would keep
+    # every browser repair dormant until an operator restarted custody.  Load
+    # the converged ComputerUseX source for each newly spawned broker instead;
+    # the operation remains generation-fenced by the scheduler and no secret
+    # leaves this process.
+    current_computerusex = Path("/runtime/source/current/automation-computeruse-vision/src")
+    python_roots = [source_root]
+    if current_computerusex.is_dir():
+        python_roots.insert(0, str(current_computerusex))
+    if environment.get("PYTHONPATH"):
+        python_roots.append(environment["PYTHONPATH"])
+    environment["PYTHONPATH"] = os.pathsep.join(python_roots)
     completed = subprocess.run(
         [str(runtime_python()), "-m", "codex_backend_sdk.provider_broker"],
         input=json.dumps(payload, separators=(",", ":")) + "\n", text=True,

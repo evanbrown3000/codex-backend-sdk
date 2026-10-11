@@ -49,8 +49,20 @@ def converged_broker_command() -> list[str]:
         roots.insert(0, str(adapter))
     if os.environ.get("PYTHONPATH"):
         roots.append(os.environ["PYTHONPATH"])
-    return ["/usr/bin/env", "PYTHONPATH=" + os.pathsep.join(roots),
-            sys.executable, "-m", "codex_backend_sdk.provider_broker"]
+    command = ["/usr/bin/env", "PYTHONPATH=" + os.pathsep.join(roots)]
+    # A broker is the effect boundary, not an ordinary child helper.  Carry
+    # the immutable generation identity explicitly in its argv environment so
+    # service wrappers and exec adapters cannot accidentally strip the fence.
+    for name in (
+        "COGNILODE_GENERATION_MANIFEST",
+        "COGNILODE_RUNTIME_GENERATION_FINGERPRINT",
+        "COGNILODE_PROVIDER_TRANSPORT_VERSION",
+        "COGNILODE_GENERATION_FENCE_IDENTITY",
+    ):
+        value = os.environ.get(name)
+        if value:
+            command.append(f"{name}={value}")
+    return command + [sys.executable, "-m", "codex_backend_sdk.provider_broker"]
 
 
 def timestamp(value: object) -> float:

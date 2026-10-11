@@ -133,9 +133,16 @@ def main() -> int:
     sender = load(here / "cognilode-b4pt0r-chatmode", "cognilode_floor_sender")
     requested = os.environ.get("COGNILODE_HOSTED_RHYTHM_PROVIDERS",
                                "chatgpt.com,gemini.com,claude.com,anthropic.com")
-    providers = tuple(dict.fromkeys(value.strip() for value in requested.split(",") if value.strip()))
     allowed = {"chatgpt.com", "gemini.com", "claude.com", "anthropic.com"}
-    if not providers or any(provider not in allowed for provider in providers):
+    # This process owns only hosted-provider biological clocks.  The shared
+    # population variable may also contain quota-budgeted installed Codex;
+    # ignore that independent population instead of restart-looping the whole
+    # provider runtime.
+    providers = tuple(dict.fromkeys(
+        value.strip() for value in requested.split(",")
+        if value.strip() in allowed
+    ))
+    if not providers:
         raise SystemExit("invalid hosted rhythm provider list")
     status_root = Path(os.environ.get("COGNILODE_RHYTHM_STATUS_ROOT",
                                    str(Path.home() / ".local/share/cognilode/rhythm-status")))

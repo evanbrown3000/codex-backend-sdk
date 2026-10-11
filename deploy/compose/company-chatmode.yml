@@ -156,7 +156,12 @@ services:
         # unsynchronised threads and could close the upstream socket after the
         # WebSocket upgrade while its peer was still writing, yielding a
         # successful handshake followed by a silent CDP timeout.
-        python3 -c 'import asyncio
+        # Keep the relay under supervision for the lifetime of Chrome.  A
+        # transient bind race or relay exception must not leave the browser
+        # container healthy-looking while every ComputerUseX actuator sees a
+        # dead 9334 endpoint.
+        while kill -0 "$$child" 2>/dev/null; do
+          python3 -c 'import asyncio
         async def pipe(reader,writer):
           try:
             while True:
@@ -182,7 +187,10 @@ services:
         async def main():
           server=await asyncio.start_server(serve,"127.0.0.1",9334)
           async with server: await server.serve_forever()
-        asyncio.run(main())' & relay=$$!
+        asyncio.run(main())' || true
+          sleep 1
+        done & relay=$$!
+        trap 'kill -TERM "$$child" "$$relay" "$$xvfb" 2>/dev/null || true; wait "$$child" || true; persist' TERM INT
         wait "$$child"
         kill -TERM "$$relay" 2>/dev/null || true
         kill -TERM "$$xvfb" 2>/dev/null || true

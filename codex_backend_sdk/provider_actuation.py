@@ -650,6 +650,43 @@ class ComputerUseXProviderAdapter:
             if not signed_out:
                 return
             failures: list[str] = []
+            # The managed provider profile can retain Google's account chooser
+            # without exposing a refresh token to the worker.  Re-enter that
+            # provider-owned session before asking central custody for a token;
+            # this keeps authentication inside the leased browser profile and
+            # never copies a personal-browser profile or password.
+            try:
+                sign_in = page.locator(
+                    'a[href*="accounts.google.com/ServiceLogin"]'
+                ).first
+                if sign_in.count() == 0:
+                    sign_in = page.get_by_role("button", name="Sign in", exact=True).first
+                if sign_in.count() > 0:
+                    sign_in.click(timeout=20_000)
+                    page.wait_for_timeout(2_000)
+                    # Google may reuse the same tab or open the chooser in a
+                    # second provider-context page.
+                    chooser = next(
+                        (candidate for candidate in reversed(context.pages)
+                         if "accounts.google.com" in candidate.url),
+                        page,
+                    )
+                    account = chooser.locator(
+                        '[data-identifier], [data-email], div[role="link"]:has-text("@")'
+                    ).first
+                    if account.count() > 0:
+                        account.click(timeout=20_000)
+                        chooser.wait_for_timeout(3_000)
+                    page.goto(
+                        "https://gemini.google.com/app",
+                        wait_until="domcontentloaded",
+                        timeout=60_000,
+                    )
+                    page.wait_for_timeout(2_000)
+                    if not provider_signed_out():
+                        return
+            except Exception as exc:
+                failures.append("account_chooser_" + type(exc).__name__)
             for refresh_token in self._google_refresh_tokens():
                 try:
                     context.add_cookies(self._google_web_cookies(refresh_token))

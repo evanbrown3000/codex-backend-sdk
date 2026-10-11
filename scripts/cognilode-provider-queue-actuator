@@ -901,9 +901,18 @@ def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
     if boundary.get("send_authorized") is not True:
         return
     if isinstance(boundary.get("job"), Mapping):
-        # begin_effect returns the authoritative post-authorization lease. All
-        # downstream transport waits are derived from that actual expiry.
+        # begin_effect returns the authoritative post-authorization lease, but
+        # the scheduler record intentionally contains the original admitted
+        # prompt rather than this actuator generation's already-prepared
+        # foreground.  Preserve the prepared prompt and its content identity
+        # while adopting the authoritative lease/fence fields.  Replacing the
+        # whole mapping here made the custody actuator either prepare memory a
+        # second time or reject an empty prepared identity before provider send.
+        prepared = dict(job)
         job = dict(boundary["job"])
+        for key in ("prompt", "agent_memory_foreground"):
+            if key in prepared:
+                job[key] = prepared[key]
     parent = job.get("parent_operation") if isinstance(job.get("parent_operation"), Mapping) else {}
     operation_id = str(parent.get("operation_id") or job.get("parent_operation_id") or job["id"])
     result = (chatgpt_transport(job, attachments) if job["provider"] == "chatgpt.com"

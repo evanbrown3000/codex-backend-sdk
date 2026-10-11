@@ -24,12 +24,14 @@ STOP = False
 
 
 def durable_provider_effects() -> int | None:
-    """Count unexpired accepted effects before allowing a generation exit.
+    """Count unexpired accepted effects when the live custody view is lost.
 
-    The drain socket is intentionally only an in-process view.  A transport
-    restart or a lost child can make it report zero while the scheduler still
-    owns an accepted provider effect.  Fail closed if the durable ledger cannot
-    be read; source replacement is not more important than custody.
+    The drain socket is intentionally an in-process view. If that socket is
+    unavailable, a scheduler restart or lost transport may hide an accepted
+    provider effect, so the durable ledger must fail closed. A healthy socket
+    reports sends owned by this generation; unrelated persisted leases remain
+    fenced against replay by the scheduler and must not pin an idle process to
+    stale source indefinitely.
     """
     database = Path(os.environ.get(
         "COGNILODE_PROVIDER_SCHEDULER_DB",
@@ -335,10 +337,18 @@ def main() -> int:
                 durable = durable_provider_effects()
                 if durable is None:
                     active = None
-                elif active == 0 and durable > 0:
+                elif active is None:
+                    # If the old process/socket is unavailable, the durable
+                    # ledger is the only surviving custody view and must
+                    # fence retirement. When the old generation is alive and
+                    # its drain socket responds, however, its in-process send
+                    # counter is authoritative for this process tree. A
+                    # scheduler effect_pending lease can outlive that tree
+                    # (and can belong to another provider/device); it fences
+                    # replay in the scheduler, not an otherwise-idle source
+                    # generation. Holding the shared transport for every
+                    # unrelated durable lease deadlocks source convergence.
                     active = durable
-                elif active is not None:
-                    active = max(active, durable)
                 if active == 0:
                     break
                 # An in-process active counter can outlive its completed queue

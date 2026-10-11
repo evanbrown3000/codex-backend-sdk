@@ -1034,7 +1034,21 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
                                 print(f"bounded Chatmode replacement pending: {recovery_exc}",
                                       flush=True)
                         print(f"company Compose reconciliation pending: {exc}", flush=True)
-                    except (subprocess.CalledProcessError, KeyError, ValueError) as exc:
+                    except subprocess.CalledProcessError as exc:
+                        # Compose can return immediately after creating a
+                        # replacement when the old long-grace-period Chatmode
+                        # container is still running.  That is the same bounded
+                        # handoff state as a watchdog timeout, not a reason to
+                        # leave a prefixed Created generation stranded.
+                        if "chatmode" in changed:
+                            try:
+                                release_stalled_chatmode_replacement(project, runtime)
+                            except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                                    OSError, ValueError) as recovery_exc:
+                                print(f"bounded Chatmode replacement pending: {recovery_exc}",
+                                      flush=True)
+                        print(f"company Compose reconciliation pending: {exc}", flush=True)
+                    except (KeyError, ValueError) as exc:
                         print(f"company Compose reconciliation pending: {exc}", flush=True)
                     else:
                         if not deferred:

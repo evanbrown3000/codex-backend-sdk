@@ -71,6 +71,7 @@ services:
       - "18892"
     environment:
       HOME: /home/worker
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
       COGNILODE_AWS_PURPOSE: secrets-write
       PATH: /usr/bin:/usr/local/bin:/bin
     volumes:

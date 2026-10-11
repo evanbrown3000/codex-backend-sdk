@@ -341,6 +341,19 @@ def _reap_draining_generation(pid: int) -> None:
     # duplicate capability heartbeats forever.
     while _descendant_has_provider_broker(pid):
         time.sleep(2)
+    # Broker exit means the provider operation returned to its actuator; it
+    # does not mean the actuator has durably completed the scheduler fence.
+    # Give that predecessor a bounded commit window before retiring its process
+    # group.  Without this window a source cutover can erase a valid terminal
+    # browser result in the milliseconds between broker exit and complete_job.
+    commit_deadline = time.monotonic() + 30
+    while time.monotonic() < commit_deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            _reap(pid)
+            return
+        time.sleep(0.25)
     try:
         os.killpg(os.getpgid(pid), signal.SIGKILL)
     except ProcessLookupError:

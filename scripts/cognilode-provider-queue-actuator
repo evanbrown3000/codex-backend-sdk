@@ -919,6 +919,19 @@ def main() -> int:
                             recovered = recover_terminal(job) or recover_provider_error(job)
                             with lock:
                                 still_active = str(job.get("id") or "") in active
+                            transport_active: bool | None = None
+                            if args.provider == "chatgpt.com" and not still_active:
+                                # Provider transport is a separate custody
+                                # service.  After an actuator-generation
+                                # handoff its original socket request remains
+                                # live there even though this generation's
+                                # local thread set is empty.  Consult only that
+                                # local custody registry (never provider
+                                # history) before declaring the turn orphaned.
+                                transport_active = chatgpt_transport_has_job(
+                                    str(job.get("id") or "")
+                                )
+                                still_active = transport_active is True
                             orphan_grace = float(os.environ.get(
                                 "COGNILODE_PROVIDER_ORPHAN_GRACE_SECONDS", "180"
                             ))
@@ -926,8 +939,16 @@ def main() -> int:
                                 timestamp(job.get("effect_started_at"))
                                 and time.time() - timestamp(job.get("effect_started_at")) >= orphan_grace
                             )
+                            # An unavailable custody socket is uncertainty, not
+                            # proof that a provider-side turn disappeared.
+                            # Preserve its effect fence until the real lease
+                            # expires; only an explicit False permits the
+                            # shorter orphan-recovery path.
+                            orphan_confirmed = (args.provider != "chatgpt.com"
+                                                or transport_active is False)
                             if (not recovered and not still_active
-                                    and (lease_remaining_seconds(job) <= 0 or orphaned)):
+                                    and (lease_remaining_seconds(job) <= 0
+                                         or (orphaned and orphan_confirmed))):
                                 # An accepted/in-turn effect remains fenced
                                 # until its persisted scheduler lease expires.
                                 # At expiry, recover any local terminal receipt

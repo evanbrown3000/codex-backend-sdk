@@ -299,6 +299,25 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
         if value.strip()
     }
     workers: list[tuple[list[str], dict[str, str]]] = []
+    # The authenticated privacy export is a provider-owned source stream, not
+    # a one-time host migration.  Keep the recovered bounded adapter under the
+    # same credential-bearing B4PT0R runtime so its durable cursor advances
+    # automatically and every batch is admitted and read back centrally.
+    # The adapter's own lock and 100-conversation bound make five-second
+    # supervisor restarts safe; it never downloads the 28-GB archive locally.
+    export_backfill = HERE / "cognilode-chatmode-export-backfill"
+    export_retirement = HERE / "cognilode-chatmode-export-retirement"
+    export_url = Path(os.environ.get(
+        "COGNILODE_CHATGPT_EXPORT_URL_FILE",
+        str(Path.home() / ".local/share/cognilode/b4pt0r-chatmode/privacy-export-url.txt"),
+    ))
+    interpreter = str(Path(CLI.rsplit("/", 1)[0]) / "python")
+    if export_backfill.is_file() and export_url.is_file():
+        workers.append(([interpreter, str(export_backfill), "--url-file", str(export_url),
+                         "--max-conversations", "100"], {}))
+    if export_retirement.is_file():
+        workers.append(([interpreter, str(export_retirement),
+                         "--max-conversations", "100"], {}))
     # The central provider scheduler is the singular biological-clock owner.
     # Provider actuators advertise capacity and consume leases only; starting
     # the historical floor watcher here would create a second clock caller.

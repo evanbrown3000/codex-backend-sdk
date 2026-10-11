@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""Bounded, read-only D1/Drive verification for a privacy-export snapshot.
+
+This never deletes the original archive or its signed-URL custody. The export
+text projection omits media bytes, so even a successful D1/Drive pass is only
+permission to mark that projection replicated, not to retire the source ZIP.
+"""
+from __future__ import annotations
+
+import argparse
+from hashlib import sha256
+from importlib.machinery import SourceFileLoader
+import json
+import os
+from pathlib import Path
+import sqlite3
+import sys
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+sender = SourceFileLoader("chatmode_sender_export_retirement", str(HERE / "cognilode-b4pt0r-chatmode")).load_module()
+DEFAULT_ROOT = Path.home() / ".local/share/cognilode/b4pt0r-chatmode/privacy-export-backfill"
+DEFAULT_DRIVE_DB = Path.home() / ".local/share/cognilode/unified-conversation-vacuum/intake.sqlite3"
+
+
+def digest(value):
+    return sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                             separators=(",", ":")).encode()).hexdigest()
+
+
+def write_private(path: Path, value: dict):
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    with tmp.open("w", encoding="utf-8") as out:
+        json.dump(value, out, sort_keys=True, separators=(",", ":"))
+        out.write("\n")
+        out.flush()
+        os.fsync(out.fileno())
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def receipts(path: Path):
+    seen = set()
+    rows = []
+    with path.open(encoding="utf-8") as source:
+        for line in source:
+            row = json.loads(line)
+            key = (row["archive_etag"], row["member"], row["offset"],
+                   row["conversation_id"], row["source_conversation_sha256"])
+            if key not in seen:
+                seen.add(key)
+                rows.append(row)
+    return rows
+
+
+def verify_one(row: dict, archive_etag: str, db: sqlite3.Connection):
+    if row["archive_etag"] != archive_etag:
+        raise RuntimeError("receipt belongs to another export snapshot")
+    cid = row.get("stored_conversation_id") or row["conversation_id"]
+    result = sender.operator_memory_post({"operation": "read", "provider": "chatgpt-export-format",
+                                          "conversation_id": cid})
+    remote = result.get("conversation") or {}
+    capture = remote.get("capture") or {}
+    original = row["conversation_id"]
+    expected_urls = [f"https://chatgpt.com/c/{original}"] if original else []
+    if (remote.get("conversation_id") != cid or
+        (remote.get("conversation_urls") or []) != expected_urls or
+        capture.get("source_conversation_id") != original or
+        capture.get("source_conversation_sha256") != row["source_conversation_sha256"] or
+        capture.get("export_etag") != archive_etag or
+        capture.get("source_complete") is not False or
+        capture.get("source_text_projection_complete") is not True or
+        capture.get("normalized_events_sha256") != row["normalized_events_sha256"]):
+        raise RuntimeError(f"D1 exact export identity/fidelity differs: {cid}")
+    events = remote.get("events") or []
+    if not events:
+        raise RuntimeError(f"D1 export events absent: {cid}")
+    event_sha = digest(events)
+    revision = digest([remote.get("provider"), cid, remote.get("updated_at"),
+                       remote.get("prompt_sha256"), remote.get("response_sha256")])
+    proof = db.execute("""SELECT event_count,source_stream_id,verified_at FROM d1_drive_admissions
+        WHERE provider='chatgpt-export-format' AND conversation_id=?
+        AND source_revision=? AND event_sha256=?""", (cid, revision, event_sha)).fetchone()
+    if proof is None or proof[0] != len(events) or proof[1] != (
+        "d1:chatgpt-export-format:" + cid + ":" + event_sha[:24]):
+        return False
+    return True
+
+
+def run(root: Path, db_path: Path, limit: int):
+    cursor_path = root / "cursor.json"
+    if not cursor_path.exists():
+        return {"state": "no_export_cursor"}
+    state = json.loads(cursor_path.read_text(encoding="utf-8"))
+    if state.get("next_shard") != -1 or state.get("deferred"):
+        return {"state": "source_backfill_in_progress", "next_shard": state.get("next_shard"),
+                "deferred": len(state.get("deferred") or [])}
+    rows = receipts(root / "d1_exact_receipts.jsonl")
+    if len(rows) != state.get("admitted", 0) + state.get("exact_deduped", 0):
+        raise RuntimeError("source cursor and unique D1 receipts disagree")
+    nonconversations = root / "nonconversation_source_items.jsonl"
+    if state.get("source_nonconversation_items", 0):
+        if not nonconversations.exists():
+            raise RuntimeError("source cursor lacks non-conversation item receipts")
+        with nonconversations.open(encoding="utf-8") as source:
+            items = [json.loads(line) for line in source]
+        locators = {(item.get("archive_etag"), item.get("member"), item.get("offset"),
+                     item.get("source_item_sha256")) for item in items}
+        if (len(locators) != state["source_nonconversation_items"] or
+            any(item.get("classification") != "empty_nonconversation_json_object" or
+                item.get("archive_etag") != state["archive_etag"] for item in items)):
+            raise RuntimeError("source non-conversation receipts differ from cursor")
+    skipped = root / "skipped_source_conversations.jsonl"
+    if state.get("source_skipped_conversations", 0):
+        if not skipped.exists():
+            raise RuntimeError("source cursor lacks skipped conversation receipts")
+        with skipped.open(encoding="utf-8") as source:
+            items = [json.loads(line) for line in source]
+        locators = {(item.get("archive_etag"), item.get("member"), item.get("offset"),
+                     item.get("source_item_sha256")) for item in items}
+        if (len(locators) != state["source_skipped_conversations"] or
+            any(item.get("classification") != "conversation_without_visible_text_skipped" or
+                item.get("source_complete") is not False or
+                item.get("archive_etag") != state["archive_etag"] for item in items)):
+            raise RuntimeError("skipped source conversation receipts differ from cursor")
+    # A crash after a Drive proof but before this checkpoint is harmless: repeat
+    # exact readback. A changed archive identity resets verification to zero.
+    checkpoint_path = root / "retirement-checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8")) if checkpoint_path.exists() else {}
+    position = int(checkpoint.get("position", 0)) if checkpoint.get("archive_etag") == state["archive_etag"] else 0
+    if position > len(rows):
+        raise RuntimeError("retirement checkpoint exceeds source receipts")
+    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        checked = 0
+        while position < len(rows) and checked < limit:
+            if not verify_one(rows[position], state["archive_etag"], db):
+                return {"state": "drive_readback_pending", "position": position,
+                        "total": len(rows), "stored_conversation_id":
+                        rows[position].get("stored_conversation_id") or rows[position]["conversation_id"]}
+            position += 1
+            checked += 1
+            write_private(checkpoint_path, {"archive_etag": state["archive_etag"], "position": position,
+                                            "source_retirement_allowed": False})
+    finally:
+        db.close()
+    if position == len(rows):
+        return {"state": "text_projection_d1_drive_verified_source_preserved_for_media",
+                "verified": position, "source_retirement_allowed": False}
+    return {"state": "readback_progress", "verified": position, "total": len(rows),
+            "source_retirement_allowed": False}
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--state-root", type=Path, default=DEFAULT_ROOT)
+    p.add_argument("--drive-db", type=Path, default=DEFAULT_DRIVE_DB)
+    p.add_argument("--max-conversations", type=int, default=100)
+    args = p.parse_args()
+    if not 1 <= args.max_conversations <= 100:
+        p.error("--max-conversations must be 1..100")
+    print(json.dumps(run(args.state_root, args.drive_db, args.max_conversations), sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

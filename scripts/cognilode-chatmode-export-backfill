@@ -1,0 +1,735 @@
+#!/usr/bin/env python3
+"""Bounded, resumable ChatGPT privacy-export text backfill into shared D1.
+
+One invocation reads at most one remote ZIP member and admits at most 100
+conversations.  The state file contains only hashes, IDs, and cursor metadata;
+no local transcript corpus or full 28-GB archive is made.  The existing single
+D1→Drive writer independently replicates admitted rows.  Source retirement is
+reported only after that writer's exact readback, never on mere D1 admission.
+"""
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timedelta, timezone
+import fcntl
+from hashlib import sha256
+from importlib.machinery import SourceFileLoader
+import ijson
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import sys
+import zipfile
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from chatmode_export_range import AuthenticatedRangeFile, ExportRetryLater
+from chatmode_export_rotation import (finish_promotion, is_expired_source_error,
+                                      promote, _atomic_bytes)
+
+sender = SourceFileLoader("chatmode_sender_bulk_export", str(HERE / "cognilode-b4pt0r-chatmode")).load_module()
+PROVIDER = "chatgpt-export-format"
+SHARD = re.compile(r"^conversations-(\d{3})\.json$")
+MAX_SHARD_BYTES = 600 * 1024 * 1024
+MAX_CONVERSATION_TEXT_BYTES = 8 * 1024 * 1024
+MAX_EVENT_CHARS = 100_000
+MAX_EVENTS = 1000
+STATE_ROOT = Path.home() / ".local/share/cognilode/b4pt0r-chatmode/privacy-export-backfill"
+DRIVE_DB = Path.home() / ".local/share/cognilode/unified-conversation-vacuum/intake.sqlite3"
+PENDING_HIGH_WATER = 500
+PENDING_LOW_WATER = 350
+
+
+def sha_json(value) -> str:
+    return sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                             separators=(",", ":")).encode()).hexdigest()
+
+
+def when(value):
+    try:
+        stamp = float(value)
+        return datetime.fromtimestamp(stamp, timezone.utc).isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def normalize(conversation: dict) -> tuple[list[dict], dict]:
+    mapping = conversation.get("mapping") or {}
+    if not isinstance(mapping, dict):
+        raise ValueError("conversation mapping is not an object")
+    if len(mapping) > MAX_EVENTS:
+        raise ValueError("branch mapping exceeds bounded graph size")
+    parent_edges = [(str(node_id), str(node.get("parent") or ""))
+                    for node_id, node in mapping.items() if isinstance(node, dict)]
+    rows = []
+    nontext = 0
+    omitted_thoughts = []
+    for index, (node_id, node) in enumerate(mapping.items()):
+        if not isinstance(node, dict):
+            continue
+        message = node.get("message") or {}
+        role = str((message.get("author") or {}).get("role") or "")
+        if role not in {"system", "developer", "user", "assistant", "tool"}:
+            continue
+        content = message.get("content") or {}
+        if isinstance(content, dict) and content.get("content_type") == "thoughts":
+            omitted_thoughts.append((str(node_id), sha_json(content)))
+            nontext += 1
+            continue
+        text = sender.message_text(message)
+        if not text:
+            nontext += 1
+            continue
+        source_id = str(message.get("id") or node_id)
+        stamp = when(message.get("create_time"))
+        rows.append((stamp, index, role, text, source_id, str(node.get("parent") or "")))
+    rows.sort(key=lambda row: (row[0] is None, row[0] or "", row[1]))
+    total_text_bytes = sum(len(row[3].encode()) for row in rows)
+    if total_text_bytes > MAX_CONVERSATION_TEXT_BYTES:
+        raise ValueError("conversation text exceeds bounded D1 admission size")
+    events = []
+    for stamp, _, role, text, source_id, parent in rows:
+        parts = [text[i:i + MAX_EVENT_CHARS] for i in range(0, len(text), MAX_EVENT_CHARS)]
+        for number, part in enumerate(parts):
+            events.append({"role": role, "content": part, "created_at": stamp,
+                           "provider_message_id": source_id if len(parts) == 1 else f"{source_id}#part-{number}",
+                           "provider_parent_id": parent, "source_content_complete": True,
+                           "index": len(events), "authorship":
+                           "export-user-role-unverified" if role == "user" else "export-role-observed"})
+    if not events:
+        raise ValueError("conversation has no visible textual events")
+    if len(events) > MAX_EVENTS:
+        raise ValueError("conversation normalized events exceed bound")
+    summary = {"source_nodes": len(mapping), "source_text_messages": len(rows),
+               "source_nontext_messages": nontext, "normalized_events": len(events),
+               "source_omitted_thought_count": len(omitted_thoughts),
+               "source_omitted_thought_sha256": sha_json(omitted_thoughts),
+               "normalized_events_sha256": sha_json([(e["role"], e["content"]) for e in events]),
+               "source_text_bytes": total_text_bytes,
+               "branch_parent_edges": parent_edges,
+               "branch_graph_sha256": sha_json(parent_edges)}
+    return events, summary
+
+
+def exact_readback(cid: str, events: list[dict], summary: dict) -> bool:
+    result = sender.operator_memory_post({"operation": "read", "provider": PROVIDER,
+                                          "conversation_id": cid})
+    remote = result.get("conversation") or {}
+    observed = [(e.get("role"), e.get("content")) for e in remote.get("events") or []]
+    expected = [(e["role"], e["content"]) for e in events]
+    capture = remote.get("capture") or {}
+    return (observed == expected and
+            capture.get("normalized_events_sha256") == summary["normalized_events_sha256"])
+
+
+def prior_conversation(cid: str) -> dict | None:
+    try:
+        result = sender.operator_memory_post({"operation": "read", "provider": PROVIDER,
+                                              "conversation_id": cid})
+    except sender.CapabilityError as exc:
+        if "HTTP 404" in str(exc) and "conversation_not_found" in str(exc):
+            return None
+        raise
+    return result.get("conversation") if result.get("ok") else None
+
+
+def store_identity(original_cid: str, source_sha: str, source: AuthenticatedRangeFile):
+    """Keep a historical variant when another source owns the original ID."""
+    prior = prior_conversation(original_cid)
+    if not prior:
+        return original_cid, None
+    old = prior.get("capture") or {}
+    if (old.get("source_conversation_sha256") == source_sha
+        and old.get("export_etag") == source.etag):
+        return original_cid, prior
+    variant = original_cid + "@export-" + sha256(source.etag.encode()).hexdigest()[:12]
+    return variant, prior_conversation(variant)
+
+
+def source_identity(conversation: dict, info: zipfile.ZipInfo,
+                    source: AuthenticatedRangeFile, offset: int):
+    raw_id = str(conversation.get("id") or conversation.get("conversation_id") or "")
+    source_sha = sha_json(conversation)
+    if re.fullmatch(r"[0-9a-f-]{36}", raw_id):
+        stored_id, old = store_identity(raw_id, source_sha, source)
+        return stored_id, raw_id, old
+    # Only contentful ID-less rows become D1 conversations. Empty export
+    # objects are auditable source sentinels and never impersonate a chat.
+    if not (conversation.get("mapping") or {}):
+        raise ValueError("export source item lacks conversation identity and mapping")
+    locator = sha_json([source.etag, info.filename, offset, source_sha])
+    stored_id = "export-source:" + locator[:40]
+    return stored_id, None, prior_conversation(stored_id)
+
+
+def admit(conversation: dict, info: zipfile.ZipInfo, source: AuthenticatedRangeFile,
+          offset: int) -> str:
+    if not isinstance(conversation, dict):
+        raise ValueError("export source item is not an object")
+    events, summary = normalize(conversation)
+    cid, original_cid, existing = source_identity(conversation, info, source, offset)
+    source_sha = sha_json(conversation)
+    if existing:
+        old = existing.get("capture") or {}
+        if (old.get("source_conversation_sha256") != source_sha
+            or old.get("export_etag") != source.etag):
+            raise ValueError("provider+conversation ID already has a different source version")
+    users = [e["content"] for e in events if e["role"] == "user"]
+    assistants = [e["content"] for e in events if e["role"] == "assistant"]
+    prompt = users[-1] if users else ""
+    response = assistants[-1] if assistants else ""
+    capture = {"prompt": bool(prompt), "response": bool(response),
+               "source_kind": "chatgpt_privacy_export_zip_http_range",
+               "source_complete": False, "source_text_projection_complete": True,
+               "source_text_projection_scope": "standard_message_text_excluding_thoughts",
+               "source_fidelity": "visible_turn_text_and_branch_edges;thoughts_and_media_not_copied",
+               "source_provenance": "authenticated_openai_export_email",
+               "source_conversation_id": original_cid, "source_conversation_sha256": source_sha,
+               "source_identity_status": ("provider_uuid" if original_cid else "synthetic_export_source_id"),
+               "source_invalid_id_sha256": (sha256(str(conversation.get("id") or conversation.get("conversation_id") or "").encode()).hexdigest()
+                                             if original_cid is None else None),
+               "export_etag": source.etag, "export_bytes": source.size,
+               "export_member": info.filename, "export_member_crc32": f"{info.CRC:08x}",
+               **summary}
+    base = {"operation": "record_conversation", "provider": PROVIDER,
+            "conversation_id": cid, "created_at": when(conversation.get("create_time")),
+            "title": str(conversation.get("title") or "")[:500],
+            "source": "chatgpt-privacy-export-range-backfill",
+            "environment": "authenticated privacy-export ZIP",
+            "conversation_urls": [f"https://chatgpt.com/c/{original_cid}"] if original_cid else [],
+            "prompt": prompt, "response_excerpt": response,
+            "prompt_sha256": sha256(prompt.encode()).hexdigest(),
+            "response_sha256": sha256(response.encode()).hexdigest()}
+    if existing and exact_readback(cid, events, summary):
+        old_capture = existing.get("capture") or {}
+        if (old_capture.get("source_complete") is False
+            and old_capture.get("branch_graph_sha256") == summary["branch_graph_sha256"]
+            and old_capture.get("source_text_projection_scope") == capture["source_text_projection_scope"]
+            and old_capture.get("source_omitted_thought_count") == capture["source_omitted_thought_count"]
+            and old_capture.get("source_omitted_thought_sha256") == capture["source_omitted_thought_sha256"]):
+            return "exact_dedupe"
+        # Metadata-only correction, retaining already verified D1 turns.
+        repaired = sender.operator_memory_post({"operation": "record_conversation",
+            "provider": PROVIDER, "conversation_id": cid, "events": [],
+            "source": "chatgpt-privacy-export-range-backfill",
+            "capture": capture, "source_cursor": f"{source.etag}:{info.filename}:{cid}:fidelity-repair"})
+        if repaired.get("stored") is not True:
+            raise RuntimeError("D1 rejected export fidelity correction")
+        after = prior_conversation(cid) or {}
+        if ((after.get("capture") or {}).get("source_complete") is not False
+            or (after.get("capture") or {}).get("branch_graph_sha256") != summary["branch_graph_sha256"]
+            or (after.get("capture") or {}).get("source_text_projection_scope") != capture["source_text_projection_scope"]
+            or (after.get("capture") or {}).get("source_omitted_thought_count") != capture["source_omitted_thought_count"]
+            or (after.get("capture") or {}).get("source_omitted_thought_sha256") != capture["source_omitted_thought_sha256"]
+            or not exact_readback(cid, events, summary)):
+            raise RuntimeError("D1 export fidelity correction readback differs")
+        return "exact_dedupe"
+    # D1 de-duplicates each exact provider message/content event on retries.
+    for start in range(0, len(events), 10):
+        batch = events[start:start + 10]
+        final = start + len(batch) == len(events)
+        result = sender.operator_memory_post({**base, "events": batch,
+            "capture": {**capture, "source_response_complete": final},
+            "source_cursor": f"{source.etag}:{info.filename}:{cid}:{start}"})
+        if result.get("stored") is not True:
+            raise RuntimeError("D1 rejected privacy-export event batch")
+    if not exact_readback(cid, events, summary):
+        raise RuntimeError("D1 exact privacy-export conversation readback differs")
+    return "admitted_exact"
+
+
+def write_state(path: Path, state: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    with tmp.open("w", encoding="utf-8") as out:
+        json.dump(state, out, sort_keys=True, separators=(",", ":"))
+        out.write("\n")
+        out.flush()
+        os.fsync(out.fileno())
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def append_receipt(state_root: Path, conversation: dict, info: zipfile.ZipInfo,
+                   source: AuthenticatedRangeFile, offset: int):
+    """Durable source locator/proof only; never stores conversation text."""
+    cid = str(conversation.get("id") or conversation.get("conversation_id") or "") or None
+    _, summary = normalize(conversation)
+    stored_id, _, _ = source_identity(conversation, info, source, offset)
+    row = {"archive_etag": source.etag, "archive_bytes": source.size,
+           "member": info.filename, "member_crc32": f"{info.CRC:08x}",
+           "offset": offset, "conversation_id": cid, "stored_conversation_id": stored_id,
+           "source_conversation_sha256": sha_json(conversation),
+           "normalized_events_sha256": summary["normalized_events_sha256"],
+           "d1_exact_verified_at": datetime.now(timezone.utc).isoformat()}
+    path = state_root / "d1_exact_receipts.jsonl"
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            out.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+            out.flush()
+            os.fsync(out.fileno())
+    except Exception:
+        raise
+
+
+def legacy_scope_repair_pending(state_root: Path, state: dict | None) -> bool:
+    if not state:
+        return False
+    path = state_root / "d1_exact_receipts.jsonl"
+    return path.is_file() and path.stat().st_size > int(state.get("scope_repair_receipt_bytes") or 0)
+
+
+def repair_legacy_scope(archive: zipfile.ZipFile, source: AuthenticatedRangeFile,
+                        state_root: Path, state_path: Path, state: dict,
+                        *, maximum: int = 10) -> int:
+    """Replay exact source receipts for metadata only, with a durable byte cursor.
+
+    This stays in the existing export/D1/Drive path.  Each bounded turn reads
+    one authenticated ZIP member and never stores its conversation content.
+    D1 events must already match exactly; `admit` cannot add a new source here.
+    """
+    path = state_root / "d1_exact_receipts.jsonl"
+    if not path.is_file():
+        return 0
+    position = int(state.get("scope_repair_receipt_bytes") or 0)
+    targets = []
+    with path.open("rb") as receipts:
+        receipts.seek(position)
+        while len(targets) < maximum:
+            start = receipts.tell()
+            line = receipts.readline()
+            if not line or not line.endswith(b"\n"):
+                break
+            receipt = json.loads(line)
+            if receipt.get("archive_etag") != source.etag or receipt.get("archive_bytes") != source.size:
+                raise RuntimeError("scope repair source archive differs from exact D1 receipt")
+            if targets and receipt.get("member") != targets[0][1]["member"]:
+                break
+            targets.append((receipts.tell(), receipt))
+    if not targets:
+        return 0
+    member_name = targets[0][1]["member"]
+    info = archive.getinfo(member_name)
+    if info.file_size > MAX_SHARD_BYTES or any(
+            row["member_crc32"] != f"{info.CRC:08x}" for _, row in targets):
+        raise RuntimeError("scope repair ZIP member differs from exact D1 receipt")
+    offsets = {int(row["offset"]): (end, row) for end, row in targets}
+    if len(offsets) != len(targets):
+        raise RuntimeError("duplicate scope repair source offset")
+    repaired = 0
+    with archive.open(info) as member:
+        for offset, conversation in enumerate(ijson.items(member, "item", use_float=True)):
+            if offset not in offsets:
+                if offset > max(offsets):
+                    break
+                continue
+            end, receipt = offsets[offset]
+            if sha_json(conversation) != receipt["source_conversation_sha256"]:
+                raise RuntimeError("scope repair conversation differs from exact source receipt")
+            stored_id, _, existing = source_identity(conversation, info, source, offset)
+            expected_id = receipt.get("stored_conversation_id") or receipt.get("conversation_id")
+            if stored_id != expected_id or not existing:
+                raise RuntimeError("scope repair missing exact D1 source identity")
+            if admit(conversation, info, source, offset) != "exact_dedupe":
+                raise RuntimeError("scope repair unexpectedly created D1 conversation")
+            state["scope_repair_receipt_bytes"] = end
+            write_state(state_path, state)
+            repaired += 1
+            if repaired == len(targets):
+                break
+    if repaired != len(targets):
+        raise RuntimeError("scope repair ZIP member ended before receipt offset")
+    return repaired
+
+
+def append_empty_source_receipt(state_root: Path, info: zipfile.ZipInfo,
+                                source: AuthenticatedRangeFile, offset: int):
+    """Record an empty JSON element as source evidence, never a conversation."""
+    row = {"archive_etag": source.etag, "archive_bytes": source.size,
+           "member": info.filename, "member_crc32": f"{info.CRC:08x}",
+           "offset": offset, "source_item_sha256": sha_json({}),
+           "classification": "empty_nonconversation_json_object"}
+    path = state_root / "nonconversation_source_items.jsonl"
+    if path.exists():
+        with path.open(encoding="utf-8") as existing:
+            if any(json.loads(line) == row for line in existing):
+                return
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as out:
+        out.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+        out.flush()
+        os.fsync(out.fileno())
+
+
+def append_skipped_source_receipt(state_root: Path, conversation: dict,
+                                  info: zipfile.ZipInfo, source: AuthenticatedRangeFile,
+                                  offset: int):
+    """Preserve provenance for a real conversation with no visible turns.
+
+    Thought bodies/summaries and media are not rendered as assistant replies.
+    This receipt holds hashes and counts only, never omitted content.
+    """
+    mapping = conversation.get("mapping") or {}
+    thoughts = []
+    for node_id, node in mapping.items():
+        content = (((node or {}).get("message") or {}).get("content") or {})
+        if isinstance(content, dict) and content.get("content_type") == "thoughts":
+            thoughts.append((str(node_id), sha_json(content)))
+    raw_id = str(conversation.get("id") or conversation.get("conversation_id") or "")
+    row = {"archive_etag": source.etag, "archive_bytes": source.size,
+           "member": info.filename, "member_crc32": f"{info.CRC:08x}",
+           "offset": offset, "source_item_sha256": sha_json(conversation),
+           "source_conversation_id": raw_id if re.fullmatch(r"[0-9a-f-]{36}", raw_id) else None,
+           "source_invalid_id_sha256": sha256(raw_id.encode()).hexdigest() if raw_id and not re.fullmatch(r"[0-9a-f-]{36}", raw_id) else None,
+           "classification": "conversation_without_visible_text_skipped",
+           "mapping_nodes": len(mapping), "omitted_thought_count": len(thoughts),
+           "omitted_thought_sha256": sha_json(thoughts),
+           "source_complete": False}
+    path = state_root / "skipped_source_conversations.jsonl"
+    if path.exists():
+        with path.open(encoding="utf-8") as existing:
+            if any(json.loads(line) == row for line in existing):
+                return
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as out:
+        out.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+        out.flush()
+        os.fsync(out.fileno())
+
+
+def repair_one_deferred(archive: zipfile.ZipFile, source: AuthenticatedRangeFile,
+                        state_root: Path, state_path: Path, state: dict):
+    if not state.get("deferred"):
+        return
+    held = state["deferred"][0]
+    info = archive.getinfo(held["shard"])
+    target = int(held["offset"])
+    found = None
+    with archive.open(info) as member:
+        for offset, conversation in enumerate(ijson.items(member, "item", use_float=True)):
+            if offset == target:
+                found = conversation
+                break
+        while member.read(1 << 20):
+            pass  # CRC proof even when the selected object is near the start.
+    if found is None:
+        raise RuntimeError("deferred export source offset disappeared")
+    if found == {}:
+        append_empty_source_receipt(state_root, info, source, target)
+        state["source_nonconversation_items"] = int(state.get("source_nonconversation_items") or 0) + 1
+        state["deferred"].pop(0)
+        write_state(state_path, state)
+        return
+    try:
+        effect = admit(found, info, source, target)
+    except ValueError as exc:
+        if str(exc) == "conversation has no visible textual events":
+            append_skipped_source_receipt(state_root, found, info, source, target)
+            state["source_skipped_conversations"] = int(state.get("source_skipped_conversations") or 0) + 1
+            state["deferred"].pop(0)
+            write_state(state_path, state)
+            return
+        held["reason"] = str(exc)[:100]
+        write_state(state_path, state)
+        return
+    append_receipt(state_root, found, info, source, target)
+    state["admitted" if effect == "admitted_exact" else "exact_deduped"] += 1
+    state["deferred"].pop(0)
+    write_state(state_path, state)
+
+
+def drive_lag(state_root: Path, archive_etag: str, state: dict,
+              drive_db: Path = DRIVE_DB) -> dict:
+    """Advisory current-export lag against the sole writer's readback ledger.
+
+    Exact event/revision proof is separately required by the retirement gate.
+    A preexisting proof for the same CID is not enough to release backpressure:
+    this snapshot's D1 receipt must precede the Drive verification.
+    """
+    path = state_root / "d1_exact_receipts.jsonl"
+    rows = {}
+    if path.exists():
+        with path.open(encoding="utf-8") as source:
+            for line in source:
+                receipt = json.loads(line)
+                if receipt.get("archive_etag") != archive_etag:
+                    raise RuntimeError("backpressure ledger contains another export snapshot")
+                # First-version receipts predate the explicit variant field;
+                # those 56 IDs were admitted under the original CID. The one
+                # collision was deferred and has an explicit variant receipt.
+                stored_id = receipt.get("stored_conversation_id") or receipt["conversation_id"]
+                rows[stored_id] = receipt["d1_exact_verified_at"]
+    verified = 0
+    if drive_db.exists():
+        db = sqlite3.connect(f"file:{drive_db}?mode=ro", uri=True)
+        try:
+            for cid, admitted_at in rows.items():
+                found = db.execute("""SELECT verified_at FROM d1_drive_admissions
+                    WHERE provider='chatgpt-export-format' AND conversation_id=?
+                    ORDER BY verified_at DESC LIMIT 1""", (cid,)).fetchone()
+                if (found and datetime.fromisoformat(found[0].replace("Z", "+00:00")) >=
+                    datetime.fromisoformat(admitted_at.replace("Z", "+00:00"))):
+                    verified += 1
+        finally:
+            db.close()
+    unreceipted = max(0, int(state.get("admitted", 0)) + int(state.get("exact_deduped", 0)) - len(rows))
+    return {"d1_receipts": len(rows), "drive_verified_after_d1": verified,
+            "pending_drive": len(rows) - verified + unreceipted}
+
+
+def archived_drive_lag(state_root: Path, drive_db: Path = DRIVE_DB) -> int:
+    """Old snapshots still consume the same single writer's capacity."""
+    total = 0
+    for snapshot in (state_root / "superseded-snapshots").glob("*/cursor.json"):
+        archived = json.loads(snapshot.read_text(encoding="utf-8"))
+        total += drive_lag(snapshot.parent, archived["archive_etag"], archived, drive_db)["pending_drive"]
+    return total
+
+
+def verify_candidate_account(source: AuthenticatedRangeFile, session) -> None:
+    """Fence replacement ZIP to the account that owns this authenticated session.
+
+    Export `user.json.id` is a user ID and need not equal the ChatGPT account
+    ID. The email does match for the observed source; never publish it to logs.
+    """
+    auth_email = str(sender.identity(session).get("user_email") or "").strip().casefold()
+    if not auth_email:
+        raise RuntimeError("authenticated account email unavailable for export identity fence")
+    with zipfile.ZipFile(source) as archive:
+        info = archive.getinfo("user.json")
+        if info.file_size > 16384:
+            raise RuntimeError("export user identity member exceeds bound")
+        user = json.loads(archive.read(info))
+    export_email = str(user.get("email") or "").strip().casefold() if isinstance(user, dict) else ""
+    if not export_email or export_email != auth_email:
+        raise RuntimeError("replacement export belongs to a different account")
+
+
+def run(url_file: Path, *, maximum: int, state_root: Path = STATE_ROOT) -> dict:
+    if url_file.stat().st_mode & 0o077:
+        raise RuntimeError("signed export URL file must be private (0600)")
+    state_root.mkdir(parents=True, exist_ok=True)
+    lock_path = state_root / "cursor.lock"
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        retry_path = state_root / "source-retry-after.json"
+        if retry_path.is_file():
+            retry = json.loads(retry_path.read_text(encoding="utf-8"))
+            if datetime.now(timezone.utc) < datetime.fromisoformat(retry["retry_at"]):
+                return {"state": "provider_retry_after", "http_status": retry["http_status"],
+                        "retry_at": retry["retry_at"]}
+            retry_path.unlink()
+
+        def defer_source_retry(status: int, seconds: int):
+            write_state(retry_path, {"http_status": status,
+                                     "retry_at": (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()})
+
+        candidate_file = url_file.with_name("privacy-export-next-url.txt")
+        finish_promotion(state_root, url_file, candidate_file)
+        url = url_file.read_text(encoding="utf-8").strip()
+        if not url.startswith("https://chatgpt.com/backend-api/estuary/content?"):
+            raise RuntimeError("unexpected export URL origin or path")
+        state_path = state_root / "cursor.json"
+        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else None
+        repairable_without_d1 = bool(state and any(
+            row.get("reason") in {"conversation has no bounded textual events",
+                                  "conversation has no visible textual events"}
+            for row in state.get("deferred") or []))
+        old_pending = archived_drive_lag(state_root)
+        if (state is not None and not candidate_file.is_file()
+            and not repairable_without_d1
+            and not legacy_scope_repair_pending(state_root, state)):
+            early_lag = drive_lag(state_root, state["archive_etag"], state)
+            early_lag["archived_pending_drive"] = old_pending
+            early_lag["pending_drive"] += old_pending
+            early_paused = bool(state.get("backpressure_paused"))
+            if early_lag["pending_drive"] >= PENDING_HIGH_WATER or (
+                    early_paused and early_lag["pending_drive"] > PENDING_LOW_WATER):
+                if not early_paused:
+                    state["backpressure_paused"] = True
+                    write_state(state_path, state)
+                return {"state": "drive_lag_backpressure", **early_lag,
+                        "resume_pending_at_or_below": PENDING_LOW_WATER,
+                        "next_shard": state.get("next_shard"), "position": state.get("position")}
+        session = sender.new_session(sender.DEFAULT_PROFILE, sender.DEFAULT_IMPERSONATE)
+        try:
+            source = AuthenticatedRangeFile(session, url, retry_hook=defer_source_retry)
+        except Exception as exc:
+            if not is_expired_source_error(exc) or not candidate_file.is_file():
+                raise
+            candidate = candidate_file.read_text(encoding="utf-8").strip()
+            if not candidate.startswith("https://chatgpt.com/backend-api/estuary/content?"):
+                raise RuntimeError("unexpected replacement export URL origin or path") from exc
+            replacement = AuthenticatedRangeFile(session, candidate, retry_hook=defer_source_retry)
+            if state is not None and (state["archive_etag"], state["archive_bytes"]) != (replacement.etag, replacement.size):
+                verify_candidate_account(replacement, session)
+                promote(state_root, url_file, candidate_file, state, url, candidate, replacement, exc)
+                state = None
+            elif state is None:
+                verify_candidate_account(replacement, session)
+                _atomic_bytes(url_file, (candidate + "\n").encode())
+            else:
+                # A renewed link to identical source bytes needs no new cursor.
+                _atomic_bytes(url_file, (candidate + "\n").encode())
+            source = replacement
+            url = candidate
+            old_pending = archived_drive_lag(state_root)
+        if state is not None and (state.get("archive_etag") != source.etag or
+                                  state.get("archive_bytes") != source.size):
+            raise RuntimeError("new archive identity requires prior cursor reconciliation")
+        scope_repaired = 0
+        if legacy_scope_repair_pending(state_root, state):
+            with zipfile.ZipFile(source) as archive:
+                scope_repaired = repair_legacy_scope(
+                    archive, source, state_root, state_path, state, maximum=10)
+        if state is None and old_pending >= PENDING_HIGH_WATER:
+            return {"state": "drive_lag_backpressure", "pending_drive": old_pending,
+                    "archived_pending_drive": old_pending,
+                    "resume_pending_at_or_below": PENDING_LOW_WATER,
+                    "next_shard": None, "position": 0}
+        if state is not None:
+            lag = drive_lag(state_root, state["archive_etag"], state)
+            lag["archived_pending_drive"] = old_pending
+            lag["pending_drive"] += old_pending
+            paused = bool(state.get("backpressure_paused"))
+            if lag["pending_drive"] >= PENDING_HIGH_WATER or (
+                    paused and lag["pending_drive"] > PENDING_LOW_WATER):
+                if repairable_without_d1:
+                    with zipfile.ZipFile(source) as archive:
+                        repair_one_deferred(archive, source, state_root, state_path, state)
+                if not paused:
+                    state["backpressure_paused"] = True
+                    write_state(state_path, state)
+                return {"state": "drive_lag_backpressure", **lag,
+                        "legacy_scope_receipts_verified": scope_repaired,
+                        "resume_pending_at_or_below": PENDING_LOW_WATER,
+                        "next_shard": state.get("next_shard"), "position": state.get("position")}
+            if paused:
+                state["backpressure_paused"] = False
+                write_state(state_path, state)
+            maximum = min(maximum, PENDING_HIGH_WATER - lag["pending_drive"])
+        else:
+            maximum = min(maximum, PENDING_HIGH_WATER - old_pending)
+        if state is None:
+            state = {"schema": "cognilode.chatmode.privacy_export_backfill.v1",
+                     "archive_etag": source.etag, "archive_bytes": source.size,
+                     "last_completed_shard": None, "next_shard": None, "position": 0,
+                     "capture_repaired_position": 0, "receipt_position": 0,
+                     "admitted": 0, "exact_deduped": 0, "deferred": []}
+        with zipfile.ZipFile(source) as archive:
+            shards = sorted((int(m.group(1)), info) for info in archive.infolist()
+                            if (m := SHARD.fullmatch(info.filename)))
+            if not shards or [i for i, _ in shards] != list(range(len(shards))):
+                raise RuntimeError("privacy-export shards are not contiguous")
+            repair_one_deferred(archive, source, state_root, state_path, state)
+            if state["next_shard"] is None:
+                state["next_shard"] = len(shards) - 1
+            index = state["next_shard"]
+            if index < 0:
+                return {"state": "d1_backfill_complete_drive_readback_pending", **state}
+            info = shards[index][1]
+            if info.file_size > MAX_SHARD_BYTES:
+                raise RuntimeError("export shard exceeds memory bound")
+            start = state["position"]
+            handled = 0
+            exhausted = True
+            with archive.open(info) as member:
+                items = ijson.items(member, "item", use_float=True)
+                for offset, conversation in enumerate(items):
+                    if offset < start:
+                        if conversation == {}:
+                            if offset >= int(state.get("receipt_position") or 0):
+                                append_empty_source_receipt(state_root, info, source, offset)
+                                state["receipt_position"] = offset + 1
+                                state["capture_repaired_position"] = offset + 1
+                                write_state(state_path, state)
+                            continue
+                        # Earlier versions overclaimed source completeness.
+                        # Repair source metadata and receipt gaps in place.
+                        if offset >= int(state.get("capture_repaired_position") or 0):
+                            if admit(conversation, info, source, offset) != "exact_dedupe":
+                                raise RuntimeError("prior cursor lacks exact D1 readback")
+                            state["capture_repaired_position"] = offset + 1
+                            write_state(state_path, state)
+                        if offset >= int(state.get("receipt_position") or 0):
+                            deferred = any(row.get("shard") == info.filename and row.get("offset") == offset
+                                           for row in state.get("deferred") or [])
+                            if not deferred:
+                                events, summary = normalize(conversation)
+                                stored_id, _, _ = source_identity(conversation, info, source, offset)
+                                if not exact_readback(stored_id, events, summary):
+                                    raise RuntimeError("prior cursor lacks exact D1 receipt")
+                                append_receipt(state_root, conversation, info, source, offset)
+                            state["receipt_position"] = offset + 1
+                            write_state(state_path, state)
+                        continue
+                    if conversation == {}:
+                        append_empty_source_receipt(state_root, info, source, offset)
+                        state["source_nonconversation_items"] = int(state.get("source_nonconversation_items") or 0) + 1
+                    else:
+                        cid = str(conversation.get("id") or conversation.get("conversation_id") or "") if isinstance(conversation, dict) else ""
+                        try:
+                            effect = admit(conversation, info, source, offset)
+                            state["admitted" if effect == "admitted_exact" else "exact_deduped"] += 1
+                        except ValueError as exc:
+                            if str(exc) == "conversation has no visible textual events":
+                                append_skipped_source_receipt(state_root, conversation, info, source, offset)
+                                state["source_skipped_conversations"] = int(state.get("source_skipped_conversations") or 0) + 1
+                            else:
+                                # Keep a source locator, not a hidden local corpus.
+                                state["deferred"].append({"shard": info.filename, "offset": offset,
+                                                          "conversation_id": cid, "reason": str(exc)[:100]})
+                        else:
+                            append_receipt(state_root, conversation, info, source, offset)
+                    state["position"] = offset + 1
+                    state["capture_repaired_position"] = state["position"]
+                    state["receipt_position"] = state["position"]
+                    write_state(state_path, state)
+                    handled += 1
+                    if handled >= maximum:
+                        # Peek one object to distinguish exact shard completion
+                        # from a bounded pause without a second full scan.
+                        try:
+                            next(items)
+                            exhausted = False
+                        except StopIteration:
+                            exhausted = True
+                        break
+                if not exhausted:
+                    # Drain remaining compressed member bytes for ZIP CRC proof.
+                    while member.read(1 << 20):
+                        pass
+            if exhausted:
+                state["last_completed_shard"] = info.filename
+                state["next_shard"] = index - 1
+                state["position"] = 0
+                state["capture_repaired_position"] = 0
+                state["receipt_position"] = 0
+                write_state(state_path, state)
+        return {"state": "d1_backfill_active", "archive_etag": source.etag,
+                "shard": info.filename, "handled": handled,
+                "admitted_total": state["admitted"], "exact_deduped_total": state["exact_deduped"],
+                "deferred_total": len(state["deferred"]), "next_shard": state["next_shard"],
+                "position": state["position"]}
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--url-file", required=True, type=Path)
+    p.add_argument("--max-conversations", type=int, default=100)
+    args = p.parse_args()
+    if not 1 <= args.max_conversations <= 100:
+        p.error("--max-conversations must be 1..100")
+    try:
+        result = run(args.url_file, maximum=args.max_conversations)
+    except ExportRetryLater as exc:
+        result = {"state": "provider_retry_after", "http_status": exc.status_code,
+                  "retry_after_seconds": exc.retry_after_seconds}
+    print(json.dumps(result, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

@@ -28,6 +28,7 @@ dependencies = [
     "cryptography>=42.0",
     "playwright>=1.50,<2",
     "filelock>=3.13,<4",
+    "ijson>=3.2,<4",
     "typer>=0.16,<1",
 ]
 

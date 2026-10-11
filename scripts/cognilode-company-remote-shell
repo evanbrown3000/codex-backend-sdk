@@ -250,7 +250,10 @@ def central_tool(name,args,rid):
     body=json.dumps({'jsonrpc':'2.0','id':rid,'method':'tools/call',
         'params':{'name':name,'arguments':args}},separators=(',',':')).encode()
     request=urllib.request.Request(CENTRAL+'/api/operator/remote-shell/mcp',data=body,
-        method='POST',headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
+        method='POST',headers={'Authorization':'Bearer '+token,'Content-Type':'application/json',
+            'Accept':'application/json,text/plain,*/*',
+            'User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36',
+            'Origin':CENTRAL,'Referer':CENTRAL+'/'})
     with urllib.request.urlopen(request,timeout=60) as response:
         value=json.load(response)
     if value.get('error'): raise RuntimeError(value['error'].get('message','central relay error'))

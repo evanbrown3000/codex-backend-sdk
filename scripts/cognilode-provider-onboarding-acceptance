@@ -429,7 +429,7 @@ def main() -> int:
             active.sort(key=lambda row: (
                 rank.get(str(row.get("state") or ""), 9),
                 0 if str(row.get("conversation_id") or "") else 1,
-                float(row.get("created_at") or 0),
+                str(row.get("created_at") or ""),
                 str(row.get("id") or ""),
             ))
             adopted = str(active[0].get("id") or "") if active else ""

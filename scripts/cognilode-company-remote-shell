@@ -1,5 +1,5 @@
 """Container-only relay node for company source, Codex, and artifact operations."""
-import hashlib, hmac, json, os, re, secrets, signal, socket, subprocess, threading, time, urllib.request
+import hashlib, hmac, json, os, re, secrets, signal, socket, socketserver, subprocess, threading, time, urllib.request
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -18,6 +18,7 @@ if not all((BEARER,NODE_ID,NODE_TOKEN)):
 CENTRAL=str(CUSTODY.get('central_url') or 'https://cognilode.com').rstrip('/')
 PORT=int(os.environ.get('COGNILODE_MCP_PORT','8899'))
 BIND_HOST=os.environ.get('COGNILODE_MCP_BIND_HOST','0.0.0.0')
+UNIX_SOCKET=Path(os.environ.get('COGNILODE_MCP_UNIX_SOCKET','/runtime/relay/remote-shell.sock'))
 WORKSPACE=os.environ.get('COGNILODE_WORKSPACE','/runtime/source/current')
 HB_STATUS=os.environ.get('COGNILODE_HEARTBEAT_STATUS','')
 MAX_OUTPUT=4*1024*1024
@@ -298,5 +299,17 @@ class H(BaseHTTPRequestHandler):
                     503 if isinstance(e,RuntimeError) else 400)
             self.sendj({'jsonrpc':'2.0','id':payload.get('id'),'result':{'content':[{'type':'text','text':json.dumps({'error':str(e)})}],'isError':True}})
 
+class ThreadingUnixHTTPServer(socketserver.ThreadingMixIn,socketserver.UnixStreamServer):
+    daemon_threads=True
+
 if __name__=='__main__':
-    os.makedirs(WORKSPACE,exist_ok=True); threading.Thread(target=heartbeat,daemon=True).start(); ThreadingHTTPServer.allow_reuse_address=True; ThreadingHTTPServer((BIND_HOST,PORT),H).serve_forever()
+    os.makedirs(WORKSPACE,exist_ok=True)
+    threading.Thread(target=heartbeat,daemon=True).start()
+    UNIX_SOCKET.parent.mkdir(parents=True,exist_ok=True)
+    try: UNIX_SOCKET.unlink()
+    except FileNotFoundError: pass
+    unix_server=ThreadingUnixHTTPServer(str(UNIX_SOCKET),H)
+    os.chmod(UNIX_SOCKET,0o600)
+    threading.Thread(target=unix_server.serve_forever,daemon=True,name='remote-shell-unix').start()
+    ThreadingHTTPServer.allow_reuse_address=True
+    ThreadingHTTPServer((BIND_HOST,PORT),H).serve_forever()

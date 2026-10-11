@@ -172,7 +172,10 @@ def _provider_effect_in_flight(program: list[str], process_pid: int | None = Non
         "COGNILODE_PROVIDER_SCHEDULER_DB", "/runtime/provider-scheduler/scheduler.sqlite3"
     ))
     broker_child=False
-    if process_pid:
+    # ChatGPT delegates the external mutation into a credential-bearing broker
+    # child. Browser-backed Gemini/Claude/Anthropic execute the fenced mutation
+    # in this actuator process and intentionally have no broker descendant.
+    if process_pid and provider == "chatgpt.com":
         frontier=[int(process_pid)];seen=set();broker_child=False
         while frontier:
             pid=frontier.pop()
@@ -194,6 +197,12 @@ def _provider_effect_in_flight(program: list[str], process_pid: int | None = Non
             ).fetchone()
         if row is None:
             return False
+        if provider != "chatgpt.com":
+            # The scheduler fence is the browser actuator's ownership proof.
+            # Keep it alive until the provider records a terminal state; a
+            # fixed pre-300-second grace makes acceptance impossible whenever
+            # an unrelated SDK source generation advances.
+            return True
         if broker_child:
             return True
         # begin_effect and broker spawn are separate local instructions inside

@@ -1152,18 +1152,13 @@ def main() -> int:
                                 "chatgpt.com", "codex.research"
                             },
                             "artifact_downloads": args.provider in {
-                                "chatgpt.com", "codex.research", "gemini.com"
+                                "chatgpt.com", "codex.research"
                             },
                             "continuation": True,
                             "models": (["gpt-5-6-thinking", "gpt-5.6", "gpt-5.6-sol",
                                         "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "auto"]
                                        if args.provider in {"chatgpt.com", "codex.research"}
-                                       else (["gemini-3.1-pro", "gemini", "auto",
-                                              # Provider-neutral historical
-                                              # work used this capability name;
-                                              # the browser receipt retains the
-                                              # actual Gemini Pro selection.
-                                              "gpt-5.6-sol"]
+                                       else (["gemini", "auto"]
                                              if args.provider == "gemini.com" else [])),
                             "reasoning_modes": ["low", "medium", "high", "xhigh", "max", "extended"],
                             "max_concurrency": max_concurrency,

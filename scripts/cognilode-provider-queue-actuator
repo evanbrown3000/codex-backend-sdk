@@ -74,17 +74,38 @@ def memory_foreground(job: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
         token = token_path.read_text(encoding="utf-8").strip().removeprefix("Bearer ").strip()
         if token:
             headers["Authorization"] = "Bearer " + token
-    with urlopen(Request(endpoint, data=body, headers=headers, method="POST"), timeout=120) as response:
-        value = json.load(response)
+    root = Path(os.environ.get("COGNILODE_PROVIDER_MEMORY_ROOT", "/home/worker/.local/share/cognilode/provider-memory"))
+    root.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha256(str(job.get("id") or "").encode("utf-8")).hexdigest()
+    destination = root / f"{key}.md"
+    try:
+        with urlopen(Request(endpoint, data=body, headers=headers, method="POST"), timeout=120) as response:
+            value = json.load(response)
+    except Exception:
+        # A queue job is immutable under its stable identity.  Once Agent
+        # Memory selected and materialized that job's foreground, a transient
+        # central-reader disconnect must reuse those exact bytes rather than
+        # strand every retry behind another expensive selection request.
+        # First-time jobs still fail closed because no cache exists.
+        if not destination.is_file():
+            raise
+        context = destination.read_text(encoding="utf-8")
+        if not context.strip():
+            raise
+        return ({
+            "schema": "agent_memory.foreground.cached.v1",
+            "persona_id": role,
+            "content_sha256": hashlib.sha256(context.encode("utf-8")).hexdigest(),
+            "context": context,
+            "selected_tokens": None,
+            "foreground_handle": "local-cache:" + key,
+            "task_context_handles": [],
+        }, str(destination))
     while isinstance(value, Mapping) and isinstance(value.get("result"), Mapping):
         value = value["result"]
     context = str(value.get("context") or "") if isinstance(value, Mapping) else ""
     if not context.strip():
         raise RuntimeError("agent_memory_foreground_empty")
-    root = Path(os.environ.get("COGNILODE_PROVIDER_MEMORY_ROOT", "/home/worker/.local/share/cognilode/provider-memory"))
-    root.mkdir(parents=True, exist_ok=True)
-    key = hashlib.sha256(str(job.get("id") or "").encode("utf-8")).hexdigest()
-    destination = root / f"{key}.md"
     staged = destination.with_suffix(".tmp")
     staged.write_text(context, encoding="utf-8")
     os.replace(staged, destination)

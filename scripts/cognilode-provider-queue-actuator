@@ -549,47 +549,33 @@ def provider_transport(job: Mapping[str, Any], attachments: tuple[str, ...],
     """
     parent = job.get("parent_operation") if isinstance(job.get("parent_operation"), Mapping) else {}
     turn_timeout = max(60, lease_remaining_seconds(job))
-    # Every .com mutation crosses the same custody-resident socket.  Spawning
-    # browser-provider brokers as actuator children coupled accepted Gemini,
-    # Claude, and Anthropic turns to source-generation handoffs: a converged
-    # SDK release could retire the actuator and strand a live provider turn
-    # without a result.  Custody already tracks ACTIVE_SENDS and drains only
-    # after terminal collection, so keep all providers behind that boundary.
-    request = {
-        "operation": "provider_prompt", "provider": str(job["provider"]),
-        "operation_id": str(job["id"]) + ":lease:" + str(job.get("lease_generation") or 0),
-        "account_id": str(job.get("assigned_account") or "primary"),
-        "conversation_id": str(job.get("conversation_id") or "") or None,
-        "parent_message_id": str(job.get("parent_message_id") or "") or None,
-        "mode": "continue" if job.get("conversation_id") else "create",
-        "prompt": str(job.get("prompt") or ""), "attachments": list(attachments),
-        "model": str(job.get("model") or "") or None,
-        "reasoning_effort": str(job.get("reasoning_effort") or "") or None,
-        "timeout_seconds": turn_timeout,
-        "metadata": {"timeout_seconds": turn_timeout, "queue_job_id": str(job["id"])},
-        "parent_operation": {
+    # ChatGPT owns the long-lived custody socket and may legitimately keep its
+    # incumbent generation draining for the duration of an accepted stream.
+    # Binding independent browser providers to that socket made every source
+    # handoff reject Gemini/Claude/Anthropic before their browser operation
+    # began.  Their credential lease database is shared, while their native
+    # ComputerUseX broker is operation-scoped; launch that broker from the
+    # converged source and let the non-daemon actuator thread retain it through
+    # terminal collection.
+    return client.prompt(
+        str(job["provider"]),
+        str(job.get("conversation_id") or "") or None,
+        str(job.get("prompt") or ""),
+        attachments,
+        operation_id=str(job["id"]) + ":lease:" + str(job.get("lease_generation") or 0),
+        account_id=str(job.get("assigned_account") or "primary"),
+        parent_operation={
             "operation_id": str(parent.get("operation_id") or job.get("parent_operation_id") or job["id"]),
             "automation_order": int(parent.get("automation_order") or job.get("parent_automation_order") or 2),
             "origin": str(parent.get("kind") or job.get("parent_kind") or "provider_queue"),
             "taskflow_node": parent.get("taskflow_node"),
         },
-        "send_fence": {**fence(job), "job_id": str(job["id"])},
-    }
-    path = os.environ.get("COGNILODE_PROVIDER_SOCKET", "/runtime/provider.sock")
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(turn_timeout + 180); connection.connect(path)
-        connection.sendall((json.dumps(request, separators=(",", ":")) + "\n").encode())
-        connection.shutdown(socket.SHUT_WR)
-        chunks = []
-        while True:
-            chunk = connection.recv(65536)
-            if not chunk: break
-            chunks.append(chunk)
-    outer = json.loads(b"".join(chunks).decode())
-    result = outer.get("provider_result") if isinstance(outer.get("provider_result"), Mapping) else {}
-    if int(outer.get("exit_code") or 0) and not result:
-        raise RuntimeError(str(outer.get("stderr") or "provider transport failed"))
-    return dict(result)
+        mode="continue" if job.get("conversation_id") else "create",
+        parent_message_id=str(job.get("parent_message_id") or "") or None,
+        model=str(job.get("model") or "") or None,
+        reasoning_effort=str(job.get("reasoning_effort") or "") or None,
+        metadata={"timeout_seconds": turn_timeout, "queue_job_id": str(job["id"])},
+    )
 
 
 def chatgpt_transport_has_job(job_id: str) -> bool | None:

@@ -533,7 +533,14 @@ class ComputerUseXProviderAdapter:
 
     def prompt(self, request: ProviderPromptRequest, custody: Mapping[str, Any]) -> Mapping[str, Any]:
         conversation_id = request.conversation_id
-        browser_turn = bool(request.attachments or request.metadata.get("browser_transport"))
+        # This adapter is the domain-owned native-web implementation for the
+        # non-ChatGPT .com providers.  A prompt without attachments is still a
+        # browser-provider mutation; treating it as a generic MCP call made
+        # text-only Gemini work fail before reaching the provider whenever the
+        # optional MCP package was absent.  Keep every Gemini/Claude/Anthropic
+        # turn inside the same custody-bound ComputerUseX transport regardless
+        # of whether the work packet happens to contain a file.
+        browser_turn = True
         # Browser-backed providers create/fork as part of the same visible
         # mutation.  Calling the optional MCP façade first both duplicated the
         # operation and made the core actuator depend on the `mcp` package.

@@ -19,6 +19,7 @@ CENTRAL=str(CUSTODY.get('central_url') or 'https://cognilode.com').rstrip('/')
 PORT=int(os.environ.get('COGNILODE_MCP_PORT','8899'))
 BIND_HOST=os.environ.get('COGNILODE_MCP_BIND_HOST','0.0.0.0')
 UNIX_SOCKET=Path(os.environ.get('COGNILODE_MCP_UNIX_SOCKET','/runtime/relay/remote-shell.sock'))
+OPERATOR_TOKEN_FILE=Path(os.environ.get('COGNILODE_OPERATOR_TOKEN_FILE','/home/worker/.config/cognilode/operator-bearer'))
 WORKSPACE=os.environ.get('COGNILODE_WORKSPACE','/runtime/source/current')
 HB_STATUS=os.environ.get('COGNILODE_HEARTBEAT_STATUS','')
 MAX_OUTPUT=4*1024*1024
@@ -275,7 +276,13 @@ class H(BaseHTTPRequestHandler):
         self.sendj({'error':'not found'},404)
     def do_POST(self):
         if self.path not in ('/mcp','/provider','/rollouts','/conversations','/aws-session'): return self.sendj({'error':'not found'},404)
-        if not hmac.compare_digest(self.headers.get('Authorization',''),'Bearer '+BEARER): return self.sendj({'error':'unauthorized'},401)
+        supplied=self.headers.get('Authorization','')
+        authorized=hmac.compare_digest(supplied,'Bearer '+BEARER)
+        if not authorized and getattr(self.connection,'family',None)==socket.AF_UNIX:
+            try: operator=OPERATOR_TOKEN_FILE.read_text().strip()
+            except OSError: operator=''
+            authorized=bool(operator) and hmac.compare_digest(supplied,'Bearer '+operator)
+        if not authorized: return self.sendj({'error':'unauthorized'},401)
         payload={}
         try:
             n=int(self.headers.get('Content-Length','0'))

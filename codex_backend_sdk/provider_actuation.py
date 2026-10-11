@@ -1036,17 +1036,29 @@ class UnifiedProviderActuator:
                         **memory_meta,
                     },
                 }, require_admission=False)
-                request = replace(
-                    request,
-                    prompt=(
-                        "First read the attached AGENT_MEMORY_FOREGROUND.md in full. It is "
-                        "provenance-labelled organizational memory, not a replacement for the "
-                        "current instruction. Then perform the current instruction below.\n\n"
-                        + request.prompt
-                    ),
-                    attachments=(str(path), *request.attachments),
-                    metadata={**dict(request.metadata), "agent_memory_foreground": memory_meta},
-                )
+                if str(request.metadata.get("memory_context") or "") == "prepared":
+                    # The queue boundary already selected and causally recorded
+                    # this foreground.  In particular, a guest browser device
+                    # may have received it inline because it truthfully
+                    # advertised no file-upload capability.  Do not silently
+                    # manufacture a physical attachment after capability
+                    # matching or duplicate the prompt context.
+                    request = replace(
+                        request,
+                        metadata={**dict(request.metadata), "agent_memory_foreground": memory_meta},
+                    )
+                else:
+                    request = replace(
+                        request,
+                        prompt=(
+                            "First read the attached AGENT_MEMORY_FOREGROUND.md in full. It is "
+                            "provenance-labelled organizational memory, not a replacement for the "
+                            "current instruction. Then perform the current instruction below.\n\n"
+                            + request.prompt
+                        ),
+                        attachments=(str(path), *request.attachments),
+                        metadata={**dict(request.metadata), "agent_memory_foreground": memory_meta},
+                    )
                 raw = dict(adapter.prompt(request, custody))
             accepted = bool(raw.get("provider_acceptance_observed", raw.get("ok")))
             terminal = bool(raw.get("assistant_terminal") or raw.get("terminal")

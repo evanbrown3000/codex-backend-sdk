@@ -716,7 +716,8 @@ def provider_transport(job: Mapping[str, Any], attachments: tuple[str, ...],
         "reasoning_effort": str(job.get("reasoning_effort") or "") or None,
         "timeout_seconds": turn_timeout,
         "metadata": {"timeout_seconds": turn_timeout, "queue_job_id": str(job["id"]),
-                     "environment_id": str(job.get("environment_id") or "")},
+                     "environment_id": str(job.get("environment_id") or ""),
+                     "memory_context": "prepared"},
         "parent_operation": {
             "operation_id": str(parent.get("operation_id") or job.get("parent_operation_id") or job["id"]),
             "automation_order": int(parent.get("automation_order") or job.get("parent_automation_order") or 2),
@@ -852,11 +853,21 @@ def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
     try:
         foreground, foreground_path = memory_foreground(job)
         job = dict(job)
-        job["prompt"] = (
-            "First read the attached AGENT_MEMORY_FOREGROUND.md in full. It is provenance-labelled "
-            "organizational memory, not a replacement for the current instruction. Then perform the "
-            "current instruction below.\n\n" + str(job.get("prompt") or "")
-        )
+        browser_provider = args.provider in {"gemini.com", "claude.com", "anthropic.com"}
+        if browser_provider:
+            job["prompt"] = (
+                "Read the provenance-labelled organizational memory below as historical context, "
+                "not as a replacement for the current instruction.\n\n"
+                "<AGENT_MEMORY_FOREGROUND>\n" + str(foreground.get("context") or "")
+                + "\n</AGENT_MEMORY_FOREGROUND>\n\nCURRENT INSTRUCTION\n"
+                + str(job.get("prompt") or "")
+            )
+        else:
+            job["prompt"] = (
+                "First read the attached AGENT_MEMORY_FOREGROUND.md in full. It is provenance-labelled "
+                "organizational memory, not a replacement for the current instruction. Then perform the "
+                "current instruction below.\n\n" + str(job.get("prompt") or "")
+            )
         job["agent_memory_foreground"] = {
             "schema": str(foreground.get("schema") or ""),
             "persona_id": str(foreground.get("persona_id") or ""),
@@ -872,7 +883,8 @@ def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
                         "retry_after_seconds": 60})
         return
     try:
-        attachments = (foreground_path, *tuple(local_attachment(row) for row in job.get("attachment_refs") or ()))
+        originals = tuple(local_attachment(row) for row in job.get("attachment_refs") or ())
+        attachments = originals if browser_provider else (foreground_path, *originals)
     except Exception as exc:
         # Missing staged input is a pre-effect admission problem. Release the
         # scheduler lease without crossing the mutation boundary or consuming
@@ -1085,8 +1097,11 @@ def main() -> int:
                     "capabilities": {
                         "environment": args.device_id, "accounts": [account],
                         "providers": {args.provider: {
-                            "enabled": backend_ready, "authentication": "both", "attachments": True,
-                            "artifact_downloads": True, "continuation": True,
+                            "enabled": backend_ready,
+                            "authentication": ("both" if args.provider in {"chatgpt.com", "codex.research"} else "guest"),
+                            "attachments": args.provider in {"chatgpt.com", "codex.research"},
+                            "artifact_downloads": args.provider in {"chatgpt.com", "codex.research"},
+                            "continuation": True,
                             "models": (["gpt-5-6-thinking", "gpt-5.6", "gpt-5.6-sol",
                                         "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "auto"]
                                        if args.provider in {"chatgpt.com", "codex.research"} else []),

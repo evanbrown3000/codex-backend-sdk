@@ -971,15 +971,8 @@ def main() -> int:
                             # from this thread is insufficient; only the
                             # additional proof that every predecessor actuator
                             # and provider broker has drained permits recovery.
-                            browser_predecessor_gone = bool(
-                                args.provider != "chatgpt.com"
-                                and timestamp(job.get("effect_started_at"))
-                                and time.time() - timestamp(job.get("effect_started_at")) >= 30
-                                and not predecessor_browser_actuator_present(args.provider)
-                            )
                             if (not recovered and not still_active
-                                    and (lease_remaining_seconds(job) <= 0
-                                         or browser_predecessor_gone)):
+                                    and lease_remaining_seconds(job) <= 0):
                                 # An accepted/in-turn effect remains fenced
                                 # until its persisted scheduler lease expires.
                                 # At expiry, recover any local terminal receipt
@@ -987,11 +980,7 @@ def main() -> int:
                                 scheduler_call({
                                     "operation": "release_job", **fence(job),
                                     "provider_state": "provider_collection_interrupted",
-                                    "reason": (
-                                        "drained_browser_generation_without_terminal_receipt"
-                                        if browser_predecessor_gone else
-                                        "effect_lease_expired_without_terminal_receipt"
-                                    ),
+                                    "reason": "effect_lease_expired_without_terminal_receipt",
                                     "retry_after_seconds": 1,
                                 })
                         else:

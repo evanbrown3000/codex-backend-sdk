@@ -373,6 +373,17 @@ def main() -> int:
     for row in proof["providers"]:
         inherited.extend(path for path in row.get("artifacts") or [] if Path(path).is_file())
     client = ProviderCommandClient(timeout=24 * 3600, poll_interval=10)
+    # Qualification is an urgent finite bootstrap, not the production work
+    # rhythm. Accelerate only providers that still lack accepted native proof
+    # through the scheduler's pacing API. The sequence restores the normal
+    # fifteen-minute average after all four providers pass below.
+    for pending_provider in PROVIDERS:
+        if pending_provider not in completed:
+            scheduler_call({
+                "operation": "rhythm_tune_pacing",
+                "provider": pending_provider,
+                "target_average_gap_ms": 60 * 1000,
+            })
     for index, provider in enumerate(PROVIDERS):
         if provider in completed:
             continue

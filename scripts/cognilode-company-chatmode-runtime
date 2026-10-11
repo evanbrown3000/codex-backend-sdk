@@ -333,6 +333,42 @@ def _descendant_has_provider_broker(pid: int) -> bool:
     return False
 
 
+_OBSOLETE_BROKERLESS_SINCE: dict[int, float] = {}
+
+
+def reap_obsolete_batch_generations(active_revision: str, current_pid: int) -> None:
+    """Retire leaked old supervisors only after their local turn has drained."""
+    now = time.monotonic()
+    seen: set[int] = set()
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid in {os.getpid(), current_pid}:
+            continue
+        try:
+            command = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        except OSError:
+            continue
+        if "b4pt0r-com-batch-daemon" not in command or active_revision in command:
+            continue
+        seen.add(pid)
+        if _descendant_has_provider_broker(pid):
+            _OBSOLETE_BROKERLESS_SINCE.pop(pid, None)
+            continue
+        since = _OBSOLETE_BROKERLESS_SINCE.setdefault(pid, now)
+        if now - since < 30:
+            continue
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        _OBSOLETE_BROKERLESS_SINCE.pop(pid, None)
+    for pid in tuple(_OBSOLETE_BROKERLESS_SINCE):
+        if pid not in seen:
+            _OBSOLETE_BROKERLESS_SINCE.pop(pid, None)
+
+
 def _reap_draining_generation(pid: int) -> None:
     """Keep live transports, but retire generations with no transport left."""
     # The predecessor already received SIGTERM and had a handoff grace window.
@@ -444,6 +480,7 @@ def main() -> int:
         "COGNILODE_PROVIDER_SOURCE_MAX_STALENESS_SECONDS", "240"
     ))
     while not STOP:
+        reap_obsolete_batch_generations(active_revision, process.pid)
         if clock.poll() is not None:
             clock = launch_clock(source, cli)
         if process.poll() is not None:

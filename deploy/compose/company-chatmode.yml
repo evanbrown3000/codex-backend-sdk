@@ -394,7 +394,6 @@ services:
       COGNILODE_OPERATOR_TOKEN_FILE: /home/worker/.config/cognilode/operator-bearer
       COGNILODE_ENVIRONMENT_ID: ${COGNILODE_ENVIRONMENT_ID}
       COGNILODE_COMPANY_ROOT: /company
-      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
       COGNILODE_B4PT0R_SDK_ROOT: /runtime/source/current/codex-backend-sdk
       COGNILODE_UNIFIED_PROMPTER: /runtime/source/current/modified-codex-runtime/src/modified_codex/unified_bridge.py
       COMPUTERUSEX_MODIFIED_CODEX: /codex/bin/codex

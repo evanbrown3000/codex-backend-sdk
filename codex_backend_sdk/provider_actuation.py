@@ -9,7 +9,7 @@ publishes operation events to Agent Memory.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 import hashlib
 import http.cookiejar
@@ -950,7 +950,41 @@ class UnifiedProviderActuator:
             raise ValueError("leased account differs from requested account")
         adapter = self.adapters[request.provider]
         try:
-            raw = dict(adapter.prompt(request, custody))
+            # Every installed and .com worker receives the same task-selected
+            # right-edge foreground.  This lives at the singular actuator so
+            # new provider adapters cannot silently bypass organizational
+            # memory and higher layers do not each reinvent prompt context.
+            with tempfile.TemporaryDirectory(prefix="agent-memory-foreground-") as directory:
+                foreground = AgentMemoryClient(use_broker=False).prompt_foreground(
+                    persona=str(request.metadata.get("memory_persona") or "company"),
+                    max_tokens=int(request.metadata.get("memory_max_tokens") or 40_000),
+                    task=request.prompt,
+                )
+                context = str(foreground.get("context") or "")
+                path = Path(directory) / "AGENT_MEMORY_FOREGROUND.md"
+                path.write_text(context, encoding="utf-8")
+                actual = hashlib.sha256(path.read_bytes()).hexdigest()
+                if actual != str(foreground.get("content_sha256") or ""):
+                    raise RuntimeError("Agent Memory foreground content identity mismatch")
+                memory_meta = {
+                    "persona_id": foreground.get("persona_id"),
+                    "content_sha256": actual,
+                    "selected_tokens": foreground.get("selected_tokens"),
+                    "foreground_handle": foreground.get("foreground_handle"),
+                    "task_context_handles": list(foreground.get("task_context_handles") or ()),
+                }
+                request = replace(
+                    request,
+                    prompt=(
+                        "First read the attached AGENT_MEMORY_FOREGROUND.md in full. It is "
+                        "provenance-labelled organizational memory, not a replacement for the "
+                        "current instruction. Then perform the current instruction below.\n\n"
+                        + request.prompt
+                    ),
+                    attachments=(str(path), *request.attachments),
+                    metadata={**dict(request.metadata), "agent_memory_foreground": memory_meta},
+                )
+                raw = dict(adapter.prompt(request, custody))
             accepted = bool(raw.get("provider_acceptance_observed", raw.get("ok")))
             terminal = bool(raw.get("assistant_terminal") or raw.get("terminal")
                             or raw.get("complete_response_read")

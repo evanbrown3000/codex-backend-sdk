@@ -1018,7 +1018,13 @@ class UnifiedProviderActuator:
                 # boundary. This is not an observability poll: it is the
                 # durable causal edge proving which memory treatment the
                 # worker was actually given for this operation.
-                AgentMemoryClient(use_broker=False).admit_inventory({
+                # Persist the causal edge before mutation, but never make an
+                # auxiliary inventory relay a precondition for the provider
+                # turn.  The durable provider-event outbox is replayed by the
+                # event publisher; a missing edge route must not consume a
+                # rhythm slot without sending the already-authorized prompt.
+                self.publisher._publish({
+                    "schema": "cognilode.provider_foreground_consumption.v1",
                     "kind": "agent_memory.foreground_consumed",
                     "source": "b4pt0r-provider-actuator",
                     "environment_id": os.environ.get("COGNILODE_ENVIRONMENT_ID", ""),
@@ -1029,7 +1035,7 @@ class UnifiedProviderActuator:
                         "account_id": custody.get("account_id"),
                         **memory_meta,
                     },
-                })
+                }, require_admission=False)
                 request = replace(
                     request,
                     prompt=(

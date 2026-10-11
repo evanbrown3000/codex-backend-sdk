@@ -632,7 +632,11 @@ class ComputerUseXProviderAdapter:
             # particular marketing phrase misclassifies a live paid session
             # and then demands refresh tokens that browser custody does not
             # need or expose.
-            if "Sign in to save activity" not in body:
+            signed_out = (
+                page.locator("body.viewer-signed-out").count() > 0
+                or "Sign in to save activity" in body
+            )
+            if not signed_out:
                 return
             failures: list[str] = []
             for refresh_token in self._google_refresh_tokens():
@@ -641,7 +645,11 @@ class ComputerUseXProviderAdapter:
                     page.goto("https://gemini.google.com/app", wait_until="domcontentloaded", timeout=60_000)
                     page.wait_for_timeout(2_000)
                     body = page.locator("body").inner_text(timeout=20_000)
-                    if "Sign in to save activity" not in body:
+                    signed_out = (
+                        page.locator("body.viewer-signed-out").count() > 0
+                        or "Sign in to save activity" in body
+                    )
+                    if not signed_out:
                         return
                 except Exception as exc:
                     failures.append(type(exc).__name__)

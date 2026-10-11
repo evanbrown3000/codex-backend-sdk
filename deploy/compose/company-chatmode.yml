@@ -66,6 +66,8 @@ services:
       - cognilode/memory-drive/rclone-config
       - --operator-password-file
       - /home/worker/.config/cognilode/operator-bearer
+      - --serve-host
+      - 127.0.0.1
       - --serve-port
       - "18892"
     environment:

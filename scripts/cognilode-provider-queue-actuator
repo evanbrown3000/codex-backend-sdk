@@ -932,23 +932,14 @@ def main() -> int:
                                     str(job.get("id") or "")
                                 )
                                 still_active = transport_active is True
-                            orphan_grace = float(os.environ.get(
-                                "COGNILODE_PROVIDER_ORPHAN_GRACE_SECONDS", "180"
-                            ))
-                            orphaned = bool(
-                                timestamp(job.get("effect_started_at"))
-                                and time.time() - timestamp(job.get("effect_started_at")) >= orphan_grace
-                            )
-                            # An unavailable custody socket is uncertainty, not
-                            # proof that a provider-side turn disappeared.
-                            # Preserve its effect fence until the real lease
-                            # expires; only an explicit False permits the
-                            # shorter orphan-recovery path.
-                            orphan_confirmed = (args.provider != "chatgpt.com"
-                                                or transport_active is False)
+                            # A generation-local process absence is never
+                            # proof that the provider-side turn ended. Browser
+                            # actuators can be draining in a predecessor
+                            # generation and ChatGPT transport is a separate
+                            # custody service. The scheduler's persisted effect
+                            # lease is the sole safe retry boundary.
                             if (not recovered and not still_active
-                                    and (lease_remaining_seconds(job) <= 0
-                                         or (orphaned and orphan_confirmed))):
+                                    and lease_remaining_seconds(job) <= 0):
                                 # An accepted/in-turn effect remains fenced
                                 # until its persisted scheduler lease expires.
                                 # At expiry, recover any local terminal receipt
@@ -956,9 +947,7 @@ def main() -> int:
                                 scheduler_call({
                                     "operation": "release_job", **fence(job),
                                     "provider_state": "provider_collection_interrupted",
-                                    "reason": ("orphaned_provider_transport_without_terminal_receipt"
-                                               if orphaned else
-                                               "effect_lease_expired_without_terminal_receipt"),
+                                    "reason": "effect_lease_expired_without_terminal_receipt",
                                     "retry_after_seconds": 1,
                                 })
                         else:

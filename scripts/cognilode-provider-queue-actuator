@@ -35,6 +35,24 @@ CHATGPT_DEFAULT_CONCURRENCY = 10
 MAX_ACTUATION_CONCURRENCY = 32
 
 
+def converged_broker_command() -> list[str]:
+    """Spawn each provider operation from the live converged source graph.
+
+    The actuator itself is immutable for the lifetime of its leased jobs, but
+    ComputerUseX is intentionally repaired independently.  Selecting its
+    current source only at broker birth activates those repairs without
+    interrupting or replaying an already-authorized provider mutation.
+    """
+    roots = [str(Path(__file__).resolve().parent.parent)]
+    adapter = Path("/runtime/source/current/automation-computeruse-vision/src")
+    if adapter.is_dir():
+        roots.insert(0, str(adapter))
+    if os.environ.get("PYTHONPATH"):
+        roots.append(os.environ["PYTHONPATH"])
+    return ["/usr/bin/env", "PYTHONPATH=" + os.pathsep.join(roots),
+            sys.executable, "-m", "codex_backend_sdk.provider_broker"]
+
+
 def timestamp(value: object) -> float:
     if value in (None, ""):
         return 0.0
@@ -765,9 +783,7 @@ def main() -> int:
 
         def run() -> None:
             try:
-                client = ProviderActuationClient(
-                    [sys.executable, "-m", "codex_backend_sdk.provider_broker"], timeout=2400
-                )
+                client = ProviderActuationClient(converged_broker_command(), timeout=2400)
                 process(job, client)
             except Exception as exc:
                 print(json.dumps({

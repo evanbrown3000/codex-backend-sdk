@@ -337,7 +337,15 @@ _OBSOLETE_BROKERLESS_SINCE: dict[int, float] = {}
 
 
 def reap_obsolete_batch_generations(active_revision: str, current_pid: int) -> None:
-    """Retire leaked old supervisors only after their local turn has drained."""
+    """Retire leaked old supervisors/actuators after their turn has drained.
+
+    Early supervisor generations left provider actuators reparented to PID 1.
+    Looking only for the batch-daemon parent therefore retained multiple stale
+    queue consumers indefinitely.  Treat those orphan actuators as generation
+    roots too, while preserving any root that still owns a live provider
+    broker.  This restores one converged custody path without terminating an
+    accepted provider operation.
+    """
     now = time.monotonic()
     seen: set[int] = set()
     for entry in Path("/proc").iterdir():
@@ -350,7 +358,11 @@ def reap_obsolete_batch_generations(active_revision: str, current_pid: int) -> N
             command = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
         except OSError:
             continue
-        if "b4pt0r-com-batch-daemon" not in command or active_revision in command:
+        obsolete_root = (
+            "b4pt0r-com-batch-daemon" in command
+            or "cognilode-provider-queue-actuator" in command
+        )
+        if not obsolete_root or active_revision in command:
             continue
         seen.add(pid)
         if _descendant_has_provider_broker(pid):

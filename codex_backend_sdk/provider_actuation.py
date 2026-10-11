@@ -973,6 +973,22 @@ class UnifiedProviderActuator:
                     "foreground_handle": foreground.get("foreground_handle"),
                     "task_context_handles": list(foreground.get("task_context_handles") or ()),
                 }
+                # Record consumption before crossing the provider mutation
+                # boundary. This is not an observability poll: it is the
+                # durable causal edge proving which memory treatment the
+                # worker was actually given for this operation.
+                AgentMemoryClient(use_broker=False).admit_inventory({
+                    "kind": "agent_memory.foreground_consumed",
+                    "source": "b4pt0r-provider-actuator",
+                    "environment_id": os.environ.get("COGNILODE_ENVIRONMENT_ID", ""),
+                    "service": "provider-worker",
+                    "payload": {
+                        "operation_id": request.operation_id,
+                        "provider": request.provider,
+                        "account_id": custody.get("account_id"),
+                        **memory_meta,
+                    },
+                })
                 request = replace(
                     request,
                     prompt=(

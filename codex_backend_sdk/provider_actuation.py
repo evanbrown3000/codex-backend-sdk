@@ -632,10 +632,21 @@ class ComputerUseXProviderAdapter:
             # particular marketing phrase misclassifies a live paid session
             # and then demands refresh tokens that browser custody does not
             # need or expose.
-            signed_out = (
-                page.locator("body.viewer-signed-out").count() > 0
-                or "Sign in to save activity" in body
-            )
+            def provider_signed_out() -> bool:
+                # Gemini currently exposes both a Google-account anchor and
+                # provider buttons labelled "Sign in" while logged out.  Do
+                # not use slogans as the boundary: they change independently
+                # of authentication and previously let a logged-out composer
+                # pass as a custodied session.
+                return (
+                    page.locator("body.viewer-signed-out").count() > 0
+                    or page.locator(
+                        'a[href*="accounts.google.com/ServiceLogin"]'
+                    ).count() > 0
+                    or page.get_by_role("button", name="Sign in", exact=True).count() > 0
+                )
+
+            signed_out = provider_signed_out()
             if not signed_out:
                 return
             failures: list[str] = []
@@ -645,10 +656,7 @@ class ComputerUseXProviderAdapter:
                     page.goto("https://gemini.google.com/app", wait_until="domcontentloaded", timeout=60_000)
                     page.wait_for_timeout(2_000)
                     body = page.locator("body").inner_text(timeout=20_000)
-                    signed_out = (
-                        page.locator("body.viewer-signed-out").count() > 0
-                        or "Sign in to save activity" in body
-                    )
+                    signed_out = provider_signed_out()
                     if not signed_out:
                         return
                 except Exception as exc:

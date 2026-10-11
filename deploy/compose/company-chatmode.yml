@@ -350,13 +350,18 @@ services:
     working_dir: /runtime
     entrypoint: [sh, -c]
     command:
-      - >-
-        while ! test -f /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-chatmode-runtime; do sleep 2; done;
-        exec python3 /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-chatmode-runtime
+      - |
+        while ! test -f /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-source-generation; do sleep 2; done
+        exec python3 /runtime/source/current/codex-backend-sdk/scripts/cognilode-company-source-generation \
+          --script cognilode-company-chatmode-runtime --drain-socket /runtime/chatmode-generation.sock --no-drain
     environment:
       HOME: /home/worker
       COGNILODE_CHATMODE_PORTABLE: "1"
       COGNILODE_CHATMODE_RUNTIME_EPOCH: bounded-drain-20261010
+      # Queue admission and effect fencing live in the scheduler/transport.
+      # This non-custody process tree can therefore adopt repaired actuator,
+      # event-publisher and floor-watcher source as one immutable generation.
+      COGNILODE_COMPANY_SOURCE_ROOT: /runtime/source
       COGNILODE_CHATMODE_DRAIN_GRACE_SECONDS: "120"
       # Provider populations have independent clocks and workers.  Keep every
       # native fallback available so a broken ChatGPT route cannot prevent

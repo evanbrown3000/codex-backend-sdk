@@ -471,6 +471,14 @@ def main() -> int:
         "COGNILODE_CENTRAL_AGENT_MEMORY_INVENTORY_ENDPOINT",
         "https://cognilode.com/api/operator/inventory/events",
     )
+    # Provider browser custody exposes native Chrome CDP on 9333.  Retire the
+    # historical 9334 proxy value at the same source-owned boundary: its HTTP
+    # discovery succeeds but its upgraded WebSocket stalls, consuming an
+    # entire Gemini/Claude/Anthropic effect lease without a provider turn.
+    os.environ["COMPUTERUSEX_CDP_ENDPOINT"] = os.environ.get(
+        "COGNILODE_PROVIDER_BROWSER_CDP_ENDPOINT",
+        "http://127.0.0.1:9333",
+    )
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     reap_inherited_drains()

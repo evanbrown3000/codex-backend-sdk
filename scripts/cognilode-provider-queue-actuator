@@ -626,6 +626,39 @@ def chatgpt_transport_has_job(job_id: str) -> bool | None:
         return None
 
 
+def predecessor_browser_actuator_present(provider: str) -> bool:
+    """Return whether another local generation can still own browser effect.
+
+    Browser provider brokers are child processes of their immutable actuator.
+    A source handoff may overlap generations, so an effect missing from this
+    process's thread set is not orphaned while either a predecessor actuator
+    for the same provider or any provider broker remains alive.  Conversely,
+    once both are absent, the adopted generation has machine-local proof that
+    no predecessor can still mutate the singular managed browser.
+    """
+    own_pid = os.getpid()
+    provider_flag = f"--provider {provider}"
+    try:
+        entries = tuple(Path("/proc").iterdir())
+    except OSError:
+        return True
+    for entry in entries:
+        if not entry.name.isdigit() or int(entry.name) == own_pid:
+            continue
+        try:
+            command = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(
+                errors="replace"
+            )
+        except OSError:
+            continue
+        if "codex_backend_sdk.provider_broker" in command:
+            return True
+        if ("cognilode-provider-queue-actuator" in command
+                and provider_flag in command):
+            return True
+    return False
+
+
 def reject_prohibited_elapsed_time_padding(job: Mapping[str, Any]) -> bool:
     """Reject prompts that manufacture provider duration with sleep/heartbeat loops."""
     prompt = str(job.get("prompt") or "").casefold()
@@ -932,14 +965,21 @@ def main() -> int:
                                     str(job.get("id") or "")
                                 )
                                 still_active = transport_active is True
-                            # A generation-local process absence is never
-                            # proof that the provider-side turn ended. Browser
-                            # actuators can be draining in a predecessor
-                            # generation and ChatGPT transport is a separate
-                            # custody service. The scheduler's persisted effect
-                            # lease is the sole safe retry boundary.
+                            # For ChatGPT the persisted lease remains the retry
+                            # boundary unless central custody explicitly says
+                            # the job is live. For browser providers, absence
+                            # from this thread is insufficient; only the
+                            # additional proof that every predecessor actuator
+                            # and provider broker has drained permits recovery.
+                            browser_predecessor_gone = bool(
+                                args.provider != "chatgpt.com"
+                                and timestamp(job.get("effect_started_at"))
+                                and time.time() - timestamp(job.get("effect_started_at")) >= 30
+                                and not predecessor_browser_actuator_present(args.provider)
+                            )
                             if (not recovered and not still_active
-                                    and lease_remaining_seconds(job) <= 0):
+                                    and (lease_remaining_seconds(job) <= 0
+                                         or browser_predecessor_gone)):
                                 # An accepted/in-turn effect remains fenced
                                 # until its persisted scheduler lease expires.
                                 # At expiry, recover any local terminal receipt
@@ -947,7 +987,11 @@ def main() -> int:
                                 scheduler_call({
                                     "operation": "release_job", **fence(job),
                                     "provider_state": "provider_collection_interrupted",
-                                    "reason": "effect_lease_expired_without_terminal_receipt",
+                                    "reason": (
+                                        "drained_browser_generation_without_terminal_receipt"
+                                        if browser_predecessor_gone else
+                                        "effect_lease_expired_without_terminal_receipt"
+                                    ),
                                     "retry_after_seconds": 1,
                                 })
                         else:

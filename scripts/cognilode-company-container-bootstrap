@@ -895,6 +895,8 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
     synced = runtime / "shared/source/current/codex-backend-sdk"
     memory_applied = runtime / "shared/memory-source-applied"
     memory_compose_applied = runtime / "shared/memory-compose-applied.sha256"
+    storage_applied = runtime / "shared/universe-storage-source-applied"
+    storage_compose_applied = runtime / "shared/universe-storage-compose-applied.sha256"
     service_hash_path = runtime / "shared/compose-service-digests.json"
     notify_service("READY=1\nSTATUS=Reconciling company containers")
     while True:
@@ -1065,6 +1067,58 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             print(f"standalone adopter retirement pending: {exc}", flush=True)
         notify_service("WATCHDOG=1")
+        # Universe Storage is a separately owned domain repository, but this
+        # sole host container starter must still adopt its Compose contract.
+        # Merely advancing the shared source link updates Python through the
+        # storage runtime supervisor; it cannot add a newly required mount,
+        # environment value, or published port to an existing container.
+        storage_source = runtime / "shared/source/current/universe-storage"
+        storage_compose = storage_source / "deploy/company-storage.yml"
+        if storage_source.is_dir() and storage_compose.is_file():
+            revision = subprocess.run(
+                ["git", "-c", "safe.directory=*", "-C", str(storage_source),
+                 "rev-parse", "HEAD"], capture_output=True, text=True,
+                check=False, timeout=30,
+            ).stdout.strip()
+            previous = storage_applied.read_text(encoding="utf-8").strip() if storage_applied.is_file() else ""
+            if revision and revision != previous:
+                compose_digest = hashlib.sha256(storage_compose.read_bytes()).hexdigest()
+                previous_compose = (storage_compose_applied.read_text(encoding="utf-8").strip()
+                                    if storage_compose_applied.is_file() else "")
+                present = subprocess.run(
+                    ["docker", "inspect", f"{project}-universe-storage-1"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    check=False, timeout=30,
+                ).returncode == 0
+                if compose_digest != previous_compose or not present:
+                    try:
+                        subprocess.run(
+                            ["docker", "compose", "--project-name", project,
+                             "-f", str(storage_compose), "up", "-d", "--no-deps",
+                             "universe-storage"],
+                            env=env, check=True, timeout=180,
+                        )
+                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                        running = subprocess.run(
+                            ["docker", "inspect", "-f", "{{.State.Running}}",
+                             f"{project}-universe-storage-1"],
+                            capture_output=True, text=True, check=False, timeout=30,
+                        ).stdout.strip().casefold() == "true"
+                        if not running:
+                            print(f"universe storage composition restart pending: {exc}", flush=True)
+                            notify_service("WATCHDOG=1")
+                            time.sleep(30)
+                            continue
+                    temporary = storage_compose_applied.with_suffix(".tmp")
+                    temporary.write_text(compose_digest + "\n", encoding="utf-8")
+                    temporary.replace(storage_compose_applied)
+                if compose_digest == (storage_compose_applied.read_text(encoding="utf-8").strip()
+                                      if storage_compose_applied.is_file() else compose_digest):
+                    temporary = storage_applied.with_suffix(".tmp")
+                    temporary.write_text(revision + "\n", encoding="utf-8")
+                    temporary.replace(storage_applied)
+                    print(f"universe storage source applied: {revision}", flush=True)
+
         memory_source = runtime / "shared/source/current/agent-memory"
         memory_compose = memory_source / "deploy/compose/agent-memory.yml"
         if (memory_source / ".git").exists() and memory_compose.is_file():

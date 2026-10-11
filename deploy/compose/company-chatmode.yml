@@ -106,6 +106,7 @@ services:
         # models, histories and metrics can be gigabytes and previously kept
         # Chrome in uninterruptible volume I/O long enough to miss queue slots.
         for item in 'Local State' Default/Cookies Default/Cookies-journal \
+          Default/'Web Data' Default/'Web Data-journal' \
           Default/Preferences Default/'Secure Preferences'; do
           if test -e "$$durable/$$item"; then
             mkdir -p "$$profile/$$(dirname "$$item")"
@@ -126,6 +127,7 @@ services:
         child=$$!
         persist() {
           for item in 'Local State' Default/Cookies Default/Cookies-journal \
+            Default/'Web Data' Default/'Web Data-journal' \
             Default/Preferences Default/'Secure Preferences'; do
             if test -e "$$profile/$$item"; then
               mkdir -p "$$durable/$$(dirname "$$item")"

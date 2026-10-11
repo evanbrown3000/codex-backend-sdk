@@ -235,14 +235,24 @@ def _chrome_secret() -> bytes:
 
     bus = secretstorage.dbus_init()
     collection = secretstorage.get_default_collection(bus)
+    # Chrome also creates a similarly named ``... Control`` dummy whose only
+    # purpose is unlocking libsecret.  Selecting it produces plausible-length
+    # garbage for every v11 cookie and silently prevents session transfer.
+    # Prefer the real application-scoped key; retain the label-only fallback
+    # for older Chrome profiles which predate the application attribute.
+    fallback = None
     for item in collection.get_all_items():
         try:
             label = item.get_label()
             attrs = item.get_attributes()
         except Exception:
             continue
-        if "Chrome Safe Storage" in label or attrs.get("application") == "chrome":
+        if attrs.get("application") == "chrome" or label == "Chrome Safe Storage":
             return item.get_secret()
+        if label == "Chrome Safe Storage" and fallback is None:
+            fallback = item.get_secret()
+    if fallback is not None:
+        return fallback
     raise CapabilityError("chrome_secret_missing", "could not read Chrome Safe Storage from Secret Service")
 
 

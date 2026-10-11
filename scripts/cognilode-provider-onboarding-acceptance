@@ -437,6 +437,14 @@ def main() -> int:
             if adopted and proof["inflight"].get(provider) != adopted:
                 proof["inflight"][provider] = adopted
                 state_path.write_text(json.dumps(proof, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+            # A prior generation can leave the acceptance job queued behind a
+            # newly advanced biological slot. Adoption must preserve the job
+            # identity, but it must also release one queue-authorized slot;
+            # otherwise every safe pre-submit retry idles for the full normal
+            # provider interval and onboarding never reaches provider work.
+            if active and str(active[0].get("state") or "") == "queued":
+                scheduler_call({"operation": "rhythm_fast_forward",
+                                "provider": provider, "slots": 1})
             if not job_id:
                 continuation_conversation = ""
                 continuation_parent = ""

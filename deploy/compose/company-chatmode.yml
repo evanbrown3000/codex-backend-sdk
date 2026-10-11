@@ -258,6 +258,9 @@ services:
       AGENT_MEMORY_ENDPOINT: https://cognilode.com/api/operator/conversations
       AGENT_MEMORY_INGEST_ENDPOINT: https://cognilode.com/api/operator/agent-memory
       AGENT_MEMORY_INVENTORY_ENDPOINT: https://cognilode.com/api/operator/inventory/events
+      # Read-only task foreground is served from the continuously maintained
+      # local projection; all writes remain on the elected central authority.
+      AGENT_MEMORY_FOREGROUND_ENDPOINT: http://127.0.0.1:8098/v1/foreground
       PATH: /node-runtime:/usr/bin:/usr/local/bin:/bin
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro
@@ -365,6 +368,7 @@ services:
       AGENT_MEMORY_ENDPOINT: https://cognilode.com/api/operator/conversations
       AGENT_MEMORY_INGEST_ENDPOINT: https://cognilode.com/api/operator/agent-memory
       AGENT_MEMORY_INVENTORY_ENDPOINT: https://cognilode.com/api/operator/inventory/events
+      AGENT_MEMORY_FOREGROUND_ENDPOINT: http://127.0.0.1:8098/v1/foreground
       PYTHONPATH: /runtime/source/current/codex-backend-sdk/gate:/runtime/source/current/modified-codex-runtime/src
       COGNILODE_HTTP_GATE_SOCKET: /runtime/http-gate/gate.sock
       COGNILODE_HTTP_GATE_FALLBACK_LOG: /runtime/http-gate/fallback.jsonl

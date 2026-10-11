@@ -42,20 +42,23 @@ def memory_foreground(job: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
     integration.  The stable job identity is their reader identity and the
     selected packet is retained beside other durable worker products.
     """
-    endpoint = os.environ.get("AGENT_MEMORY_ENDPOINT", "http://127.0.0.1:8098/v1/conversations").rstrip("/")
-    if endpoint.endswith("/v1/conversations"):
-        endpoint = endpoint.rsplit("/v1/conversations", 1)[0] + "/v1/foreground"
-    elif endpoint.endswith("/api/operator/conversations"):
-        endpoint = endpoint.rsplit("/api/operator/conversations", 1)[0] + "/api/operator/foreground"
-    else:
-        endpoint += "/foreground"
+    endpoint = os.environ.get("AGENT_MEMORY_FOREGROUND_ENDPOINT", "").rstrip("/")
+    if not endpoint:
+        endpoint = os.environ.get("AGENT_MEMORY_ENDPOINT", "http://127.0.0.1:8098/v1/conversations").rstrip("/")
+        if endpoint.endswith("/v1/conversations"):
+            endpoint = endpoint.rsplit("/v1/conversations", 1)[0] + "/v1/foreground"
+        elif endpoint.endswith("/api/operator/conversations"):
+            endpoint = endpoint.rsplit("/api/operator/conversations", 1)[0] + "/api/operator/foreground"
+        else:
+            endpoint += "/foreground"
     role = str(job.get("memory_persona") or "company").strip() or "company"
     body = json.dumps({
         "persona": role,
         "max_tokens": int(os.environ.get("COGNILODE_AGENT_FOREGROUND_TOKENS", "40000")),
         "task": str(job.get("prompt") or ""),
     }, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    headers = {"Content-Type": "application/json", "Accept": "application/json",
+               "User-Agent": "cognilode-provider-runtime/1.0"}
     token_path = Path(os.environ.get("COGNILODE_OPERATOR_TOKEN_FILE", "/home/worker/.config/cognilode/operator-bearer"))
     if endpoint.startswith("https://") and token_path.is_file():
         token = token_path.read_text(encoding="utf-8").strip().removeprefix("Bearer ").strip()

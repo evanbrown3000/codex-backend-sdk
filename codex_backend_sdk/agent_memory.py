@@ -44,7 +44,7 @@ class AgentMemoryClient:
                 else self.endpoint.rstrip("/") + "/api/operator/agent-memory"
             )
         ).rstrip("/")
-        self.foreground_endpoint = (
+        self.foreground_endpoint = os.environ.get("AGENT_MEMORY_FOREGROUND_ENDPOINT") or (
             self.endpoint.rsplit("/conversations", 1)[0] + "/foreground"
             if endpoint_path.endswith("/conversations")
             else self.endpoint.rstrip("/") + "/api/operator/foreground"

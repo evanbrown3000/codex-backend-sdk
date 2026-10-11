@@ -471,6 +471,14 @@ def main() -> int:
         "COGNILODE_CENTRAL_AGENT_MEMORY_INVENTORY_ENDPOINT",
         "https://cognilode.com/api/operator/inventory/events",
     )
+    # Foreground is a read projection and may be served by a continuously
+    # updated edge replica without creating another writable memory authority.
+    # Keep conversation admission and inventory publication on the elected
+    # central relay while avoiding a missing Cloudflare foreground route.
+    os.environ["AGENT_MEMORY_FOREGROUND_ENDPOINT"] = os.environ.get(
+        "COGNILODE_AGENT_MEMORY_FOREGROUND_ENDPOINT",
+        "http://127.0.0.1:8098/v1/foreground",
+    )
     # Provider browser custody exposes native Chrome CDP on 9333.  Retire the
     # historical 9334 proxy value at the same source-owned boundary: its HTTP
     # discovery succeeds but its upgraded WebSocket stalls, consuming an

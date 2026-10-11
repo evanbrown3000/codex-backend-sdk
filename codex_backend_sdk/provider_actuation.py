@@ -36,6 +36,93 @@ NORMAL_STATES = (
 )
 
 
+def _verified_artifact(row: Mapping[str, Any]) -> bool:
+    """An anchor, failed download or uncommitted path is not a returned file."""
+    if row.get("downloaded") is False or row.get("custody_state") == "pending":
+        return False
+    receipt = row.get("custody")
+    if isinstance(receipt, Mapping):
+        return bool(receipt.get("ref") and receipt.get("sha256")
+                    and int(receipt.get("size") or 0) > 0)
+    if row.get("ref") and row.get("sha256"):
+        # Includes pre-committed B4PT0R/Universe Storage receipts.
+        return int(row.get("size") or row.get("bytes") or 0) > 0
+    # A provider adapter may have independently read back a Drive-custodied
+    # artifact, without retaining an extra local binary copy.
+    if receipt == "google_drive" and row.get("uri"):
+        return bool(row.get("sha256") and int(row.get("bytes") or 0) > 0)
+    return False
+
+
+def _semantic_result_defects(
+    *, request: "ProviderPromptRequest", raw: Mapping[str, Any],
+    terminal: bool, assistant_text: str, artifacts: Sequence[Mapping[str, Any]]
+) -> list[str]:
+    """Consumer contract is independent of provider transport acceptance.
+
+    Optional result_policy is explicit, not guessed from prose or a file
+    extension appearing somewhere in a research prompt.
+    """
+    policy = request.metadata.get("result_policy")
+    if not isinstance(policy, Mapping):
+        policy = request.metadata
+    defects: list[str] = []
+    # Streaming/accepted-only receipts are not failed terminal deliverables.
+    # Preserve their active fence; evaluate quality only at claimed terminal.
+    if not terminal:
+        return defects
+    if not assistant_text.strip():
+        defects.append("missing_substantive_terminal_assistant")
+    minimum_chars = int(policy.get("minimum_assistant_chars") or 0)
+    if minimum_chars > 0 and len(assistant_text.strip()) < minimum_chars:
+        defects.append("assistant_below_declared_minimum")
+    minimum_elapsed = float(policy.get("minimum_elapsed_seconds") or 0)
+    if minimum_elapsed > 0:
+        observed = raw.get("elapsed_seconds")
+        if observed is None:
+            observed = raw.get("provider_elapsed_seconds")
+        if observed is None or float(observed) < minimum_elapsed:
+            defects.append("provider_work_below_declared_minimum")
+    expected = policy.get("required_artifacts") or policy.get("required_output_names") or ()
+    if isinstance(expected, (str, Mapping)):
+        expected = (expected,)
+    for requirement in expected:
+        if isinstance(requirement, Mapping):
+            name = Path(str(requirement.get("filename") or requirement.get("name") or "")).name
+            min_bytes = max(1, int(requirement.get("min_bytes") or 1))
+        else:
+            name = Path(str(requirement)).name
+            min_bytes = 1
+        if not name:
+            defects.append("invalid_required_artifact_identity")
+            continue
+        matching = [row for row in artifacts
+                    if Path(str(row.get("filename") or row.get("name")
+                                or row.get("path") or "")).name == name]
+        def recorded_size(row):
+            custody = row.get("custody")
+            size = row.get("bytes") or row.get("size")
+            if not size and isinstance(custody, Mapping):
+                size = custody.get("size")
+            return int(size or 0)
+        if not any(recorded_size(row) >= min_bytes for row in matching):
+            defects.append("required_artifact_missing_or_too_small:" + name)
+    if request.provider in {"gemini.com", "claude.com", "anthropic.com"}:
+        turn = raw.get("user_message_identity")
+        if isinstance(turn, Mapping) and turn.get("expected_text_match") is False:
+            defects.append("submitted_prompt_not_observed")
+        seen = raw.get("assistant_message_identity")
+        if isinstance(seen, Mapping) and seen.get("observed") is False:
+            defects.append("assistant_turn_not_observed")
+        if request.attachments:
+            uploaded = raw.get("attachment")
+            if isinstance(uploaded, Mapping) and uploaded.get("observed_names") is not None:
+                names = {str(n).casefold() for n in uploaded.get("observed_names") or ()}
+                if not all(Path(f).name.casefold() in names for f in request.attachments):
+                    defects.append("input_attachments_not_all_observed")
+    return defects
+
+
 def normalize_provider(value: str) -> str:
     aliases = {
         "chatgpt": "chatgpt.com", "chatgpt.com": "chatgpt.com",
@@ -620,20 +707,50 @@ class UnifiedProviderActuator:
                     payload={"transport": adapter.capabilities().get("transport")},
                     conversation_id=conversation_id,
                 ))
+            # Only provider-returned bytes with confirmed custody are artifacts.
+            # A DOM anchor, attempted download, or unresolved upload never earns
+            # artifacts_collected. Preserve incomplete candidates in the raw receipt.
             artifacts: list[dict[str, Any]] = []
+            excluded_artifacts: list[dict[str, str]] = []
             candidates = (raw.get("downloaded_files") or raw.get("response_downloaded_files")
                           or raw.get("response_downloads") or raw.get("artifacts") or [])
             for item in candidates if isinstance(candidates, list) else []:
                 row = dict(item) if isinstance(item, Mapping) else {"path": str(item)}
                 path = str(row.get("path") or "")
-                if path and Path(path).is_file():
+                if row.get("downloaded") is False:
+                    excluded_artifacts.append({"name": str(row.get("filename") or ""), "reason": "download_not_completed"})
+                    continue
+                if path and Path(path).is_file() and not _verified_artifact(row):
                     try:
                         row["custody"] = commit_returned_artifact(path)
                         row["custody_state"] = "committed"
                     except Exception as exc:
                         row["custody_state"] = "pending"
                         row["custody_error"] = type(exc).__name__
-                artifacts.append(row)
+                if _verified_artifact(row):
+                    artifacts.append(row)
+                else:
+                    excluded_artifacts.append({
+                        "name": Path(str(row.get("filename") or path or "")).name,
+                        "reason": str(row.get("custody_error") or "no_verified_custody"),
+                    })
+            if excluded_artifacts:
+                raw["uncollected_artifact_candidates"] = excluded_artifacts
+            provider_terminal_observed = terminal
+            defects = _semantic_result_defects(
+                request=request, raw=raw, terminal=terminal,
+                assistant_text=assistant_text, artifacts=artifacts,
+            ) if accepted else []
+            raw["result_quality_admission"] = {
+                "accepted": bool(accepted and provider_terminal_observed and not defects),
+                "provider_terminal_observed": provider_terminal_observed,
+                "verified_artifact_count": len(artifacts),
+                "defects": defects,
+            }
+            if defects:
+                # Provider mutations may already have occurred. Never pretend
+                # the requested deliverable completed, and never replay blindly.
+                terminal = False
             if terminal:
                 event_ids.append(self.publisher.emit(
                     request=request, state="terminal",
@@ -650,22 +767,26 @@ class UnifiedProviderActuator:
                     payload={"artifacts": artifacts}, conversation_id=conversation_id,
                 ))
             error = None
-            state = "artifacts_collected" if artifacts else "terminal" if terminal else "accepted"
-            if not accepted:
+            state = "artifacts_collected" if terminal and artifacts else "terminal" if terminal else "accepted"
+            if not accepted or defects:
                 state = "provider_error"
-                status = str(raw.get("state") or raw.get("status") or "provider_not_accepted")
-                diagnostic = raw.get("error") or raw.get("error_preview")
-                if not diagnostic:
-                    diagnostic = status
-                    markers = raw.get("auth_markers_observed")
-                    observed_url = raw.get("observed_url")
-                    if markers or observed_url:
-                        diagnostic = json.dumps({
-                            "status": status,
-                            "auth_markers_observed": markers or [],
-                            "observed_url": observed_url or "",
-                        }, separators=(",", ":"))
-                error = {"code": status, "message": str(diagnostic)}
+                if defects:
+                    error = {"code": "semantic_deliverable_incomplete",
+                             "message": json.dumps({"defects": defects}, separators=(",", ":"))}
+                else:
+                    status = str(raw.get("state") or raw.get("status") or "provider_not_accepted")
+                    diagnostic = raw.get("error") or raw.get("error_preview")
+                    if not diagnostic:
+                        diagnostic = status
+                        markers = raw.get("auth_markers_observed")
+                        observed_url = raw.get("observed_url")
+                        if markers or observed_url:
+                            diagnostic = json.dumps({
+                                "status": status,
+                                "auth_markers_observed": markers or [],
+                                "observed_url": observed_url or "",
+                            }, separators=(",", ":"))
+                    error = {"code": status, "message": str(diagnostic)}
                 event_ids.append(self.publisher.emit(
                     request=request, state="provider_error", payload=error,
                     conversation_id=conversation_id,

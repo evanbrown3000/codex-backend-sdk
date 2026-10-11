@@ -35,6 +35,7 @@ services:
     tmpfs: *company_aws_cli_cache
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
     restart: unless-stopped
+    network_mode: host
     user: "${COMPANY_UID:-1000}:${COMPANY_GID:-1000}"
     working_dir: /runtime/source/current/codex-backend-sdk
     entrypoint: [python3, /runtime/source/current/codex-backend-sdk/scripts/cognilode-central-credential-sync]
@@ -82,8 +83,6 @@ services:
       - company_relay_custody:/relay
       - memory_drive_auth:/memory-auth
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
-    ports:
-      - "127.0.0.1:18892:18892"
 
   # The only company browser that may hold provider login state.  Provider
   # adapters receive CDP access to this process after redeeming an opaque

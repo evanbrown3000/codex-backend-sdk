@@ -113,6 +113,17 @@ services:
             cp -a "$$durable/$$item" "$$profile/$$item"
           fi
         done
+        # The unprivileged operation broker receives only read access to the
+        # token database through the same custody volume.  Directory traversal
+        # and token-file ownership are scoped to the company runtime uid; the
+        # remainder of the browser profile stays private to this root process.
+        chmod 711 /custody/browser "$$durable" "$$durable/Default"
+        for item in Default/'Web Data' Default/'Web Data-journal'; do
+          if test -e "$$durable/$$item"; then
+            chown "$${COMPANY_UID:-1000}:$${COMPANY_GID:-1000}" "$$durable/$$item"
+            chmod 640 "$$durable/$$item"
+          fi
+        done
         find "$$profile" -maxdepth 1 -name 'Singleton*' -delete
         chrome=$$(find /root/.cache/ms-playwright -path '*/chrome-linux64/chrome' -type f -perm -111 | head -n 1)
         test -n "$$chrome"

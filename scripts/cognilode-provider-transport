@@ -245,6 +245,16 @@ def provider_prompt(request: dict) -> dict:
     with COUNTER_LOCK:
         if DRAINING:
             return {"exit_code": 75, "stderr": "provider generation draining"}
+        if job_id and job_id in ACTIVE_JOB_IDS:
+            # A caller generation can disappear after custody accepted the
+            # operation while the provider turn remains alive here.  A newer
+            # queue lease for the same logical job must join that operation,
+            # not start a second browser turn against the same profile.
+            return {"exit_code": 0, "provider_result": {
+                "accepted": True, "terminal": False,
+                "state": "provider_running", "operation_id": operation_id,
+                "provider": provider, "joined_existing_operation": True,
+            }, "stderr": ""}
         ACTIVE_SENDS += 1
         if job_id:
             ACTIVE_JOB_IDS.add(job_id)

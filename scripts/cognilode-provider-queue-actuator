@@ -87,6 +87,52 @@ def provider_backend_ready(provider: str) -> bool:
         return False
 
 
+def browser_provider_broker_active(provider: str) -> bool:
+    """Return whether any actuator generation still owns this browser turn.
+
+    Source convergence can reparent an old actuator before its broker returns.
+    The scheduler lease alone then strands a pre-provider failure for an hour.
+    Associate brokers with their provider through the ancestor actuator rather
+    than treating unrelated ChatGPT/custody brokers as evidence that this
+    provider operation remains alive.
+    """
+    wanted = f"--provider {provider}"
+    try:
+        entries = tuple(Path("/proc").iterdir())
+    except OSError:
+        return True
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            command = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(
+                errors="replace"
+            )
+        except OSError:
+            continue
+        if "cognilode-provider-queue-actuator" not in command or wanted not in command:
+            continue
+        frontier = [int(entry.name)]
+        seen: set[int] = set()
+        while frontier:
+            pid = frontier.pop()
+            if pid in seen:
+                continue
+            seen.add(pid)
+            root = Path("/proc") / str(pid)
+            try:
+                child_command = root.joinpath("cmdline").read_bytes().replace(
+                    b"\0", b" "
+                ).decode(errors="replace")
+                children = root.joinpath("task", str(pid), "children").read_text().split()
+            except OSError:
+                continue
+            if "codex_backend_sdk.provider_broker" in child_command:
+                return True
+            frontier.extend(int(value) for value in children if value.isdigit())
+    return False
+
+
 def stop(*_args: object) -> None:
     global DRAINING
     # A synchronized source revision is not permission to interrupt a live
@@ -1014,14 +1060,17 @@ def main() -> int:
                                     str(job.get("id") or "")
                                 )
                                 still_active = transport_active is True
+                            elif args.provider in {"gemini.com", "claude.com", "anthropic.com"} and not still_active:
+                                still_active = browser_provider_broker_active(args.provider)
                             # For ChatGPT the persisted lease remains the retry
                             # boundary unless central custody explicitly says
                             # the job is live. For browser providers, absence
                             # from this thread is insufficient; only the
                             # additional proof that every predecessor actuator
                             # and provider broker has drained permits recovery.
-                            if (not recovered and not still_active
-                                    and lease_remaining_seconds(job) <= 0):
+                            if (not recovered and not still_active and (
+                                    args.provider in {"gemini.com", "claude.com", "anthropic.com"}
+                                    or lease_remaining_seconds(job) <= 0)):
                                 # An accepted/in-turn effect remains fenced
                                 # until its persisted scheduler lease expires.
                                 # At expiry, recover any local terminal receipt

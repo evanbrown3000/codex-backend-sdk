@@ -391,22 +391,16 @@ def _reap_draining_generation(pid: int) -> None:
         time.sleep(2)
     # Broker exit means the provider operation returned to its actuator; it
     # does not mean the actuator has durably completed the scheduler fence.
-    # Give that predecessor a bounded commit window before retiring its process
-    # group.  Without this window a source cutover can erase a valid terminal
-    # browser result in the milliseconds between broker exit and complete_job.
-    commit_deadline = time.monotonic() + 30
-    while time.monotonic() < commit_deadline:
+    # The draining batch daemon is cooperative and exits after its non-daemon
+    # actuator thread commits or requeues the result.  Never replace that
+    # semantic boundary with a wall-clock kill.
+    while True:
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
             _reap(pid)
             return
         time.sleep(0.25)
-    try:
-        os.killpg(os.getpgid(pid), signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    _reap(pid)
 
 
 def reap_inherited_drains() -> None:

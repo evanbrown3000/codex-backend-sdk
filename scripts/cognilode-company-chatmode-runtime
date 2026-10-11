@@ -566,9 +566,13 @@ def main() -> int:
                 pending_generation = None
                 pending_frontier_since = 0.0
         time.sleep(2)
+    # Stop the clock before waiting for the provider population to drain.
+    # Otherwise a host/container shutdown can authorize fresh work while the
+    # supervisor is already committed to exiting, extending the drain forever
+    # and coupling the persistent daemon to a foreground restart command.
+    stop_clock(clock)
     if process.poll() is None:
         drain(process, handoff=False)
-    stop_clock(clock)
     return 0
 
 

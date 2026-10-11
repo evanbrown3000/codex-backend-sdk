@@ -232,6 +232,11 @@ services:
       HOME: /home/worker
       CODEX_HOME: /home/worker/.codex
       COGNILODE_CHATMODE_PORTABLE: "1"
+      # Desired-state generation marker.  The host composition reconciler
+      # replaces a pre-generation-aware custody container only after its
+      # durable send count reaches zero; the replacement boots the current
+      # deferred-frontier supervisor instead of remaining permanently drained.
+      COGNILODE_PROVIDER_CUSTODY_BOOTSTRAP: "deferred-frontier-v2"
       PYTHONPATH: /runtime/source/current/codex-backend-sdk/gate
       COGNILODE_HTTP_GATE_SOCKET: /runtime/http-gate/gate.sock
       COGNILODE_HTTP_GATE_FALLBACK_LOG: /runtime/http-gate/fallback.jsonl

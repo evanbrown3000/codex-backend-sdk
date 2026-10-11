@@ -171,6 +171,7 @@ def _provider_effect_in_flight(program: list[str], process_pid: int | None = Non
     path = Path(os.environ.get(
         "COGNILODE_PROVIDER_SCHEDULER_DB", "/runtime/provider-scheduler/scheduler.sqlite3"
     ))
+    broker_child=False
     if process_pid:
         frontier=[int(process_pid)];seen=set();broker_child=False
         while frontier:
@@ -185,15 +186,21 @@ def _provider_effect_in_flight(program: list[str], process_pid: int | None = Non
             if 'codex_backend_sdk.provider_broker' in command:
                 broker_child=True;break
             frontier.extend(int(value) for value in children if value.isdigit())
-        if not broker_child:
-            return False
     try:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2) as connection:
             row = connection.execute(
-                "SELECT 1 FROM provider_jobs WHERE provider=? "
-                "AND state IN ('claimed','effect_pending') LIMIT 1", (provider,),
+                "SELECT state,effect_started_at,updated_at FROM provider_jobs WHERE provider=? "
+                "AND state IN ('claimed','effect_pending') ORDER BY updated_at DESC LIMIT 1", (provider,),
             ).fetchone()
-        return row is not None
+        if row is None:
+            return False
+        if broker_child:
+            return True
+        # begin_effect and broker spawn are separate local instructions inside
+        # one fenced operation. Preserve the actuator during that bounded gap;
+        # old generations with no broker are still allowed to retire.
+        started=float(row[1] or row[2] or 0)
+        return time.time()-started < 180
     except (OSError, sqlite3.Error):
         # A temporarily unreadable scheduler is not evidence that an external
         # provider mutation is safe to interrupt.

@@ -90,7 +90,13 @@ def _lease_authority() -> ProviderLeaseAuthority:
                 },
             }
             for provider in ("gemini.com", "claude.com", "anthropic.com")
-        ]
+        ] + [{
+            "provider": "codex.research", "account_id": "central-codex",
+            "custody_ref": "runtime:codex-exec-broker",
+            "capabilities": {"attachments": False, "artifact_downloads": False,
+                             "continuation": True, "models": ["gpt-6-luna"],
+                             "reasoning_modes": ["medium"]},
+        }]
     rows = descriptor.get("accounts", []) if isinstance(descriptor, Mapping) else descriptor
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, Mapping):

@@ -34,7 +34,7 @@ from .generation_fence import require_generation
 from .provider_leases import ProviderLeaseAuthority
 
 
-PROVIDERS = ("chatgpt.com", "gemini.com", "claude.com", "anthropic.com")
+PROVIDERS = ("chatgpt.com", "gemini.com", "claude.com", "anthropic.com", "codex.research")
 NORMAL_STATES = (
     "accepted", "streaming", "terminal", "artifacts_collected", "provider_error"
 )
@@ -133,11 +133,12 @@ def normalize_provider(value: str) -> str:
         "gemini": "gemini.com", "gemini.com": "gemini.com",
         "claude": "claude.com", "claude.com": "claude.com",
         "anthropic": "anthropic.com", "anthropic.com": "anthropic.com",
+        "codex": "codex.research", "codex.research": "codex.research",
     }
     try:
         return aliases[value.strip().casefold()]
     except KeyError as exc:
-        raise ValueError("unsupported .com provider: " + value) from exc
+        raise ValueError("unsupported provider: " + value) from exc
 
 
 @dataclass(frozen=True)
@@ -437,6 +438,83 @@ class ChatGPTB4PT0RAdapter:
         finally:
             if temporary is not None:
                 temporary.cleanup()
+
+
+class InstalledCodexResearchAdapter:
+    """Run the managed Modified Codex release through the existing exec broker."""
+
+    def capabilities(self) -> Mapping[str, Any]:
+        return {"provider": "codex.research", "create": True, "continue": True,
+                "resume": True, "terminal_stream": True, "returned_files": False,
+                "transport": "managed_modified_codex_exec_broker",
+                "system_instructions": "replaced_with_exact_blank",
+                "developer_instructions": "replaced_with_exact_blank"}
+
+    @staticmethod
+    def _event_text(value: Mapping[str, Any]) -> str:
+        item = value.get("item") if isinstance(value.get("item"), Mapping) else {}
+        if str(item.get("type") or "") not in {"agent_message", "assistant_message"}:
+            return ""
+        content = item.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(str(part.get("text") or "") for part in content
+                           if isinstance(part, Mapping))
+        return str(item.get("text") or "")
+
+    def prompt(self, request: ProviderPromptRequest, custody: Mapping[str, Any]) -> Mapping[str, Any]:
+        if request.conversation_id:
+            raise ValueError("Codex exec resume requires a provider-native Codex thread identity")
+        model = str(request.model or "gpt-6-luna")
+        effort = str(request.reasoning_effort or "medium")
+        # Always pass both instruction replacements. These exact TOML empty
+        # strings override any system/developer content in the installed
+        # Modified Codex profile rather than inheriting machine defaults.
+        script = Path(__file__).resolve().parents[1] / "scripts/cognilode-codex-exec-client"
+        if not script.is_file():
+            script = Path("/runtime/source/current/codex-backend-sdk/scripts/cognilode-codex-exec-client")
+        output_dir = Path("/runtime/worker/codex-research")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_file = output_dir / (hashlib.sha256(request.operation_id.encode()).hexdigest() + ".txt")
+        args = [sys.executable, str(script), "exec", "--json", "-m", model,
+                "-C", "/runtime", "-o", str(output_file), "-a", "never", "-s", "read-only",
+                "--config", 'model_reasoning_effort="' + effort + '"',
+                "--config", 'model_instructions=""',
+                "--config", 'developer_instructions=""',
+                "--skip-git-repo-check", "-"]
+        env = os.environ.copy()
+        environment_id = str(request.metadata.get("environment_id") or "").strip()
+        if environment_id:
+            env["COGNILODE_DEFAULT_REMOTE_ENVIRONMENT"] = environment_id
+        env["COGNILODE_CODEX_EXEC_TIMEOUT"] = str(int(request.metadata.get("timeout_seconds") or 1200))
+        completed = subprocess.run(args, input=request.prompt, capture_output=True,
+                                   text=True, timeout=int(request.metadata.get("timeout_seconds") or 1200),
+                                   env=env, check=False)
+        events: list[dict[str, Any]] = []
+        for line in completed.stdout.splitlines():
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, Mapping):
+                events.append(dict(value))
+        thread_id = next((str(row.get("thread_id")) for row in events
+                          if row.get("type") == "thread.started" and row.get("thread_id")), "")
+        final = next((row for row in reversed(events) if row.get("type") == "turn.completed"), {})
+        assistant = "".join(self._event_text(row) for row in events)
+        terminal = bool(final) and completed.returncode == 0 and bool(assistant.strip())
+        if not terminal:
+            raise RuntimeError("managed Modified Codex exec did not produce terminal assistant output: "
+                               + (completed.stderr[-800:] or "terminal event missing"))
+        return {"ok": True, "provider_acceptance_observed": True, "assistant_terminal": True,
+                "conversation_id": thread_id or ("codex-thread:" + request.operation_id),
+                "user_message_id": request.operation_id,
+                "terminal_assistant_message_id": str(final.get("turn_id") or
+                    (thread_id + "#terminal")), "terminal_assistant_text": assistant,
+                "assistant_text": assistant, "provider_thread_id": thread_id,
+                "provider_terminal_event": final, "returncode": completed.returncode,
+                "provider_elapsed_seconds": None}
 
 
 class ComputerUseXProviderAdapter:
@@ -777,6 +855,7 @@ class UnifiedProviderActuator:
             "gemini.com": ComputerUseXProviderAdapter("gemini.com"),
             "claude.com": ComputerUseXProviderAdapter("claude.com"),
             "anthropic.com": ComputerUseXProviderAdapter("anthropic.com"),
+            "codex.research": InstalledCodexResearchAdapter(),
         }
         self.adapters.update(dict(adapters or {}))
 

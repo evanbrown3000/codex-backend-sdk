@@ -65,6 +65,8 @@ def provider_backend_ready(provider: str) -> bool:
     """Publish availability only when the mutation backend is reachable."""
     if provider == "chatgpt.com":
         return True
+    if provider == "codex.research":
+        return Path(os.environ.get("COGNILODE_PROVIDER_SOCKET", "/runtime/provider.sock")).exists()
     endpoint = os.environ.get("COMPUTERUSEX_CDP_ENDPOINT", "http://provider-browser:9334").rstrip("/")
     try:
         with urlopen(endpoint + "/json/version", timeout=2.0) as response:
@@ -91,6 +93,8 @@ def actuation_concurrency(provider: str) -> int:
                 str(CHATGPT_DEFAULT_CONCURRENCY),
             ),
         )
+    elif provider == "codex.research":
+        configured = os.environ.get("COGNILODE_CODEX_RESEARCH_MAX_PARALLEL", "1")
     else:
         configured = os.environ.get("COGNILODE_PROVIDER_ACCOUNT_CONCURRENCY", "1")
     try:
@@ -549,6 +553,18 @@ def provider_transport(job: Mapping[str, Any], attachments: tuple[str, ...],
     """
     parent = job.get("parent_operation") if isinstance(job.get("parent_operation"), Mapping) else {}
     turn_timeout = max(60, lease_remaining_seconds(job))
+    is_codex = str(job.get("provider") or "") == "codex.research"
+    if is_codex:
+        quota_parent = {
+            "operation_id": str(parent.get("operation_id") or job.get("parent_operation_id") or job["id"]),
+            "automation_order": int(parent.get("automation_order") or job.get("parent_automation_order") or 0),
+            "kind": str(parent.get("kind") or parent.get("origin") or job.get("parent_kind") or ""),
+        }
+        quota = scheduler_call({"operation": "codex_admit", "parent_operation": quota_parent,
+                                "estimated_cost": float(job.get("estimated_codex_cost") or 1.0),
+                                "priority": int(job.get("priority") or 0)})
+        if quota.get("admitted") is not True:
+            raise RuntimeError("codex_quota_admission_denied:" + str(quota.get("reason") or "unknown"))
     # Every .com mutation crosses the same custody-resident socket.  Spawning
     # browser-provider brokers as actuator children coupled accepted Gemini,
     # Claude, and Anthropic turns to source-generation handoffs: a converged
@@ -566,7 +582,8 @@ def provider_transport(job: Mapping[str, Any], attachments: tuple[str, ...],
         "model": str(job.get("model") or "") or None,
         "reasoning_effort": str(job.get("reasoning_effort") or "") or None,
         "timeout_seconds": turn_timeout,
-        "metadata": {"timeout_seconds": turn_timeout, "queue_job_id": str(job["id"])},
+        "metadata": {"timeout_seconds": turn_timeout, "queue_job_id": str(job["id"]),
+                     "environment_id": str(job.get("environment_id") or "")},
         "parent_operation": {
             "operation_id": str(parent.get("operation_id") or job.get("parent_operation_id") or job["id"]),
             "automation_order": int(parent.get("automation_order") or job.get("parent_automation_order") or 2),
@@ -589,6 +606,9 @@ def provider_transport(job: Mapping[str, Any], attachments: tuple[str, ...],
     result = outer.get("provider_result") if isinstance(outer.get("provider_result"), Mapping) else {}
     if int(outer.get("exit_code") or 0) and not result:
         raise RuntimeError(str(outer.get("stderr") or "provider transport failed"))
+    if is_codex and result.get("assistant_terminal") is True:
+        scheduler_call({"operation": "codex_complete", "operation_id": quota_parent["operation_id"],
+                        "actual_cost": float(result.get("actual_cost") or 1.0)})
     return dict(result)
 
 
@@ -767,7 +787,7 @@ def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--provider", required=True, choices=("chatgpt.com", "gemini.com", "claude.com", "anthropic.com"))
+    parser.add_argument("--provider", required=True, choices=("chatgpt.com", "gemini.com", "claude.com", "anthropic.com", "codex.research"))
     parser.add_argument("--device-id", default=os.environ.get("COGNILODE_ENVIRONMENT_ID", "company-container"))
     parser.add_argument("--interval", type=float, default=10)
     args = parser.parse_args()
@@ -897,7 +917,7 @@ def main() -> int:
             time.sleep(1.0)
             continue
         try:
-            account = "central-custody" if args.provider == "chatgpt.com" else "primary"
+            account = "central-custody" if args.provider in {"chatgpt.com", "codex.research"} else "primary"
             with lock:
                 active_count = len(active)
             backend_ready = provider_backend_ready(args.provider)
@@ -914,7 +934,7 @@ def main() -> int:
                             "artifact_downloads": True, "continuation": True,
                             "models": (["gpt-5-6-thinking", "gpt-5.6", "gpt-5.6-sol",
                                         "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "auto"]
-                                       if args.provider == "chatgpt.com" else []),
+                                       if args.provider in {"chatgpt.com", "codex.research"} else []),
                             "reasoning_modes": ["low", "medium", "high", "xhigh", "max", "extended"],
                             "max_concurrency": max_concurrency,
                         }},

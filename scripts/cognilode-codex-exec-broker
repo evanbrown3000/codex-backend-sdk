@@ -72,10 +72,13 @@ def _argv(raw: object) -> list[str]:
                 args[position + 1] = _within(value)
             if word == "-o":
                 args[position + 1] = _within(value, output=True)
-            if word == "-c" and not value.startswith("model_reasoning_effort="):
-                raise ValueError("unsupported Codex configuration override")
+            if word == "-c":
+                allowed = {"model_reasoning_effort=", "model_instructions=\"\"", "developer_instructions=\"\""}
+                if not (value.startswith("model_reasoning_effort=")
+                        or value in {"model_instructions=\"\"", "developer_instructions=\"\""}):
+                    raise ValueError("unsupported Codex configuration override")
             position += 2
-        elif word in {"exec", "--skip-git-repo-check", "-"}:
+        elif word in {"exec", "--skip-git-repo-check", "--json", "-"}:
             position += 1
         else:
             raise ValueError("unsupported Codex argument")

@@ -294,7 +294,7 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
             # Provider populations have independent clocks and workers.  Keep
             # every native fallback available so a broken ChatGPT route cannot
             # prevent Gemini, Claude, or Anthropic from repairing it.
-            "chatgpt.com,gemini.com,claude.com,anthropic.com",
+            "chatgpt.com,gemini.com,claude.com,anthropic.com,codex.research",
         ).split(",")
         if value.strip()
     }
@@ -350,13 +350,15 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
         candidates[0],
     )
     provider_worker = HERE / "cognilode-provider-queue-actuator"
-    if provider_worker.is_file() and computerusex.is_dir():
+    if provider_worker.is_file():
         interpreter = Path(CLI.rsplit("/", 1)[0] + "/python")
         pythonpath = str(computerusex)
         inherited = os.environ.get("PYTHONPATH", "")
         if inherited:
             pythonpath += os.pathsep + inherited
-        for provider in ("chatgpt.com", "gemini.com", "anthropic.com", "claude.com"):
+        for provider in ("chatgpt.com", "gemini.com", "anthropic.com", "claude.com", "codex.research"):
+            if provider != "codex.research" and not computerusex.is_dir():
+                continue
             # The acceptance process unlocks these workers one at a time.
             # Listing all four here is safe because `_onboarding_ready` keeps
             # later platforms incapable of consuming unrelated queued work

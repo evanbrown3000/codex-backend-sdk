@@ -249,6 +249,7 @@ services:
       - company_auth:/home/worker/.codex
       - company_browser:/custody/browser:ro
       - company_codex_release:/codex:ro
+      - company_codex_exec:/codex-exec
       - company_operator:/home/worker/.config/cognilode:ro
       - ${COMPANY_RUNTIME_ROOT}/worker:/home/worker/.local/share/cognilode
       - ${COMPANY_RUNTIME_ROOT}/shared:/runtime
@@ -334,7 +335,7 @@ services:
       # The provider population is desired state, not a host bootstrap option.
       # A stale host override previously collapsed this back to ChatGPT-only
       # and made the independent Gemini/Claude/Anthropic queues inert.
-      COGNILODE_HOSTED_RHYTHM_PROVIDERS: "chatgpt.com,gemini.com,claude.com,anthropic.com"
+      COGNILODE_HOSTED_RHYTHM_PROVIDERS: "chatgpt.com,gemini.com,claude.com,anthropic.com,codex.research"
       # The centrally-custodied provider browser is attached to the company
       # network; provider actuators must never fall back to a host/personal
       # browser on the unrelated Docker bridge.

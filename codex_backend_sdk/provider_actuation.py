@@ -479,9 +479,9 @@ class InstalledCodexResearchAdapter:
         output_file = output_dir / (hashlib.sha256(request.operation_id.encode()).hexdigest() + ".txt")
         args = [sys.executable, str(script), "exec", "--json", "-m", model,
                 "-C", "/runtime", "-o", str(output_file), "-a", "never", "-s", "read-only",
-                "--config", 'model_reasoning_effort="' + effort + '"',
-                "--config", 'model_instructions=""',
-                "--config", 'developer_instructions=""',
+                "-c", 'model_reasoning_effort="' + effort + '"',
+                "-c", 'model_instructions=""',
+                "-c", 'developer_instructions=""',
                 "--skip-git-repo-check", "-"]
         env = os.environ.copy()
         environment_id = str(request.metadata.get("environment_id") or "").strip()

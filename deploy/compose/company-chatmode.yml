@@ -31,7 +31,6 @@ services:
       - company_operator:/home/worker/.config/cognilode:ro
       - company_deploy_custody:/deploy:ro
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
-
   credential-sync:
     tmpfs: *company_aws_cli_cache
     image: ${COGNILODE_WORKSPACE_IMAGE:-cognilode-standard-workspace:2026-09-28}
@@ -83,6 +82,8 @@ services:
       - company_relay_custody:/relay
       - memory_drive_auth:/memory-auth
       - ${AWS_AUTH_ROOT}:/home/worker/.aws:ro
+    ports:
+      - "127.0.0.1:18892:18892"
 
   # The only company browser that may hold provider login state.  Provider
   # adapters receive CDP access to this process after redeeming an opaque

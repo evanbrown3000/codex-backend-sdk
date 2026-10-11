@@ -696,7 +696,8 @@ def provider_transport(job: Mapping[str, Any], attachments: tuple[str, ...],
             parent_message_id=str(job.get("parent_message_id") or "") or None,
             model=str(job.get("model") or "") or None,
             reasoning_effort=str(job.get("reasoning_effort") or "") or None,
-            metadata={"timeout_seconds": turn_timeout, "queue_job_id": str(job["id"])},
+            metadata={"timeout_seconds": turn_timeout, "queue_job_id": str(job["id"]),
+                      "memory_context": "prepared"},
         )
     # Every .com mutation crosses the same custody-resident socket.  Spawning
     # browser-provider brokers as actuator children coupled accepted Gemini,

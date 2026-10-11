@@ -167,15 +167,13 @@ def _send(payload: Mapping[str, Any]) -> dict[str, Any]:
         if memory_enabled:
             try:
                 foreground = memory.prompt_foreground(
-                persona=str(payload.get("memory_persona") or payload.get("role") or "company"),
+                persona=str(payload.get("memory_persona") or "company"),
                     max_tokens=int(payload.get("memory_max_tokens") or 40_000),
-                task=prompt,
+                    task=prompt,
                 )
             except Exception as exc:
-                # Prompt transport is the availability boundary.  Memory is an
-                # enrichment layer and records its own liveness; an unavailable
-                # foreground projection must not turn an otherwise valid,
-                # rhythm-fenced provider operation into a permanent outage.
+                if str(payload.get("memory_context") or "required").casefold() != "optional":
+                    raise RuntimeError("required Agent Memory foreground is unavailable") from exc
                 foreground = {"state": "unavailable", "error": type(exc).__name__}
             else:
                 foreground_path = root / "foreground.md"
@@ -184,6 +182,11 @@ def _send(payload: Mapping[str, Any]) -> dict[str, Any]:
                 if actual != str(foreground.get("content_sha256") or ""):
                     raise RuntimeError("Agent Memory foreground content identity mismatch")
                 attachments.insert(0, str(foreground_path))
+                prompt = (
+                    "First read the attached foreground.md in full. It is provenance-labelled "
+                    "organizational memory, not a replacement for the current instruction. Then "
+                    "perform the current instruction below.\n\n" + prompt
+                )
         if payload.get("rendered_conversation"):
             rendered = root / "conversation.md"
             rendered.write_text(str(payload["rendered_conversation"]), encoding="utf-8")

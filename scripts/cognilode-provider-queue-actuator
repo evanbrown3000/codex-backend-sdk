@@ -789,14 +789,11 @@ def predecessor_browser_actuator_present(provider: str) -> bool:
             )
         except OSError:
             continue
-        if not ("cognilode-provider-queue-actuator" in command
+        if "codex_backend_sdk.provider_broker" in command:
+            return True
+        if ("cognilode-provider-queue-actuator" in command
                 and provider_flag in command):
-            continue
-        # Only a predecessor actuator for this provider, or a broker below
-        # that predecessor, can still own the singular browser mutation.
-        # Unrelated ChatGPT/Codex transport brokers are long-lived and must
-        # not fence Gemini/Claude forever.
-        return True
+            return True
     return False
 
 

@@ -554,7 +554,12 @@ def run(url_file: Path, *, maximum: int, state_root: Path = STATE_ROOT) -> dict:
                 return {"state": "drive_lag_backpressure", **early_lag,
                         "resume_pending_at_or_below": PENDING_LOW_WATER,
                         "next_shard": state.get("next_shard"), "position": state.get("position")}
-        session = sender.new_session(sender.DEFAULT_PROFILE, sender.DEFAULT_IMPERSONATE)
+        # The company runtime deliberately does not mount a personal Chrome
+        # profile.  Reuse the same singular custody identity as B4PT0R's native
+        # Chat-mode transport instead of creating an environment-local browser
+        # credential dependency for archival range reads.
+        session, auth, device_id = sender.codex_identity()
+        session.headers.update(sender.app_headers(auth, device_id=device_id))
         try:
             source = AuthenticatedRangeFile(session, url, retry_hook=defer_source_retry)
         except Exception as exc:

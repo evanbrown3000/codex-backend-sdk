@@ -1139,18 +1139,17 @@ def main() -> int:
                         "environment": args.device_id, "accounts": [account],
                         "providers": {args.provider: {
                             "enabled": backend_ready,
-                            # Gemini is executed by ComputerUseX against the
-                            # singular managed-browser custody profile.  The
-                            # live profile exposes the authenticated Pro model,
-                            # native file input, and response downloads; the
-                            # guest-only declaration prevented the scheduler
-                            # from ever assigning the physical work packets
-                            # those already implemented paths consume.
+                            # Gemini currently runs on the provider's managed
+                            # signed-out surface. ComputerUseX truthfully
+                            # advertises text generation and response-anchor
+                            # collection, but must not claim physical-upload
+                            # work until central browser custody supplies an
+                            # authenticated Google session.
                             "authentication": ("both" if args.provider in {
-                                "chatgpt.com", "codex.research", "gemini.com"
+                                "chatgpt.com", "codex.research"
                             } else "guest"),
                             "attachments": args.provider in {
-                                "chatgpt.com", "codex.research", "gemini.com"
+                                "chatgpt.com", "codex.research"
                             },
                             "artifact_downloads": args.provider in {
                                 "chatgpt.com", "codex.research", "gemini.com"
@@ -1159,7 +1158,12 @@ def main() -> int:
                             "models": (["gpt-5-6-thinking", "gpt-5.6", "gpt-5.6-sol",
                                         "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "auto"]
                                        if args.provider in {"chatgpt.com", "codex.research"}
-                                       else (["gemini-3.1-pro", "auto"]
+                                       else (["gemini-3.1-pro", "gemini", "auto",
+                                              # Provider-neutral historical
+                                              # work used this capability name;
+                                              # the browser receipt retains the
+                                              # actual Gemini Pro selection.
+                                              "gpt-5.6-sol"]
                                              if args.provider == "gemini.com" else [])),
                             "reasoning_modes": ["low", "medium", "high", "xhigh", "max", "extended"],
                             "max_concurrency": max_concurrency,

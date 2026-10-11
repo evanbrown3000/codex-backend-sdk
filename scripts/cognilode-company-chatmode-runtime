@@ -154,6 +154,21 @@ def release_for(source: Path) -> tuple[Path, Path]:
                 str(release / "bin" / "python"), "-m", "pip", "install",
                 "--no-cache-dir", "mcp>=1.0,<2", "filelock>=3.13,<4",
             ], check=True, timeout=300)
+        # The recovered privacy-export adapter is deliberately streaming and
+        # depends on ijson.  Most generations seed site-packages from the
+        # previous immutable release, so changing pyproject metadata alone
+        # does not add a newly required runtime dependency.  Install it into
+        # the candidate release before publishing the completeness marker.
+        if (source / "scripts" / "cognilode-chatmode-export-backfill").is_file():
+            probe = subprocess.run(
+                [str(release / "bin" / "python"), "-c", "import ijson"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            if probe.returncode:
+                subprocess.run([
+                    str(release / "bin" / "python"), "-m", "pip", "install",
+                    "--no-cache-dir", "ijson>=3.2,<4",
+                ], check=True, timeout=300)
         (release / ".complete").write_text(revision + "\n", encoding="utf-8")
     return source / "scripts" / "b4pt0r-com-batch-daemon", release / "bin" / "b4pt0r"
 

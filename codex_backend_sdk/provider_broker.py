@@ -256,6 +256,23 @@ def _send(payload: Mapping[str, Any]) -> dict[str, Any]:
         }
 
 
+
+def _result_metadata(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Carry declared TaskFlow result criteria through the existing provider API.
+
+    For backward compatibility accept policy either at the top level or inside
+    metadata.  Never infer a file requirement from the prompt's prose.
+    """
+    supplied = payload.get("metadata")
+    metadata = dict(supplied) if isinstance(supplied, Mapping) else {}
+    if "result_policy" not in metadata and isinstance(payload.get("result_policy"), Mapping):
+        metadata["result_policy"] = dict(payload["result_policy"])
+    for name in ("required_artifacts", "required_output_names",
+                 "minimum_elapsed_seconds", "minimum_assistant_chars"):
+        if name not in metadata and name in payload:
+            metadata[name] = payload[name]
+    return metadata
+
 def execute(payload: Mapping[str, Any]) -> Any:
     operation = str(payload.get("operation") or "")
     if operation == "managed_control_request":
@@ -391,7 +408,7 @@ def execute(payload: Mapping[str, Any]) -> Any:
             account_id=account_id,
             artifact_directory=str(forwarded.get("artifact_directory") or "") or None,
             parent_operation=parent,
-            metadata=forwarded.get("metadata") if isinstance(forwarded.get("metadata"), Mapping) else {},
+            metadata=_result_metadata(forwarded),
         )
         return _actuator(authority).prompt(request).to_dict()
     if operation == "provider_prompt":
@@ -412,7 +429,7 @@ def execute(payload: Mapping[str, Any]) -> Any:
             account_id=str(payload.get("account_id") or "") or None,
             artifact_directory=str(payload.get("artifact_directory") or "") or None,
             parent_operation=parent,
-            metadata=payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {},
+            metadata=_result_metadata(payload),
         )
         return _actuator(authority).prompt(request).to_dict()
     if operation == "agent_memory_request":

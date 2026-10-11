@@ -130,8 +130,24 @@ def content_generation(current: Path) -> tuple[Path, str] | None:
             dependency = selected.with_name(sibling)
             if dependency.is_file():
                 sources.append(dependency)
+        # Native Gemini/Claude/Anthropic actuation is domain-owned by
+        # ComputerUseX but executes inside this custody process. Its parser,
+        # composer, HAR, and terminal-collection source is therefore part of
+        # the immutable executable closure. Omitting it left a persistent
+        # transport on an old browser adapter even after the synchronized
+        # source and composite release had advanced.
+        computerusex = Path(os.environ.get(
+            "COMPUTERUSEX_SOURCE",
+            "/runtime/source/current/automation-computeruse-vision/src",
+        )) / "computerusex"
+        if computerusex.is_dir():
+            sources.extend(sorted(computerusex.rglob("*.py")))
     for source in sources:
-        digest.update(str(source.relative_to(selected.parent.parent)).encode())
+        try:
+            identity = source.relative_to(selected.parent.parent)
+        except ValueError:
+            identity = source
+        digest.update(str(identity).encode())
         digest.update(source.read_bytes())
     return selected, digest.hexdigest()
 

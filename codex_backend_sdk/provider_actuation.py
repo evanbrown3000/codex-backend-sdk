@@ -616,9 +616,50 @@ class ComputerUseXProviderAdapter:
         """Restore Gemini login inside each operation lease when it expires."""
         if self.provider != "gemini.com":
             return
+        endpoint = os.environ.get("COMPUTERUSEX_CDP_ENDPOINT", "http://127.0.0.1:9333")
+
+        # Gemini actuation deliberately uses ComputerUseX's page-target CDP
+        # transport.  Do the common authenticated-session fast path through
+        # that same narrow transport as well.  Browser-wide Playwright attach
+        # performs Target auto-attachment across unrelated provider tabs and
+        # can remain connected while its initialization blocks for minutes;
+        # that used to consume the complete effect lease before Gemini saw a
+        # prompt.  We retain Playwright below only for the exceptional signed-
+        # out account-chooser mutation.
+        try:
+            from computerusex.raw_cdp_web_agent import CDP, _http_json
+            from urllib.parse import urlsplit
+
+            public = urlsplit(endpoint)
+            targets = [
+                item for item in _http_json(endpoint.rstrip("/") + "/json/list", 5)
+                if item.get("type") == "page"
+                and "gemini.google.com" in str(item.get("url") or "")
+                and item.get("webSocketDebuggerUrl")
+            ]
+            for item in reversed(targets):
+                raw = urlsplit(str(item["webSocketDebuggerUrl"]))
+                socket_url = raw._replace(netloc=public.netloc).geturl()
+                cdp = CDP(socket_url, 10)
+                try:
+                    signed_out = bool(cdp.js("""(()=>{
+                      const exact=(e,t)=>String(e.innerText||e.textContent||'').trim()===t;
+                      return document.body.classList.contains('viewer-signed-out') ||
+                        [...document.querySelectorAll('a[href]')].some(a=>
+                          String(a.href||'').includes('accounts.google.com/ServiceLogin')) ||
+                        [...document.querySelectorAll('button,[role=button]')].some(e=>exact(e,'Sign in'));
+                    })()""", 10))
+                    if not signed_out:
+                        return
+                    break
+                finally:
+                    cdp.close()
+        except Exception:
+            # A missing/unresponsive page needs the restoration path below;
+            # it is not proof that an authenticated browser is available.
+            pass
         from playwright.sync_api import sync_playwright
 
-        endpoint = os.environ.get("COMPUTERUSEX_CDP_ENDPOINT", "http://127.0.0.1:9333")
         with sync_playwright() as playwright:
             browser = playwright.chromium.connect_over_cdp(endpoint)
             if not browser.contexts:

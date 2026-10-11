@@ -220,10 +220,14 @@ def supervise(program: list[str], extra_environment: dict[str, str] | None = Non
     environment = os.environ.copy()
     environment.update(extra_environment or {})
     while not STOP:
-        # The mandated onboarding order is a hard capability gate. Independent
-        # clocks begin only after the preceding platform has produced accepted
-        # prompt, response, upload, duration, and downloaded-artifact proof.
-        while not STOP and not _onboarding_ready(program):
+        # Provider populations are independent fallbacks.  Keep the historical
+        # sequential acceptance gate available for an explicit qualification
+        # run, but never let an unavailable Gemini session suppress a usable
+        # Claude or Anthropic actuator in ordinary production.
+        sequential_onboarding = os.environ.get(
+            "COGNILODE_SEQUENTIAL_PROVIDER_ONBOARDING", "0"
+        ).strip().casefold() in {"1", "true", "yes", "on"}
+        while not STOP and sequential_onboarding and not _onboarding_ready(program):
             time.sleep(5)
         if STOP:
             return

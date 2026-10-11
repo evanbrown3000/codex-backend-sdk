@@ -991,38 +991,24 @@ class UnifiedProviderActuator:
             raise ValueError("leased account differs from requested account")
         adapter = self.adapters[request.provider]
         try:
-            # Every installed and .com worker receives the same task-selected
-            # right-edge foreground.  This lives at the singular actuator so
-            # new provider adapters cannot silently bypass organizational
-            # memory and higher layers do not each reinvent prompt context.
-            with tempfile.TemporaryDirectory(prefix="agent-memory-foreground-") as directory:
-                foreground = AgentMemoryClient(use_broker=False).prompt_foreground(
-                    persona=str(request.metadata.get("memory_persona") or "company"),
-                    max_tokens=int(request.metadata.get("memory_max_tokens") or 40_000),
-                    task=request.prompt,
-                )
-                context = str(foreground.get("context") or "")
-                path = Path(directory) / "AGENT_MEMORY_FOREGROUND.md"
-                path.write_text(context, encoding="utf-8")
-                actual = hashlib.sha256(path.read_bytes()).hexdigest()
-                if actual != str(foreground.get("content_sha256") or ""):
-                    raise RuntimeError("Agent Memory foreground content identity mismatch")
+            prepared = str(request.metadata.get("memory_context") or "") == "prepared"
+            prepared_meta = request.metadata.get("agent_memory_foreground")
+            if prepared:
+                if not isinstance(prepared_meta, Mapping):
+                    raise RuntimeError("prepared Agent Memory foreground metadata is missing")
                 memory_meta = {
-                    "persona_id": foreground.get("persona_id"),
-                    "content_sha256": actual,
-                    "selected_tokens": foreground.get("selected_tokens"),
-                    "foreground_handle": foreground.get("foreground_handle"),
-                    "task_context_handles": list(foreground.get("task_context_handles") or ()),
+                    "persona_id": prepared_meta.get("persona_id"),
+                    "content_sha256": str(prepared_meta.get("content_sha256") or ""),
+                    "selected_tokens": prepared_meta.get("selected_tokens"),
+                    "foreground_handle": prepared_meta.get("foreground_handle"),
+                    "task_context_handles": list(prepared_meta.get("task_context_handles") or ()),
                 }
-                # Record consumption before crossing the provider mutation
-                # boundary. This is not an observability poll: it is the
-                # durable causal edge proving which memory treatment the
-                # worker was actually given for this operation.
-                # Persist the causal edge before mutation, but never make an
-                # auxiliary inventory relay a precondition for the provider
-                # turn.  The durable provider-event outbox is replayed by the
-                # event publisher; a missing edge route must not consume a
-                # rhythm slot without sending the already-authorized prompt.
+                if len(memory_meta["content_sha256"]) != 64:
+                    raise RuntimeError("prepared Agent Memory foreground identity is invalid")
+                # The scheduler-side worker has already attached or inlined
+                # these exact bytes after capability matching. The singular
+                # actuator records their causal use, but must not fetch and
+                # inject the foreground a second time.
                 self.publisher._publish({
                     "schema": "cognilode.provider_foreground_consumption.v1",
                     "kind": "agent_memory.foreground_consumed",
@@ -1036,18 +1022,57 @@ class UnifiedProviderActuator:
                         **memory_meta,
                     },
                 }, require_admission=False)
-                if str(request.metadata.get("memory_context") or "") == "prepared":
-                    # The queue boundary already selected and causally recorded
-                    # this foreground.  In particular, a guest browser device
-                    # may have received it inline because it truthfully
-                    # advertised no file-upload capability.  Do not silently
-                    # manufacture a physical attachment after capability
-                    # matching or duplicate the prompt context.
-                    request = replace(
-                        request,
-                        metadata={**dict(request.metadata), "agent_memory_foreground": memory_meta},
+                request = replace(
+                    request,
+                    metadata={**dict(request.metadata), "agent_memory_foreground": memory_meta},
+                )
+                raw = dict(adapter.prompt(request, custody))
+            else:
+                # Every installed and .com worker receives the same task-selected
+                # right-edge foreground.  This lives at the singular actuator so
+                # new provider adapters cannot silently bypass organizational
+                # memory and higher layers do not each reinvent prompt context.
+                with tempfile.TemporaryDirectory(prefix="agent-memory-foreground-") as directory:
+                    foreground = AgentMemoryClient(use_broker=False).prompt_foreground(
+                        persona=str(request.metadata.get("memory_persona") or "company"),
+                        max_tokens=int(request.metadata.get("memory_max_tokens") or 40_000),
+                        task=request.prompt,
                     )
-                else:
+                    context = str(foreground.get("context") or "")
+                    path = Path(directory) / "AGENT_MEMORY_FOREGROUND.md"
+                    path.write_text(context, encoding="utf-8")
+                    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+                    if actual != str(foreground.get("content_sha256") or ""):
+                        raise RuntimeError("Agent Memory foreground content identity mismatch")
+                    memory_meta = {
+                        "persona_id": foreground.get("persona_id"),
+                        "content_sha256": actual,
+                        "selected_tokens": foreground.get("selected_tokens"),
+                        "foreground_handle": foreground.get("foreground_handle"),
+                        "task_context_handles": list(foreground.get("task_context_handles") or ()),
+                    }
+                    # Record consumption before crossing the provider mutation
+                    # boundary. This is not an observability poll: it is the
+                    # durable causal edge proving which memory treatment the
+                    # worker was actually given for this operation.
+                    # Persist the causal edge before mutation, but never make an
+                    # auxiliary inventory relay a precondition for the provider
+                    # turn.  The durable provider-event outbox is replayed by the
+                    # event publisher; a missing edge route must not consume a
+                    # rhythm slot without sending the already-authorized prompt.
+                    self.publisher._publish({
+                        "schema": "cognilode.provider_foreground_consumption.v1",
+                        "kind": "agent_memory.foreground_consumed",
+                        "source": "b4pt0r-provider-actuator",
+                        "environment_id": os.environ.get("COGNILODE_ENVIRONMENT_ID", ""),
+                        "service": "provider-worker",
+                        "payload": {
+                            "operation_id": request.operation_id,
+                            "provider": request.provider,
+                            "account_id": custody.get("account_id"),
+                            **memory_meta,
+                        },
+                    }, require_admission=False)
                     request = replace(
                         request,
                         prompt=(
@@ -1059,7 +1084,7 @@ class UnifiedProviderActuator:
                         attachments=(str(path), *request.attachments),
                         metadata={**dict(request.metadata), "agent_memory_foreground": memory_meta},
                     )
-                raw = dict(adapter.prompt(request, custody))
+                    raw = dict(adapter.prompt(request, custody))
             accepted = bool(raw.get("provider_acceptance_observed", raw.get("ok")))
             terminal = bool(raw.get("assistant_terminal") or raw.get("terminal")
                             or raw.get("complete_response_read")

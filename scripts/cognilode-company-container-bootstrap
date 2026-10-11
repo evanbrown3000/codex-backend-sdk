@@ -834,11 +834,13 @@ def release_stalled_chatmode_replacement(project: str, runtime: Path) -> bool:
             pass
     print(f"bounded Chatmode replacement: stopping old={old_id} "
           f"preserving created={replacement_id}", flush=True)
-    # Stop only after all provider effects are terminal. Never convert a
-    # Compose timeout into a forced container kill.
+    # Stop only after all provider effects are terminal.  Once the scheduler
+    # reports zero, a two-hour Docker stop blocks the sole reconciler and
+    # strands every already-created successor service.  The old generation is
+    # quiescent at this boundary, so use the ordinary bounded container grace.
     try:
-        subprocess.run(["docker", "stop", "--time", "7200", old_id],
-                       check=True, timeout=7230, stdout=subprocess.DEVNULL)
+        subprocess.run(["docker", "stop", "--time", "30", old_id],
+                       check=True, timeout=60, stdout=subprocess.DEVNULL)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         print(f"Chatmode graceful stop remains pending: {exc}", flush=True)
         return False

@@ -768,7 +768,7 @@ class UnifiedProviderActuator:
                     },
                     conversation_id=conversation_id,
                 ))
-            if artifacts:
+            if terminal and artifacts:
                 event_ids.append(self.publisher.emit(
                     request=request, state="artifacts_collected",
                     payload={"artifacts": artifacts}, conversation_id=conversation_id,
@@ -806,7 +806,7 @@ class UnifiedProviderActuator:
                 state=state,
                 accepted=accepted,
                 terminal=terminal,
-                artifacts_collected=bool(artifacts),
+                artifacts_collected=bool(terminal and artifacts),
                 conversation_id=conversation_id,
                 user_message_id=user_message_id,
                 assistant_message_id=assistant_message_id,

@@ -912,7 +912,7 @@ def reconcile_compose(project: str, runtime: Path, env: dict[str, str]) -> None:
         # digest-only reconciliation would strand custody services in Created
         # forever. Reconcile these critical services from the source-driven
         # supervisor whenever that exact state is observed.
-        for service in ("provider-transport", "returned-product-actuator"):
+        for service in ("provider-browser", "provider-transport", "returned-product-actuator"):
             name = f"{project}-{service}-1"
             state = subprocess.run(["docker", "inspect", "--format", "{{.State.Status}}", name],
                                    capture_output=True, text=True, check=False, timeout=10)

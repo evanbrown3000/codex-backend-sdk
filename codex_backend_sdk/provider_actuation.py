@@ -618,7 +618,7 @@ class ComputerUseXProviderAdapter:
             return
         from playwright.sync_api import sync_playwright
 
-        endpoint = os.environ.get("COMPUTERUSEX_CDP_ENDPOINT", "http://127.0.0.1:9334")
+        endpoint = os.environ.get("COMPUTERUSEX_CDP_ENDPOINT", "http://127.0.0.1:9333")
         with sync_playwright() as playwright:
             browser = playwright.chromium.connect_over_cdp(endpoint)
             if not browser.contexts:

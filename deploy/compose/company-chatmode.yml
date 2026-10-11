@@ -238,7 +238,11 @@ services:
       # host reconciliation defers its replacement until all effect leases
       # reach terminal receipt or their real scheduler expiry.
       COGNILODE_PROVIDER_SCHEDULER_DB: /runtime/provider-scheduler/scheduler.sqlite3
-      COMPUTERUSEX_CDP_ENDPOINT: ${COMPUTERUSEX_CDP_ENDPOINT:-http://127.0.0.1:9334}
+      # Both custody and actuator containers deliberately use host networking.
+      # Connect to Chrome's native loopback CDP socket; proxying upgraded
+      # WebSockets through 9334 caused successful HTTP discovery followed by
+      # silent Runtime.evaluate timeouts.
+      COMPUTERUSEX_CDP_ENDPOINT: ${COMPUTERUSEX_CDP_ENDPOINT:-http://127.0.0.1:9333}
       COGNILODE_PROVIDER_CODEX_RECOVERY: "1"
       COMPUTERUSEX_MODIFIED_CODEX: /codex/bin/codex
       COMPUTERUSEX_CODEX_STATE: /home/worker/.local/share/cognilode/computerusex/modified-codex
@@ -353,7 +357,7 @@ services:
       # The centrally-custodied provider browser is attached to the company
       # network; provider actuators must never fall back to a host/personal
       # browser on the unrelated Docker bridge.
-      COMPUTERUSEX_CDP_ENDPOINT: ${COMPUTERUSEX_CDP_ENDPOINT:-http://127.0.0.1:9334}
+      COMPUTERUSEX_CDP_ENDPOINT: ${COMPUTERUSEX_CDP_ENDPOINT:-http://127.0.0.1:9333}
       AGENT_MEMORY_ENDPOINT: http://127.0.0.1:8098/v1/conversations
       AGENT_MEMORY_INGEST_ENDPOINT: http://127.0.0.1:8098/v1/conversations/ingest
       AGENT_MEMORY_INVENTORY_ENDPOINT: http://127.0.0.1:8098/v1/inventory/events

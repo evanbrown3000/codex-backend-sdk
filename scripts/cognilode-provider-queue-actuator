@@ -122,7 +122,7 @@ def provider_backend_ready(provider: str) -> bool:
         return True
     if provider == "codex.research":
         return Path(os.environ.get("COGNILODE_PROVIDER_SOCKET", "/runtime/provider.sock")).exists()
-    endpoint = os.environ.get("COMPUTERUSEX_CDP_ENDPOINT", "http://provider-browser:9334").rstrip("/")
+    endpoint = os.environ.get("COMPUTERUSEX_CDP_ENDPOINT", "http://127.0.0.1:9333").rstrip("/")
     try:
         with urlopen(endpoint + "/json/version", timeout=2.0) as response:
             return response.status == 200 and bool(response.read(262144))

@@ -88,6 +88,14 @@ def _broker_call(payload: dict, *, timeout: int) -> tuple[int, dict, str]:
     completed = subprocess.run(
         [str(runtime_python()), "-m", "codex_backend_sdk.provider_broker"],
         input=json.dumps(payload, separators=(",", ":")) + "\n", text=True,
+        # `python -m` places the inherited cwd at sys.path[0], ahead of
+        # PYTHONPATH.  The transport itself runs from an immutable generation
+        # checkout, so merely prepending current_backend above still imported
+        # the stale broker/actuator package and made converged source fixes
+        # appear to have no effect.  Enter the selected live source checkout
+        # for this child so that module resolution and the generation-fenced
+        # interpreter agree on the code being executed.
+        cwd=str(current_backend if current_backend.is_dir() else source_root),
         capture_output=True, timeout=timeout, check=False, env=environment,
     )
     try:

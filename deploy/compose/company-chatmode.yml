@@ -261,6 +261,11 @@ services:
       # Read-only task foreground is served from the continuously maintained
       # local projection; all writes remain on the elected central authority.
       AGENT_MEMORY_FOREGROUND_ENDPOINT: http://127.0.0.1:8098/v1/foreground
+      # This service uses host networking.  Universe Storage is published on
+      # the host loopback by its owner compose file; Docker service DNS is not
+      # available here.
+      UNIVERSE_STORAGE_ENDPOINT: http://127.0.0.1:8765
+      UNIVERSE_STORAGE_OPERATOR_PASSWORD_FILE: /home/worker/.config/cognilode/operator-bearer
       PATH: /node-runtime:/usr/bin:/usr/local/bin:/bin
     volumes:
       - ${COMPANY_REPOS_ROOT}:/company:ro

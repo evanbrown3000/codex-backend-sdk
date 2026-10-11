@@ -307,6 +307,7 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
     # supervisor restarts safe; it never downloads the 28-GB archive locally.
     export_backfill = HERE / "cognilode-chatmode-export-backfill"
     export_retirement = HERE / "cognilode-chatmode-export-retirement"
+    export_request = HERE / "cognilode-chatmode-export-request"
     export_url = Path(os.environ.get(
         "COGNILODE_CHATGPT_EXPORT_URL_FILE",
         str(Path.home() / ".local/share/cognilode/b4pt0r-chatmode/privacy-export-url.txt"),
@@ -315,6 +316,8 @@ def native_provider_workers() -> list[tuple[list[str], dict[str, str]]]:
     if export_backfill.is_file() and export_url.is_file():
         workers.append(([interpreter, str(export_backfill), "--url-file", str(export_url),
                          "--max-conversations", "100"], {}))
+    if export_request.is_file():
+        workers.append(([interpreter, str(export_request)], {}))
     if export_retirement.is_file():
         workers.append(([interpreter, str(export_retirement),
                          "--max-conversations", "100"], {}))

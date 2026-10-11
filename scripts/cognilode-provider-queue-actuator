@@ -848,7 +848,7 @@ def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
         browser_provider = str(job.get("provider") or "") in {"gemini.com", "claude.com", "anthropic.com"}
         if browser_provider:
             context = str(foreground.get("context") or "")
-            capacity = int(os.environ.get("COGNILODE_BROWSER_FOREGROUND_CHARS", "20000"))
+            capacity = int(os.environ.get("COGNILODE_BROWSER_FOREGROUND_CHARS", "8000"))
             if len(context) > capacity:
                 # Guest browser surfaces cannot accept a physical foreground
                 # file and their native composer retains only a bounded text

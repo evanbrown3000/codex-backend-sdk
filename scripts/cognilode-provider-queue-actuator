@@ -853,7 +853,7 @@ def process(job: Mapping[str, Any], client: ProviderActuationClient) -> None:
     try:
         foreground, foreground_path = memory_foreground(job)
         job = dict(job)
-        browser_provider = args.provider in {"gemini.com", "claude.com", "anthropic.com"}
+        browser_provider = str(job.get("provider") or "") in {"gemini.com", "claude.com", "anthropic.com"}
         if browser_provider:
             job["prompt"] = (
                 "Read the provenance-labelled organizational memory below as historical context, "
